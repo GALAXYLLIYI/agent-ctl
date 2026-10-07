@@ -148,7 +148,7 @@ def t_manual_footer():
     import datetime
     bad = []
     for f in ("SKILLS.md", "LOG.md"):
-        p = os.path.join(os.environ.get("AGENTCTL_MANUAL_DIR", ""), f)
+        p = os.path.join(r"<工作区>\Documents\agent-manual", f)
         if not os.path.exists(p):
             continue
         raw = open(p, encoding="utf-8").read()
