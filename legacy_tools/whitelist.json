@@ -1,0 +1,46 @@
+{
+  "_关于": "可操作窗口白名单。改这里就能授权新窗口，不用改代码。",
+  "_字段": "process=进程名; class=窗口类名(可为空表示只按进程名匹配); why=为什么放行",
+  "whitelist": [
+    {
+      "process": "notepad.exe",
+      "class": "Notepad",
+      "why": "记事本：框架指定的训练靶"
+    },
+    {
+      "process": "VirtualBoxVM.exe",
+      "class": "Qt680QWindowIcon",
+      "why": "VirtualBox 虚拟机窗口（白名单内是沙箱）"
+    },
+    {
+      "process": "WeChatAppEx.exe",
+      "class": "Chrome_WidgetWin_0",
+      "why": "微信内置浏览器（用户的实操/考试站点跑在这里）"
+    },
+    {
+      "process": "AnythingLLM.exe",
+      "class": "Chrome_WidgetWin_1",
+      "why": "2026-09-23 经用户指示「你申请一下」加入：用控制系统在 AnythingLLM 界面生成一个 API Key，供 DSH / Trae 共享记忆层使用。窗口是本地 Electron 应用，操作范围仅限生成/读取该 Key。 实际窗口类名 Chrome_WidgetWin_1（Electron）。"
+    },
+    {
+      "process": "WorkBuddy.exe",
+      "class": "Chrome_WidgetWin_1",
+      "why": "2026-09-24 经用户指示「动用电脑控制测试」加入：在 WorkBuddy 里跑模型评测套件，对比各模型表现。操作范围仅限：新建会话、输入测试题目、读取输出。"
+    },
+    {
+      "process": "TRAE SOLO CN.exe",
+      "class": "Chrome_WidgetWin_1",
+      "why": "2026-09-24 同上：在 Trae SOLO CN 里跑同一套评测题，横向对比平台+模型。操作范围仅限：新建会话、输入题目、读取输出。"
+    },
+    {
+      "process": "WindowsTerminal.exe",
+      "class": "CASCADIA_HOSTING_WINDOW_CLASS",
+      "why": "2026-09-24 经用户指示「我启动给你，你先申请控制权限」加入：MiMoCode（v0.1.15，Xiaomi）跑在 Windows 终端里，用户要我用控制系统看它界面、在里面切换模型与跑评测题。⚠️ 注意：WindowsTerminal 是共享资源，若用户同时开着别的标签页，我只看标题为 MiMoCode 的那个窗口。操作范围仅限：读该窗口内容、切模型、输入评测题目。"
+    },
+    {
+      "process": "DeepSeek Harness.exe",
+      "class": "Chrome_WidgetWin_1",
+      "why": "2026-09-25 经用户指示「授权电脑控制，它开了，你看看内容怎么样」加入：用户装了 DSH 官方桌面版 v0.1.7-rc.1（官方构建但为测试版，EV 签名已验）。要我读它的界面内容（4 种模式、插件面板含「智能体团队与 Subagent」、回答区的任务式设计）。操作范围仅限：读窗口内容、点开模式/面板菜单查看；**不往里面发消息、不改它的设置**。窗口类名 Chrome_WidgetWin_1（Electron）。"
+    }
+  ]
+}

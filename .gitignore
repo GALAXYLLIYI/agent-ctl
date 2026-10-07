@@ -1,0 +1,111 @@
+# ── 不进仓：构建产物 ──
+# dist 269 MB / build 50 MB。构建出来的，不该在仓库里再存一份。
+dist/
+build/
+*.spec
+!build/*.spec
+
+# ── 绝对不进仓：隐私 ──
+# baseline/ 是另一个项目（dsh-viewer-plugin）的历史快照。
+# 里面有**真实手机号**（含本人的）、对话记录、_auth 状态。
+# 这些不属于本项目，也绝不能发到 GitHub。
+baseline/
+
+# work/ 是开发工作区：每个文件里 4001 处硬编码绝对路径，
+# 还有工具调用统计、guardian 回执、验收临时文件。
+work/
+
+# 根目录的屏幕截图（隐私）
+*.png
+*.jpg
+*.jpeg
+*.bmp
+*.gif
+
+# 临时脚本与本机指针
+probe.py
+build/local_legacy_home.txt
+src/agentctl/panel_pos.json
+
+# ── vendor/ 现在**进仓**（2026-10-07 改）──
+#   以前排除掉，是因为「靠 pip 装就行」。但 PyInstaller 打 exe 时要靠它
+#   （vendor 是 winrt / windows-capture 的预编译轮子，3.4 MB / 80 个文件）。
+#   源码态跑 pip 能补上，可要「克隆下来直接能打包」就得把它放进来。
+#   3.4 MB 不值得为省这点体积牺牲可构建性。
+
+# ── tools/ 只放发布链路那几个，其余一律不进仓 ──
+#   这目录有 100+ 个脚本，绝大多数是开发期的探针和一次性修补
+#   （修RX注释吞行.py / 勘察平台.py / 查路径健康.py …），
+#   里面写死了 <工作区>\... 这类本机路径，还夹着用户自己的工作笔记。
+#   它们是**本地资产**，不是项目资产 —— 留在盘上，git 不收。
+tools/*
+!tools/pack_dist.py
+!tools/verify_dist.py
+!tools/make_legacy_dir.py
+!tools/port_legacy.py
+!tools/scan_legacy.py
+!tools/s5_build.py
+
+# ── 过程资产：留本机，不进仓 ──
+#   tests/          验收脚本，每个都写死 <工作区>\Documents\agent-ctl\...
+#                   在别的机器上根本跑不了（它们本来就是自测脚本）。
+#   docs/证据/      验收输出、探针结果，含本机绝对路径和当时的页面截图路径。
+#   docs/详细设计_v1.md / 基线摘要与开工任务书.md
+#                   内部推演过程，含另一个项目的路径。
+#   ★ 不是「有价值所以藏起来」，是「里面的路径换台机器就是错的」。
+#     真要公开，把里面的绝对路径改成占位符再单独提一次。
+tests/
+docs/证据/
+docs/详细设计_v1.md
+docs/基线摘要与开工任务书.md
+docs/测试索引_判据对照.md
+docs/电脑控制_社区路径调研_20261002.md
+docs/视觉线_识别矩阵_评估.md
+verify/
+baseline/
+probe.py
+run-service.bat
+
+# ── legacy_tools/ 进仓，但它的运行产物不进 ──
+#   进仓的是 tools/make_legacy_dir.py 抽出来的 28 个生产脚本（0.21 MB），
+#   baseline/ 那份快照不进（真实手机号、_auth 授权状态）。
+legacy_tools/**/__pycache__/
+legacy_tools/*.log
+legacy_tools/_auth/
+legacy_tools/_digest/
+
+# ── 打包临时文件 ──
+*.zip.tmp
+
+# ── 改前备份：进 git 后历史就是备份 ──
+*.bak*
+*.bak
+*_bak_*
+*_bak
+
+# ── Python ──
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+
+# ── 本机秘密（永远不进仓）──
+.env
+*.local.json
+secrets/
+*_key.json
+*_key.txt
+
+# ── 系统 / 编辑器 ──
+Thumbs.db
+.DS_Store
+desktop.ini
+.vscode/
+.idea/
+
+# ── 注意：截图一律不进仓 ──
+# docs/证据/ 里的 png 是**任务栏、时钟、页面截图**，属于私密，
+# 不是 README 配图。要用的说明图应单独放 docs/images/ 并显式放行。

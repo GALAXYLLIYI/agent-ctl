@@ -1,0 +1,35 @@
+# AgentCtl 运行依赖 —— 由 src/agentctl/_bundled_deps.py 的控制链路反推，不是凭记忆写的。
+#
+# ★ 版本一律用「下限」不锁死上限（>=x.y,<大版本）：
+#   这个平台要在**别人家的机器**上跑，锁死版本等于逼所有人复现我这台机的精确环境。
+#   实测这些包都是纯 Python 或预编译轮子，跨版本 API 稳定；真出问题的概率，
+#   远低于「因为锁版本而在某台机上装不上」的概率。
+#   真要固定环境，请 pip freeze > requirements.lock.txt 自己留档。
+
+# ── Windows 原生接口（窗口枚举、键鼠注入、剪贴板、UIA）──
+pywin32>=312          ; sys_platform == "win32"
+uiautomation>=2.0.20  ; sys_platform == "win32"
+comtypes>=1.2         ; sys_platform == "win32"
+
+# ── 图像 / 采集 ──
+pillow>=10.0
+mss>=9.0
+numpy>=1.24
+
+# ── 其它控制链路依赖 ──
+psutil>=5.9
+websocket-client>=1.7
+zstandard>=0.21
+
+# ── Windows OCR（路线①：系统自带 OCR，不额外下模型）──
+#   ★ vendor/ 里已经内置了这些包，所以装了也不额外占体积；
+#     列出来是为了让 pip 在需要时补齐，而不是让用户手抄一串。
+winrt-Windows.Media.Ocr>=3.2.0        ; sys_platform == "win32"
+winrt-Windows.Graphics.Imaging>=3.2.0  ; sys_platform == "win32"
+winrt-Windows.Storage.Streams>=3.2.0   ; sys_platform == "win32"
+winrt-Windows.Globalization>=3.2.0     ; sys_platform == "win32"
+winrt-Windows.Foundation>=3.2.0        ; sys_platform == "win32"
+
+# ⛔ **故意不列**：opencv-python / matplotlib / python-docx / PyMuPDF
+#   这些是 papers 类一次性脚本用的，不在控制链路上。
+#   列进来会让安装包体积翻几倍（opencv 单独就 60+ MB），而控制链路一个都不用。
