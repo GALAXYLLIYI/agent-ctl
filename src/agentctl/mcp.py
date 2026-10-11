@@ -73,6 +73,9 @@ def handle(msg: dict):
 
 
 def main() -> int:
+    # ★ P0（2026-10-10）：本进程是同步主循环 —— 一个 tools/call 卡住，同一连接后续全部排队
+    #   （D17 C 层结论）。标记渠道后，rc=7 弹窗等待用 20s 短上限（core.CHANNEL 注释）。
+    core.CHANNEL = "mcp"
     sys.stderr.write("[mcp] AgentCtl stdio server 启动\n")
     for line in sys.stdin:
         line = line.strip()

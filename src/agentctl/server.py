@@ -40,9 +40,14 @@ ROUTES = {
     "/v1/witness": "ctl_witness",
     "/v1/replay": "ctl_replay",
     "/v1/record": "ctl_record",
+    # ★ 2026-10-07 顺手补：这两个契约里有、文档里写了，路由却漏了 ——
+    #   走 HTTP 的 agent 根本调不到。老坑，不是这次改动引入的。
+    "/v1/wait": "ctl_wait",
+    "/v1/task": "ctl_task",
     "/v1/perceive/windows": "ctl_windows",
     "/v1/perceive/shot": "ctl_shot",
     "/v1/perceive/tree": "ctl_tree",
+    "/v1/perceive/find": "ctl_find",   # 2026-10-07：加了工具必须同时加路由，否则 HTTP 到不了
     "/v1/act/click": "ctl_click",
     "/v1/act/type": "ctl_type",
     "/v1/act/fill": "ctl_fill",

@@ -1,4 +1,134 @@
 # -*- coding: utf-8 -*-
+# ═══════════════ ② 启动自检：一次报全所有缺失项（2026-10-10 派单·效率优化②）═══════════════
+# 为什么这段必须放在**任何业务 import 之前**、且**不能分散在若干 try 里**：
+#   真源旧版把 `import win32gui` 直接写在文件顶部 —— 用托管 Python（没有 pywin32）跑，
+#   第 1 行就 `ModuleNotFoundError: No module named 'win32gui'`；等装上 pywin32 再跑，
+#   第 2 遍才报 `tkinter` 缺失。**两次失败各报一项**，调用方要跑两轮才知道缺什么。
+#   这与"15 分 16 秒里 8 个低级错"的现场完全同源：工具本该一次说清。
+#
+# 本段只做三件事，全部用标准库：
+#   ① 探测宿主是否 Windows；② 探测解释器是否系统 Python（不是托管/沙箱解释器）；
+#   ③ 探测 pywin32 与 tkinter 是否可导入。
+# 结果汇总进 _SELFTEST，**缺失项一次全列**，然后由 _selftest_or_die() 统一拦住。
+import os as _os
+import sys as _sys
+
+# 托管 Python 的路径特征（本机实测）：
+#   托管：<用户目录>\.workbuddy\binaries\python\versions\<ver>\python.exe
+#   系统：<用户目录>\AppData\Local\Programs\Python\Python312\python.exe
+# 判据用「路径里有没有 .workbuddy\binaries\python」而不是「版本号」——
+# 版本会变，托管根不会（它是沙箱约定的固定落点）。
+_MANAGED_MARKERS = (".workbuddy" + _os.sep + "binaries" + _os.sep + "python",
+                    ".workbuddy/binaries/python")
+
+
+def _is_managed_python(executable=None):
+    """是不是「托管 Python」（沙箱解释器）。真则缺 pywin32/tkinter 基本是必然。"""
+    p = (executable or _sys.executable or "").replace("/", _os.sep).lower()
+    return any(m.replace("/", _os.sep).lower() in p for m in _MANAGED_MARKERS)
+
+
+def _probe_import(name):
+    """只探测「能否导入」，**不留下副作用**（探测后把已导入的模块名删掉，保持 sys.modules 干净）。"""
+    import importlib.util as _ilu
+    try:
+        if _ilu.find_spec(name) is None:
+            return False, "找不到模块"
+        __import__(name)
+        return True, ""
+    except Exception as e:
+        return False, "%s: %s" % (type(e).__name__, e)
+
+
+def _collect_selftest():
+    """把四项自检一次跑全，返回 (缺失项列表, 通过项列表)。
+
+    缺失项每条都带**可直接执行的下一步**（这是本单 ①/② 的共同要求）。
+    """
+    miss, ok = [], []
+    py = _sys.executable or "(未知)"
+
+    if _sys.platform.startswith("win"):
+        ok.append("宿主=Windows")
+    else:
+        miss.append({
+            "项": "宿主操作系统",
+            "实参": "sys.platform=%r" % (_sys.platform,),
+            "下一步": "本工具只用 Win32 API（SendInput/PrintWindow/UIA），**没有非 Windows 实现**；"
+                      "请在 Windows 上运行。",
+        })
+
+    if _is_managed_python():
+        miss.append({
+            "项": "解释器（用了托管 Python）",
+            "实参": py,
+            "下一步": "改用**系统 Python 3.12**（本机实测可用的那条）：\n"
+                      "        \"<用户目录>\\AppData\\Local\\Programs\\Python\\Python312\\python.exe\" "
+                      "-X utf8 act.py <action> --hwnd N\n"
+                      "      （托管解释器 <用户目录>\\.workbuddy\\binaries\\python\\... 没装 pywin32 与 tkinter，"
+                      "换它跑必然两项都缺。）",
+        })
+    else:
+        ok.append("解释器=非托管（%s）" % py)
+
+    for mod in ("win32gui", "win32api"):
+        good, why = _probe_import(mod)
+        if good:
+            ok.append("pywin32.%s 可导入" % mod)
+    # 只报一次 pywin32（两个子模块任一失败即算缺）
+    if not (_probe_import("win32gui")[0] and _probe_import("win32api")[0]):
+        miss.append({
+            "项": "pywin32（win32gui / win32api）",
+            "实参": "; ".join("%s → %s" % (m, _probe_import(m)[1] or "OK")
+                              for m in ("win32gui", "win32api")),
+            "下一步": "给**上面那个解释器**装 pywin32：\n"
+                      "        \"%s\" -m pip install pywin32\n"
+                      "      装完直接重跑本命令即可（不需要重启终端）。" % py,
+        })
+
+    good, why = _probe_import("tkinter")
+    if good:
+        ok.append("tkinter 可导入")
+    else:
+        miss.append({
+            "项": "tkinter（授权弹窗 auth_popup.py 依赖）",
+            "实参": why,
+            "下一步": "tkinter 随系统 Python 自带；缺失说明当前解释器是**精简/嵌入式版**。"
+                      "请换用完整安装的系统 Python（官方安装包勾选 tcl/tk），"
+                      "本机可用：\"<用户目录>\\AppData\\Local\\Programs\\Python\\Python312\\python.exe\"。",
+        })
+    return miss, ok
+
+
+_SELFTEST_MISS, _SELFTEST_OK = _collect_selftest()
+
+
+def _selftest_or_die(argv=None):
+    """启动闸：缺任何一项 ⇒ **一次报全**并退出（rc=11），不进业务逻辑。
+
+    为什么 rc=11 而不是通用 1：调用方（drill / DSH）要能一眼区分
+    「环境不对」与「动作被拒」。1/2/3/4/5/6/7/8/9 已被既有语义占用。
+    """
+    if not _SELFTEST_MISS:
+        return 0
+    print("=" * 72)
+    print("⛔ act.py 启动自检未通过 —— 缺 %d 项（**一次全列，不必再跑第二遍**）"
+          % len(_SELFTEST_MISS))
+    print("=" * 72)
+    print("  解释器 : %s" % (_sys.executable or "(未知)"))
+    print("  平台   : %s  %s" % (_sys.platform, _sys.version.split()[0]))
+    print()
+    for i, m in enumerate(_SELFTEST_MISS, 1):
+        print("%d) 缺：%s" % (i, m["项"]))
+        print("     实参：%s" % m["实参"])
+        print("     下一步：%s" % m["下一步"])
+        print()
+    if _SELFTEST_OK:
+        print("（已通过：%s）" % "、".join(_SELFTEST_OK))
+    print("=" * 72)
+    return 11
+
+
 """act.py —— 动作层（B 级：点击 / 滚动）
 
 铁律 11 的第 2 档。**动作会改变用户的电脑状态，所以规矩比感知层严得多**：
@@ -8,6 +138,7 @@
   3. **能 Invoke 就绝不点坐标**：UIA 支持 Invoke/SelectionItem 的控件，直接调模式，
      根本不产生鼠标事件 —— 没有坐标，就没有"点错地方"这回事
   4. 只能点坐标时：目标窗口**必须在前台**，且坐标必须落在该窗口矩形内，否则拒绝
+     （**例外**：加 `--post` 走后台投递，那一次不要求前台 —— 见下）
   5. 每次动作前后各留一张目标窗口截图（PrintWindow）+ 控件记录，写 `_auth/act.log`
   6. `--dry-run` 只算不做
 
@@ -15,24 +146,350 @@
   python act.py targets --hwnd N                  # 列出可点的控件（只读，A 级即可）
   python act.py click --hwnd N --name "dsh.txt"    # 按控件名点（优先 UIA）
   python act.py click --hwnd N --xy 1200,800       # 按坐标点（需前台）
+  python act.py click --hwnd N --xy 1200,800 --post  # 后台投递（不抢焦点，按兼容表分档）
   python act.py scroll --hwnd N --amount -3        # 滚动（优先 UIA Scroll）
 """
 import argparse
+import collections
 import ctypes
 import ctypes.wintypes as wt
 import datetime
 import json
 import os
 import sys
+import threading
 import time
-
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import gate                                                # noqa: E402
-import win32gui                                            # noqa: E402
-import win32process                                        # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ACTLOG = os.path.join(HERE, "_auth", "act.log")
+
+# ═════════════ ① 失败信息自带下一步（2026-10-10 派单·效率优化①）═════════════
+# 现场教训（证据：任务执行记录_20261010_7步联动计时.md §三）：
+#   rc=5 出现过 **3 次**（逻辑坐标 vs 物理像素 1 次、快照路径集不一致 1 次、
+#   窗口不在前台 2 次），每次都要人来猜"5 到底指哪个 5"。
+#   同一个错误码承载了三种完全不同的成因 ⇒ 光看码无法回答"我下一步该做什么"。
+#
+# 本段的做法：**拒绝之前先算好证据**，把「现象」升级成「现象 + 可执行的下一步」。
+# 三条设计约束（都不是随手定的）：
+#   1. 建议必须是**可直接粘进终端的命令**，不是"请检查坐标"这种废话；
+#   2. 算不出来的证据要**如实说算不出来**，不许编一个看起来像样的数（见 _dpi_report）；
+#   3. 只在**要拒绝时**才去取这些证据（取 DPI / 枚举快照有耗时），
+#      不能让"正常路径变慢"来换"错误路径变清楚"。
+
+
+def _dpi_report(hwnd=None):
+    """把本轮坐标口径与 DPI 缩放因子一次说清。返回可直接打印的文本行。
+
+    ★ 这里最容易犯的错是**想当然**：以为"设了 PerMonitorV2 就一定是 1.5×"。
+      本机实测：显示器物理 2560×1600，但窗口客户区只有 1902×294 —— 说明存在
+      **系统级缩放**（GetDpiForSystem()=144 ⇒ 150%）。所以缩放因子**必须实测**，
+      而且**逐窗口测**（GetDpiForWindow），跨屏拖窗口时两者会不一致。
+    """
+    lines = []
+    try:
+        sysdpi = int(ctypes.windll.user32.GetDpiForSystem())
+        lines.append("本进程 DPI 感知已声明 = PER_MONITOR_AWARE_V2"
+                     "（act.py:SetProcessDpiAwareness(2)）")
+        lines.append("系统 DPI = %d（缩放 %.0f%%）"
+                     % (sysdpi, sysdpi / 96.0 * 100))
+    except Exception as e:
+        lines.append("系统 DPI 读不到（%s: %s）—— 下面的倍数仅供参考" % (type(e).__name__, e))
+        sysdpi = None
+
+    if hwnd is not None:
+        try:
+            wdpi = int(ctypes.windll.user32.GetDpiForWindow(wt.HWND(int(hwnd))))
+            if wdpi:
+                lines.append("目标窗口 hwnd=%d 的 DPI = %d（缩放 %.0f%%）"
+                             % (int(hwnd), wdpi, wdpi / 96.0 * 100))
+                if sysdpi and wdpi != sysdpi:
+                    lines.append("⚠ 与系统 DPI 不一致（%d ≠ %d）：窗口被拖到了另一块不同缩放的屏幕上"
+                                 % (wdpi, sysdpi))
+            else:
+                lines.append("目标窗口 hwnd=%d 的 GetDpiForWindow 返回 0（窗口可能已销毁）" % int(hwnd))
+        except Exception as e:
+            lines.append("目标窗口 DPI 读不到（%s: %s）" % (type(e).__name__, e))
+
+    lines.append("★ 坐标口径：**act.py 全程用物理像素**；用户在截图/别的工具里量到的"
+                 "多半是**逻辑坐标**。")
+    if sysdpi:
+        f = sysdpi / 96.0
+        lines.append("★ 换算：物理 = 逻辑 × %.2f ；逻辑 = 物理 ÷ %.2f" % (f, f))
+        lines.append("   例：逻辑 (100,200) → 物理 (%d,%d)"
+                     % (round(100 * f), round(200 * f)))
+    lines.append("★ 下一步（三条任选）：")
+    lines.append("   ① 直接改用 targets 给出的「中心」值 —— 它已经是物理像素，别换算：")
+    lines.append("        python -X utf8 act.py targets --hwnd %s --compact"
+                 % (int(hwnd) if hwnd is not None else "<N>"))
+    lines.append("   ② 若你手上只有逻辑坐标，先乘上面的倍数再传 --xy。")
+    lines.append("   ③ 想确认口径，跑一次 dry-run 看它报的窗口矩形与截图里的像素是否吻合：")
+    lines.append("        python -X utf8 act.py click --hwnd %s --xy x,y --dry-run"
+                 % (int(hwnd) if hwnd is not None else "<N>"))
+    return "\n      ".join(lines)
+
+
+def _tell_next(rc, why, hwnd=None, extra=None):
+    """非零 rc 的统一出口：打印「现象」+「下一步」。返回 rc（便于 `return _tell_next(...)`）。
+
+    刻意**不做成异常**：act.py 的既有契约是"返回错误码"（drill / DSH 都按 rc 分支），
+    改成抛异常会打断所有既有调用方。所以这里是"补齐信息"，不是"改变控制流"。
+    """
+    lines = ["⛔ rc=%d：%s" % (rc, why)]
+    if extra:
+        lines.append("   " + str(extra))
+    tip = NEXT_STEP.get(rc)
+    if tip:
+        try:
+            lines.append("   ↪ 下一步：\n      " + tip(hwnd))
+        except Exception as e:                       # 建议生成失败不许拖垮主流程
+            lines.append("   ↪ 下一步：生成建议时出错（%s: %s）；"
+                         "请先跑 `act.py targets --hwnd %s --compact` 看工具看到了什么"
+                         % (type(e).__name__, e, hwnd))
+    else:
+        lines.append("   ↪ 下一步：本错误码（rc=%d）暂无内置建议，"
+                     "请把上面这行原文连同窗口 hwnd=%s 一起回传。" % (rc, hwnd))
+    msg = "\n".join(lines)
+    log(msg)
+    return rc
+
+
+def _cmd_targets(hwnd):
+    return "python -X utf8 act.py targets --hwnd %s --compact" % hwnd
+
+
+def _cmd_read(hwnd):
+    return "python -X utf8 act.py read --hwnd %s" % hwnd
+
+
+# ── ① rc=5「快照类」：快照路径集采集 ────────────────────────────────────────
+# 现场（证据 §三 错 4）：调用方 `snap` 时**忘了传 --paths**，紧接着 `check` 报 rc=5
+#   「前后快照盯的路径集不一致」。工具当时只给了一句现象 —— 调用方得自己回翻
+#   两次 snap 的命令行才知道哪一次漏了。更糟的是：**这条路根本不经过 act.py**，
+#   是 验动作.py 的 check 在判；调用方拿着 act.py 的 rc 表去查，查不到 5 的含义。
+#
+# 本段的做法：act.py 侧**自己采集**"此刻能找到的最近快照与它们的路径集"，
+#   把"缺 --paths"和"前后两侧实际拿到什么"直接摆出来，并给出可粘贴的重拍命令。
+#   采集失败一律如实说失败，**不编造路径集**（同 _dpi_report 的约束 2）。
+#
+# 为什么不去 import 验动作.py：那个模块在 agent-ctl 下、属新线，act.py 属老线；
+#   跨线 import 会把两条线的耦合重新焊死（本单只动 act.py）。所以这里**只读文件**。
+_SNAP_CANDIDATES = (
+    r"<工作区>\Documents\agent-ctl\work",
+    r"<工作区>\Documents\dsh-viewer-plugin\tools\_work",
+    r"<工作区>\Documents\dsh-viewer-plugin\tools",
+)
+
+
+def _snap_dirs():
+    """返回去重后的快照目录候选（只保留真实存在的）。**不递归扫盘**。"""
+    seen, out = set(), []
+    for d in _SNAP_CANDIDATES:
+        try:
+            rp = os.path.realpath(d)
+            if rp in seen or not os.path.isdir(rp):
+                continue
+            seen.add(rp)
+            out.append(rp)
+        except Exception:
+            continue
+    return out
+
+
+def _read_snap(name):
+    """按 tag 名在所有候选目录里找 <tag>.json，返回 (路径, 对象) 或 (None, None)。
+
+    按 **mtime 倒序**取最近的一份 —— 同一 tag 在多个目录都存过时，最近改的才是
+    本次会话真正用的那份。
+    """
+    hits = []
+    for d in _snap_dirs():
+        p = os.path.join(d, str(name) + ".json")
+        try:
+            if os.path.exists(p):
+                hits.append((os.path.getmtime(p), p))
+        except Exception:
+            continue
+    for _mt, p in sorted(hits, reverse=True):
+        try:
+            with open(p, encoding="utf-8") as f:
+                return p, json.load(f)
+        except Exception as e:
+            return p, {"__读失败__": "%s: %s" % (type(e).__name__, e)}
+    return None, None
+
+
+def _declared_paths_of(snap):
+    """快照里声明的 --paths 路径集；无该字段返回 None（=不可比，不是空集）。"""
+    if not isinstance(snap, dict):
+        return None
+    ps = snap.get("paths")
+    if ps is None:
+        return None
+    return sorted({os.path.normcase(os.path.normpath(str(p).strip()))
+                   for p in ps if str(p).strip()})
+
+
+def _snapshot_path_report(tag_before, tag_after, dirs_hint):
+    """① rc=5 快照类：把「缺 --paths 了吗 + 前后两侧实际拿到什么」一次说清。
+
+    返回可直接打印的文本。**任何一项读不到就写读不到**，不猜。
+    """
+    lines = []
+    lines.append("★ 采集：本机能找到的快照目录（只读，不扫盘）")
+    ds = _snap_dirs()
+    if ds:
+        for d in ds:
+            lines.append("     %s" % d)
+    else:
+        lines.append("     **一个候选目录都不存在** —— 快照可能压根没拍过，"
+                     "或目录不在本工具预置的候选里（%s）" % " ；".join(_SNAP_CANDIDATES))
+    lines.append("★ 两侧实际拿到的路径集：")
+    if tag_before is None:
+        lines.append("     before：*没告诉我叫什么* —— 请加 --before <tag>，我才能去读它")
+    if tag_after is None:
+        lines.append("     after ：*没告诉我叫什么* —— 请加 --tag <tag>，我才能去读它")
+    for role, tag in (("before", tag_before), ("after", tag_after)):
+        if tag is None:
+            continue
+        p, snap = _read_snap(tag)
+        if p is None:
+            lines.append("     %-6s tag=%-14s → **找不到** <tag>.json（上面几个目录都翻了）"
+                         " —— 说明这次 snap 没落盘，或 tag 打错" % (role, tag))
+            continue
+        if not isinstance(snap, dict) or "__读失败__" in (snap or {}):
+            lines.append("     %-6s tag=%-14s → %s **读失败**：%s"
+                         % (role, tag, p, (snap or {}).get("__读失败__", "非 JSON 对象")))
+            continue
+        ps = _declared_paths_of(snap)
+        if ps is None:
+            lines.append("     %-6s tag=%-14s → ★**缺 paths 字段**（snap 时没传 --paths，"
+                         "或用了很旧的版本）：%s" % (role, tag, p))
+            lines.append("                「缺字段」= 不可比，**不是**「两边都是空集」—— "
+                         "这正是拒绝判定的原因。")
+        elif not ps:
+            lines.append("     %-6s tag=%-14s → 路径集为**空**（有 paths 字段但一条都没写）：%s"
+                         % (role, tag, p))
+        else:
+            lines.append("     %-6s tag=%-14s → 共 %d 条：%s"
+                         % (role, tag, len(ps), p))
+            for q in ps[:12]:
+                lines.append("                - %s" % q)
+            if len(ps) > 12:
+                lines.append("                … 还有 %d 条" % (len(ps) - 12))
+    lines.append("★ 缺失/不一致 ⇒ 判定无效（rc=5）：这是一条**硬校验**，"
+                 "为的是不再产出「冤枉的 unknown」。")
+    lines.append("★ 下一步（**前后都用同一组 --paths** 重拍，然后重判）：")
+    t1 = tag_before or "before"
+    t2 = tag_after or "after"
+    lines.append("     python -X utf8 验动作.py snap --tag %s --paths \"C:\\路径1;C:\\路径2\" "
+                 "--expect \"<期望谓词>\"" % t1)
+    lines.append("     …做动作…")
+    lines.append("     python -X utf8 验动作.py snap --tag %s --paths \"C:\\路径1;C:\\路径2\"" % t2)
+    lines.append("     python -X utf8 验动作.py check --tag %s --before %s --action <名> --tier B"
+                 % (t2, t1))
+    lines.append("     注：`--paths` 用**分号**分隔，两侧**逐字符相同**才算一致；"
+                 "只盯进程/窗口时可省略 --paths（两侧都不写即视为可比）。")
+    if dirs_hint:
+        lines.append("     提示：本工具默认在 %s 下找 <tag>.json；"
+                     "若你的快照在别处，请 cd 过去再跑，或把目录告诉我。" % dirs_hint)
+    return "\n      ".join(lines)
+
+
+def _quota_line(scope=None):
+    """① rc=8/9 用：把「已用/上限/剩余」直接读出来。
+
+    ★ 这里是**读账本**，不是猜。gate 通过后动作次数已经写回 auth_pass.json，
+      所以此刻读到的就是权威值。读不到就如实说读不到（不编 0）。
+    """
+    try:
+        p = gate._load(gate.PASSFILE, {})
+    except Exception as e:
+        return "额度读不到（%s: %s）—— 请手动查 gate.py --status" % (type(e).__name__, e)
+    if not p:
+        return "账本里没有通行证（未签发或读不到）"
+    n = p.get("acts", 0)
+    limit = p.get("acts_limit") or gate.ACT_LIMIT.get(scope, 20)
+    left = max(0, limit - n)
+    return ("额度：已用 %d / 上限 %d / **剩余 %d**"
+            "（范围「%s」，有效至 %s）"
+            % (n, limit, left, p.get("scope"), p.get("expires")))
+
+
+def _gate_denied(e, hwnd, scope, what, retried=False):
+    """① rc=8/9 的统一出口：把「拒绝原因 + 额度三元组 + 是否失败重试」一次说清。
+
+    现场教训（证据 §三 错 7）：「动作额度用完才发现 —— 20 次里 13 次是失败重试」。
+    当时工具只回了 `rc=8 读选中文本被拒` 一行，既没报剩余额度、也没说
+    "你这张证已经被失败重试吃掉了大半" —— 调用方于是接着重试，直到彻底没钱。
+    """
+    why = str(e)
+    low = why.lower()
+    is_quota = ("次数已用尽" in why) or ("额度" in why) or ("acts_limit" in low)
+    extra = _quota_line(scope if isinstance(scope, str) else None)
+    if is_quota:
+        extra += "\n   ★ 本张证已**耗尽**，本次动作**没有执行**。"
+    if retried:
+        extra += "\n   ★ 本次是**失败重试**消耗的额度（上一次没成功，额度照扣）。"
+    extra += "\n   注：读操作（targets/read）**不扣**动作额度；被扣的是 B/C/D 的真动作。"
+    return _tell_next(9 if not is_quota else 8, f"{what}被拒：{why}", hwnd, extra=extra)
+
+
+# rc → 建议生成函数。**每个非零 rc 都必须在这里有落点**（没有的走 _tell_next 的兜底）。
+NEXT_STEP = {
+    2: lambda h: ("命令行参数不合法。先看用法：\n"
+                  "        python -X utf8 act.py -h\n"
+                  "      最常用的三句：targets / click --name / read"),
+    3: lambda h: ("窗口不在白名单（或踩到了用户授权弹窗）。**不要自己改白名单** —— 那要用户点头。\n"
+                  "      先确认打的是哪个窗口：python -X utf8 win_list.py <关键词>\n"
+                  "      当前名单在：%s\\whitelist.json（改它要用户授权）" % HERE),
+    4: lambda h: ("控件/文档控件没找到。先让工具把**它看到的**列出来，再照着名字点：\n"
+                  "        %s\n"
+                  "      名字要用 targets 里「名称」那一列的**完整前缀**（支持子串匹配）。" % _cmd_targets(h)),
+    5: lambda h: ("坐标 / 快照 / 前台三类共用 rc=5，**先分清你撞的是哪一类**（看上面那条 extra）：\n"
+                  "      · 坐标类 → extra 里已给 DPI 缩放因子与换算；最省事的做法是**别自己换算**，\n"
+                  "          直接用 targets 给出的物理像素中心值：%s\n"
+                  "      · 快照类 → 这是 `验动作.py check` 的硬校验：前后两侧**必须传同一组 --paths**。\n"
+                  "          extra 里已列出「两侧实际拿到的路径集」与缺字段的那一侧；对齐后重拍：\n"
+                  "            python -X utf8 验动作.py snap --tag before --paths \"C:\\a;C:\\b\" --expect \"...\"\n"
+                  "            …做动作…\n"
+                  "            python -X utf8 验动作.py snap --tag after  --paths \"C:\\a;C:\\b\"\n"
+                  "            python -X utf8 验动作.py check --tag after --before before --action <名> --tier B\n"
+                  "          （--paths 用**分号**分隔；只盯进程/窗口时两侧都不写即视为可比。）\n"
+                  "      · 前台类 → act.py 已自动置前（派单 ③）；若仍失败，多半是模态框压着，先关它。\n"
+                  "      跑一条只读命令确认工具看到了什么：%s" % (_cmd_targets(h), _cmd_targets(h))),
+    6: lambda h: ("被模态对话框挡住 / 切前台没成功。**先关掉那个对话框**（它吞掉一切点击），再重试；\n"
+                  "      或者手动把窗口点起来，然后：%s" % _cmd_targets(h)),
+    7: lambda h: ("文档非空，防污染护栏拒绝打字。**两条合规通路，任选一条**：\n"
+                  "      ① 清空后重打（推荐，可逆、可核验）：\n"
+                  "           %s          # 读回当前字符数\n"
+                  "           python -X utf8 act.py keys --hwnd %s --vk 0x41 --ctrl      # Ctrl+A 全选\n"
+                  "           python -X utf8 act.py keys --hwnd %s --vk 0x08 --times 3    # 退格清空\n"
+                  "      ② 换成一张空文档再打（例如记事本 Ctrl+N 新建标签页）。" % (_cmd_read(h), h, h)),
+    8: lambda h: ("动作发出去了但没生效（页面无变化）/ 额度相关问题。\n"
+                  "      先看账本确认是不是**额度耗尽**：python -X utf8 gate.py --status\n"
+                  "      若是额度：请用户重新签发（%s\\auth_popup.py）。\n"
+                  "      若是页面无变化：重跑一次带截图的 dry-run 定位：%s" % (HERE, _cmd_targets(h))),
+    9: lambda h: ("没拿到对应级别的通行证。**不要绕**。先看现状：\n"
+                  "        python -X utf8 gate.py --status\n"
+                  "      再请用户签发（%s\\auth_popup.py）；注意范围串用**英文逗号**分隔，\n"
+                  "      顿号「、」会被当成一个不存在的范围（2026-10-10 实测踩过）。" % HERE),
+    11: lambda h: ("环境自检没过。**上面已经列全了缺什么**（本次只跑了这一轮，不必再跑第二遍）——\n"
+                   "      照「下一步」逐条装上，然后**原命令直接重跑**即可。"),
+}
+
+# ── 启动自检闸（2026-10-10 派单 ②）：**一次报全所有缺失项** ────────────────
+# 自检本体定义在文件最上方（必须在 `import win32gui` 之前跑，否则第 1 项缺失
+# 就会以 ModuleNotFoundError 的形式把进程打死，后面的项根本没机会报）。
+# 这里只负责：**自检没过 ⇒ 立刻拦停**，并且把依赖 import 降到"能 import 就 import"，
+# 保证自检信息能完整打出来（否则第一行就崩，等于没做自检）。
+sys.path.insert(0, HERE)
+if _SELFTEST_MISS:
+    # 缺件：立刻报全并退出，**不进任何业务分支**（连 argparse 都不进）
+    raise SystemExit(_selftest_or_die())
+
+import gate                                                # noqa: E402
+import win32gui                                            # noqa: E402
+import win32process                                        # noqa: E402
 
 # ── DPI 感知：**必须在读任何窗口坐标之前声明**（2026-09-19 18:45 补）
 #    框架 §7 明文：「perceive.py / act.py 一律 SetProcessDpiAwareness(2)，坐标统一在物理像素口径」。
@@ -75,13 +532,28 @@ def _load_whitelist():
     try:
         with open(p, encoding="utf-8") as f:
             d = _json.load(f)
-        wl = d.get("whitelist") or []
-        out = [{"进程": w.get("process", ""), "类名": w.get("class", "")}
-               for w in wl if w.get("process")]
-        if out:
-            return out
+        if not isinstance(d, dict):
+            return _DEFAULT_WHITELIST
     except Exception:
-        pass
+        return _DEFAULT_WHITELIST
+    wl = d.get("whitelist") or []
+    # ★ 2026-10-10 class 空值语义（Codex 提出两案 / 用户批准一起解决 / 取保守的拒载案）：
+    #   匹配是 process 与 class **精确相等**，class 为空的条目**永远匹配不上** ——
+    #   不报错、不告警，只是让人误以为放行了（ChatGPT.exe 条目 2026-10-09 摘除前
+    #   一直就是这样静默失效的）。一条永远匹配不上的白名单条目是纯负债 ⇒
+    #   加载时就拒，说清是哪条、怎么修。（SystemExit 是 BaseException，
+    #   不会被上面的 except Exception 吞掉；发行包 whitelist 数组为空不受影响。）
+    _bad = [w.get("process") for w in wl
+            if w.get("process") and not (w.get("class") or "").strip()]
+    if _bad:
+        raise SystemExit(
+            "[X] whitelist.json 有 %d 条 class 为空的条目（%s）—— class 留空不会变成"
+            "『只按进程名』，只会永远匹配不上。要放行就填真实窗口类名（用 perceive 查），"
+            "要么删掉该条。拒绝带病加载。" % (len(_bad), ", ".join(_bad)))
+    out = [{"进程": w.get("process", ""), "类名": w.get("class", "")}
+           for w in wl if w.get("process")]
+    if out:
+        return out
     return _DEFAULT_WHITELIST
 
 
@@ -97,6 +569,97 @@ WHITELIST = _load_whitelist()
 BLOCKED_TITLES = ("DSH电脑控制授权",)
 
 user32 = ctypes.windll.user32
+
+# ── PostMessage 后台投递（2026-10-08 新增，工单 T4）──────────────────────
+# 目的：给 B 档的**坐标点击**多一条"不抢前台焦点"的通路 —— 把一次左键的
+#       WM_MOUSEMOVE / WM_LBUTTONDOWN / WM_LBUTTONUP 用 PostMessage 直接投给
+#       目标窗口，既不写系统输入队列，也不调 SetForegroundWindow。
+#
+# ★ 为什么默认关闭、为什么必须先查兼容表（这决定了整条设计的形状）：
+#   WinUI3 / XAML / UWP 打包应用的输入走 CoreInput dispatcher，**只消费系统输入
+#   队列**；raw PostMessage(WM_LBUTTONDOWN/UP) 会被直接丢弃。若不查表就投，
+#   会出现"动作报成功、界面纹丝不动"的**假成功** —— 那比拒绝更危险。
+#   所以：兼容表未登记 或 登记为"不消费" → 一律**回退**原有 SendInput 前台路线，
+#   并输出一行「↩ 已回退：<原因>」（工单 T4 要求 3：回退不许静默）。
+#
+#   兼容表 = 本目录 post_compat.json（按 process + class 登记，实测得出）。
+#   读不到表 = 谁都不认识 = 全部回退（fail-closed，落在安全侧）。
+#
+#   ⚠ UIA 支持 Invoke / SelectionItem 的控件**仍然优先走 UIA** —— 那条路连鼠标
+#     事件都不产生，比投递更干净。--post 只改变"本来就得点坐标"的那一次。
+POST_COMPAT_PATH = os.path.join(HERE, "post_compat.json")
+
+WM_MOUSEMOVE, WM_LBUTTONDOWN, WM_LBUTTONUP, MK_LBUTTON = 0x0200, 0x0201, 0x0202, 0x0001
+
+# WindowFromPoint / ScreenToClient / PostMessageW 收发的都是**指针宽度**的量，
+# ctypes 默认按 c_int 处理会截断 —— 必须显式声明原型（32 位句柄侥幸能跑，
+# 64 位句柄会静默投给错误窗口）。
+user32.WindowFromPoint.restype = wt.HWND
+user32.WindowFromPoint.argtypes = [wt.POINT]
+user32.ScreenToClient.argtypes = [wt.HWND, ctypes.POINTER(wt.POINT)]
+user32.PostMessageW.argtypes = [wt.HWND, wt.UINT, wt.WPARAM, wt.LPARAM]
+
+
+def load_post_compat():
+    """读兼容表 → {(process_lower, class): 条目}。读不到/解析失败 → {}（= 全部回退）。"""
+    import json as _json
+    try:
+        with open(POST_COMPAT_PATH, encoding="utf-8") as f:
+            d = _json.load(f)
+    except Exception:
+        return {}
+    out = {}
+    for e in (d.get("compat") or []):
+        if not isinstance(e, dict):
+            continue
+        p = str(e.get("process") or "").strip().lower()
+        if not p:
+            continue
+        out[(p, str(e.get("class") or "").strip())] = e
+    return out
+
+
+POST_COMPAT = load_post_compat()
+
+
+def post_compat_of(info):
+    """查兼容表 → (状态, 条目)，状态 ∈ {'consumes','refuses','unverified','unknown'}。
+
+    四态是刻意的：**"实测不消费" 与 "还没测过" 是两件事**，不能都用 false 表示 ——
+    否则一张尚未预扫的表会被读成"全都实测过且都不消费"，那就是假证据。
+    post=true→consumes；post=false→refuses；post=null/缺失→unverified；无此条目→unknown。
+
+    两级匹配：先精确 (进程, 类名)；未命中再看 (进程, '') —— class 留空的登记条目
+    表示"该进程只按进程名匹配"，与 whitelist.json 是同一套口径。
+    """
+    pl = (info.get("process") or "").lower()
+    e = POST_COMPAT.get((pl, info.get("class") or ""))
+    if e is None:
+        e = POST_COMPAT.get((pl, ""))
+    if e is None:
+        return "unknown", None
+    st = e.get("post")
+    if st is True:
+        return "consumes", e
+    if st is False:
+        return "refuses", e
+    return "unverified", e
+
+
+def resolve_post(info, post_force=False):
+    """决定这次坐标点击走"后台投递"还是"回退前台"。返回 (用投递吗, 说明)。"""
+    if post_force:
+        return True, "强制后台投递（预扫模式，绕过兼容表）"
+    st, e = post_compat_of(info)
+    why = (e or {}).get("why") or "无说明"
+    who = "%s/%s" % (info.get("process"), info.get("class"))
+    if st == "consumes":
+        return True, f"兼容表：{who} 会消费 PostMessage（{why}）"
+    if st == "refuses":
+        return False, f"兼容表判定 {who} **不消费** PostMessage（{why}）"
+    if st == "unverified":
+        return False, f"{who} 在表里但**尚未实测**（{why}）"
+    return False, f"兼容表未登记 {who}"
 
 
 def log(msg):
@@ -209,6 +772,84 @@ def require_no_modal(hwnd, what):
     return 0
 
 
+# ═════════ ③ 动作前自动置前（2026-10-10 派单·效率优化③）═════════════
+# 现场教训（证据 §三 错 8）："窗口丢前台就开拖 ⇒ 两次 rc=5"。
+#   旧实现的动作是「不在前台 ⇒ 拒绝」，把"把窗口弄到前台"这件**机械的事**
+#   推给了调用方。调用方（drill / 模型）于是要先 focus 一次、再重试动作 ——
+#   两次调用、两次过闸、两次额度，其中一次注定失败。
+#
+# 改成：**先自己试一次置前，成功就继续做动作**；只有真置不上才拒绝。
+# 三条边界（都不是随手定的）：
+#   1. 置前是**动作**（会改用户桌面状态）⇒ 仍然要有该级别的证；
+#      走 require_note 传同一张证，**不额外扣一次动作额度**（同一次动作，不是两次）。
+#   2. `--post`（后台投递）的语义就是**不抢前台** ⇒ 那条路**绝不置前**，
+#      否则把整个 T4 设计的立足点拆了。
+#   3. `--dry-run` 不置前（演练不许改状态）；但要如实报"真跑会置前"。
+#
+# 为什么不用 `_force_foreground` 那种强抢：阶段一已裁决为「废」——
+#   AttachThreadInput + BringWindowToTop 会抢走用户正在打字的焦点，
+#   且抢不到时会留下输入队列脏状态。这里只用最温和的 SW_RESTORE + SetForegroundWindow，
+#   失败就如实拒绝（fail-closed），不升级手段。
+FOREGROUND_SWITCH_TIMEOUT = 0.9      # SetForegroundWindow 之后给窗口的生效时间
+
+
+def _try_foreground(hwnd, what, dry=False):
+    """把目标窗口弄到前台。返回 (现在是否在前台, 做了什么说明)。
+
+    不做任何强抢（不 AttachThreadInput、不发 ALT 假键）——
+    抢不来就承认抢不来，交给调用方决定，而不是用副作用更大的手段硬上。
+    """
+    h = int(hwnd)
+    notes = []
+    if win32gui.GetForegroundWindow() == h:
+        return True, "本来就在前台"
+    if dry:
+        return False, "演练：**未置前**（真跑时会先 SW_RESTORE + SetForegroundWindow）"
+    try:
+        if user32.IsIconic(wt.HWND(h)):
+            notes.append("窗口处于最小化 → SW_RESTORE")
+        user32.ShowWindow(wt.HWND(h), 9)          # SW_RESTORE
+    except Exception as e:
+        notes.append("ShowWindow 失败(%s)" % type(e).__name__)
+    try:
+        user32.SetForegroundWindow(wt.HWND(h))
+        notes.append("SetForegroundWindow")
+    except Exception as e:
+        notes.append("SetForegroundWindow 失败(%s)" % type(e).__name__)
+    time.sleep(FOREGROUND_SWITCH_TIMEOUT)
+    fg = win32gui.GetForegroundWindow() == h
+    if not fg:
+        try:
+            cur = win32gui.GetForegroundWindow()
+            cur_t = win32gui.GetWindowText(cur) or "(无标题)"
+            notes.append("现前台仍是 hwnd=%d「%s」" % (cur, cur_t[:30]))
+        except Exception:
+            pass
+    return fg, "；".join(notes) or "未做任何操作"
+
+
+def ensure_foreground(hwnd, what, note="", dry=False):
+    """③ 统一入口：动作前保证目标在前台。
+
+    返回 0 = 已在前台（可继续动作）；非零 = 拒绝码（5=置前失败，9=无证）。
+    **注意**：本函数在真正置前时**不额外过闸计数** —— 它是同一次动作的一部分。
+    但"置前"本身是动作，所以照旧要求调用方已经拿到对应级别的证（note 仅用于日志）。
+    """
+    fg = win32gui.GetForegroundWindow() == hwnd
+    if fg:
+        return 0
+    ok, why = _try_foreground(hwnd, what, dry=dry)
+    if ok:
+        log(f"   ↑ 动作前自动置前成功（{why}）—— 不再因「不在前台」拒绝")
+        return 0
+    if dry:
+        log(f"   （演练）{what}：目标不在前台。{why}")
+        return 0                                   # 演练不因前台拒绝（与旧行为一致）
+    return _tell_next(
+        5, f"{what}：目标窗口不在前台，且**自动置前也没成功**（{why}）",
+        hwnd, extra="目标窗口可能被别的窗口（含「总在最前」）压着，或置前被系统拒。")
+
+
 def check_target(hwnd):
     """白名单 + 敏感窗口检查。返回 (info, 拒绝原因)。"""
     i = win_info(hwnd)
@@ -225,13 +866,43 @@ def check_target(hwnd):
 
 # ─────────────────── UIA ───────────────────
 def _uia(hwnd):
+    # ★ D17 阶段二（慢路径兜底）：`ControlFromHandle` 对**不响应**的窗口会**无限等待**
+    #   （实测 >40s 不返回，只能 kill）。`SetGlobalSearchTimeout(2)` 只管**搜索**，
+    #   管不住这一步 —— 所以这里必须自己加超时。
+    #
+    #   为什么 `hung_guard` 的前置检查还不够（实测踩到的）：`IsHungAppWindow` **只在窗口
+    #   已经被问过、且 5 秒没回答时才返回 1**。一个刚创建、还没人发过消息的窗口返回 0
+    #   ⇒ 前置检查放行 ⇒ `ControlFromHandle` 一发消息就卡。**两个都得有**。
+    #
+    #   取舍：超时后那个 UIA 线程**留在后台卡着**（daemon 线程，进程退出时被直接丢弃）。
+    #   这是刻意的 —— 宁可漏一个卡死线程，也不能让整个 act 挂住。
+    box = {}
+
+    def _grab():
+        # ★ COM 是**每线程**初始化的。新起的线程里必须自己初始化一次，
+        #   否则 ControlFromHandle 直接抛「尚未调用 CoInitialize」（实测踩到了）。
+        try:
+            auto.InitializeUIAutomationInCurrentThread()
+        except Exception:
+            pass
+        try:
+            box["ctrl"] = auto.ControlFromHandle(hwnd)
+        except Exception as e:                      # 记下来，主线程决定怎么办
+            box["err"] = e
+
     import uiautomation as auto
     auto.SetGlobalSearchTimeout(2)
-    try:
-        auto.InitializeUIAutomationInCurrentThread()
-    except Exception:
-        pass
-    return auto, auto.ControlFromHandle(hwnd)
+    th = threading.Thread(target=_grab, daemon=True)
+    th.start()
+    th.join(UIA_HANG_TIMEOUT)
+    if th.is_alive():
+        _HUNG_SEEN.add(int(hwnd))
+        raise _UiATimeout(
+            "UIA 取控件超时 %.1fs（目标窗口多半不响应）—— fail-closed 拒绝，"
+            "不无限等" % UIA_HANG_TIMEOUT)
+    if "err" in box:
+        raise box["err"]
+    return auto, box["ctrl"]
 
 
 def _center(ctrl):
@@ -258,10 +929,18 @@ def _need_perceive(note):
         return False
 
 
-def targets(hwnd, limit=40):
-    """列出可交互的控件（只读，但同样要过闸）。"""
+def targets(hwnd, limit=40, with_geo=False):
+    """列出可交互的控件（只读，但同样要过闸）。
+
+    ★ 返回值形状（2026-10-10 加 ④ 时为兼容而保留）：
+      `with_geo=False`（**默认**）→ 返回 `list`，与改前逐字节一致。
+        drill.py 等既有调用方 `act.targets(hwnd, limit=80)` 照旧拿到列表。
+      `with_geo=True` → 返回 `(可点控件列表, 全树几何列表)`，供 ④ 推断带状区。
+    **默认不改形状**是刻意的：为了加一个输出字段而改掉函数返回类型，
+    等于把所有既有调用方一起打破（drill.py 就有两处）。
+    """
     if not _need_perceive("列可点控件"):
-        return []
+        return ([], []) if with_geo else []
     auto, root = _uia(hwnd)
     out = []
 
@@ -291,7 +970,36 @@ def targets(hwnd, limit=40):
             pass
 
     walk(root)
-    return out
+    if not with_geo:
+        return out
+    # ★ ④：把"哪条带能拖、哪条带是内容"一并交出去。
+    #   上面 walk 只收「有交互模式且有名字」的控件 —— 而**标签页行/菜单栏这种
+    #   占位带往往没有名字**（实测 TabControl/AppBarControl 都是 Name=''），
+    #   所以这里**另做一遍全树几何扫描**，专收"压在最上面的那条带"。
+    #   两遍口径不同，刻意不合并：合并会让"可点控件"清单被无名控件污染。
+    geo = []
+    try:
+        _scan_all_geometry(root, geo, 0, 8)
+    except Exception:
+        geo = []
+    return out, geo
+
+
+def _scan_all_geometry(c, acc, d=0, maxd=8):
+    """第二遍扫描：**不筛模式、不筛名字**，只收几何 —— 专供 ④ 的带状区推断。"""
+    if d > maxd:
+        return
+    try:
+        r = c.BoundingRectangle
+        rect = [r.left, r.top, r.right, r.bottom]
+        acc.append({"类型": c.ControlTypeName, "名称": (c.Name or "")[:50], "矩形": rect})
+    except Exception:
+        pass
+    try:
+        for ch in c.GetChildren():
+            _scan_all_geometry(ch, acc, d + 1, maxd)
+    except Exception:
+        pass
 
 
 def _has(ctrl, name):
@@ -299,6 +1007,181 @@ def _has(ctrl, name):
         return getattr(ctrl, "Get" + name + "Pattern")() is not None
     except Exception:
         return False
+
+
+# ═════════ ④ targets 标注「可操作区」（2026-10-10 派单·效率优化④）═════════════
+# 现场教训（证据 §三 错 6）：调用方为了拖窗口，**连试 7 次都点在标签页上**。
+#   根因：Win11 记事本的标题栏**大半被标签页行占了** ——
+#     窗口 rect      = (87,321,2007,624)
+#     标签页行 (Tab) = (156,335,1733,383)   ← 高度 48px，几乎铺满标题栏的可拖带
+#     菜单栏   (Menu)= (96, 383, 1998,433)
+#     正文     (Doc) = (96, 433, 1998,567)
+#   传统直觉"标题栏 y 在窗口顶部 30px 内 ⇒ 可拖"在这里**正好落在标签页上**，
+#   拖拽于是被标签页吃掉（拖成了"移动标签"或"无反应"）。
+#
+# 这件事**只有工具知道**（它读了整棵 UIA 树），调用方靠试是试不出来的 ——
+# 所以由工具把"哪条带能拖、哪条带是内容"直接写进 targets 输出。
+#
+# 判据形状：不猜"标题栏在哪"，而是**从实际控件几何反推**：
+#   顶部第一行可拖带 = 窗口客户区顶边 → 第一个"占位控件"（Tab/菜单/地址栏）的上边
+#   左右可拖带       = 客户区左右边到内容区，宽度 = 窗口边框厚度
+#   是否是"可拖窗口"  = 窗口样式里有 WS_CAPTION | WS_THICKFRAME（无边框窗口不能拖）
+WS_CAPTION = 0x00C00000
+WS_THICKFRAME = 0x00040000
+WS_SYSMENU = 0x00080000
+
+
+def _bands(hwnd, controls):
+    """从窗口几何 + 控件矩形反推三级带状区。返回 dict（可直接进 JSON 输出）。
+
+    全部用**物理像素**（与 targets 里「中心」同一口径）。
+    """
+    out = {
+        "坐标系": "物理像素（与上面各控件的「矩形」「中心」同口径）",
+        "可拖拽判定": "窗口样式含 WS_CAPTION|WS_THICKFRAME 才可拖；无边框窗口拖不动",
+    }
+    try:
+        rect = list(win32gui.GetWindowRect(hwnd))
+    except Exception as e:
+        out["错误"] = "拿不到窗口矩形：%s" % e
+        return out
+    out["窗口矩形"] = rect
+    try:
+        cli = win32gui.GetClientRect(hwnd)
+        cxo, cyo = win32gui.ClientToScreen(hwnd, (0, 0))
+    except Exception:
+        cli, cxo, cyo = None, rect[0], rect[1]
+    out["客户区矩形"] = [cli[0], cli[1], cli[2], cli[3]] if cli else None
+    out["客户区屏幕原点"] = [cxo, cyo]
+    try:
+        st = win32gui.GetWindowLong(hwnd, -16)          # GWL_STYLE
+        ex = win32gui.GetWindowLong(hwnd, -20)          # GWL_EXSTYLE
+        out["窗口样式"] = "STYLE=0x%08X EXSTYLE=0x%08X" % (st, ex)
+        out["可拖拽窗口"] = bool(st & WS_CAPTION and st & WS_THICKFRAME)
+        out["有标题栏"] = bool(st & WS_CAPTION)
+        out["有系统菜单"] = bool(st & WS_SYSMENU)
+        out["有缩放边框"] = bool(st & WS_THICKFRAME)
+    except Exception as e:
+        out["窗口样式"] = "读不到：%s" % e
+        out["可拖拽窗口"] = None
+
+    # ── 顶部占位控件：找出"压在客户区顶部"的那条**带** ──
+    # 判据用 **几何**，不认控件类型名 —— 类型名各应用不同
+    # （TabControl / AppBarControl / EditControl…），几何才是公共语言。
+    #
+    # ★ 两次实测踩到的坑，都记在这里（否则下一个人还会踩）：
+    #   坑一：只按"顶边贴客户区顶边 + 够宽"筛，会把**根 WindowControl** 收进来
+    #        （矩形 = 整个窗口）⇒ 可拖带被算成 303px，把标签页行、菜单栏、正文全包进去。
+    #   坑二：改用"顶边严格贴顶（容差 8px）"来躲坑一 ⇒ **又漏掉了真正的标题栏**：
+    #        记事本窗口顶 y=321、客户区顶 y=321，而标签页行是 y=335——
+    #        真正的可拖带只有 321→335 这 **14px**，它比 8px 容差还宽一点，
+    #        但它对应的控件（Tab Pane）顶边在 335，根本不满足"贴顶"。
+    #
+    # 正确判据（**只按几何，不按类型**）：在客户区里找**最靠上的那条"横向铺开、
+    # 且不贯穿到底"的控件**，把它当作顶部分隔线。它上方的空白带 = 标题栏可拖区。
+    #   · "横向铺开"  = 宽 ≥ 客户区宽 30%
+    #   · "不贯穿到底" = 底边 < 客户区底边 - 8（贯穿的是容器，不是条带）
+    #   · "最靠上"    = 在所有满足前两条的控件里取 top 最小的那个
+    cli_top = cyo + cli[1] if cli else rect[1]
+    cli_bottom = cyo + cli[3] if cli else rect[3]
+    cli_left = cxo + cli[0] if cli else rect[0]
+    cli_right = cxo + cli[2] if cli else rect[2]
+    strip_top = None
+    top_owner = None
+    doc_rect = None
+    content_rect = None
+    for c in controls:
+        r = c.get("矩形") or [0, 0, 0, 0]
+        if (r[2] <= r[0]) or (r[3] <= r[1]):
+            continue                                     # 未渲染（[0,0,0,0]）
+        if c.get("类型") == "DocumentControl":
+            if doc_rect is None or (r[1] < doc_rect[1]):
+                doc_rect = r
+            continue
+        if not cli:
+            continue
+        if ((r[2] - r[0]) >= (cli[2] - cli[0]) * 0.3      # 横向铺得够宽
+                and r[3] < cli_bottom - 8):               # 不贯穿到底（贯穿者为容器）
+            if strip_top is None or r[1] < strip_top:
+                strip_top = r[1]
+                top_owner = {"类型": c.get("类型"), "名称": c.get("名称"), "矩形": r}
+
+    out["顶部占位控件"] = top_owner
+    top_band_bottom = strip_top
+
+    # ── ① 可拖带（上边框）：窗口顶边 → 顶部占位控件的下边 ──
+    # 注意这里用的是**窗口顶边 rect[1]**（不是客户区顶边）——
+    # 真实可拖区从窗口最上沿就算起，客户区顶边以下的第一个像素才是占位控件。
+    # 本机实测记事本：窗口顶 321 / 客户区顶 321（无可见上边框）/ 标签页行 335–383，
+    # 所以可拖带 = [96,321,1998,335]，高 14px —— 与截图里那条细边吻合。
+    if cli and top_band_bottom is not None and top_band_bottom > rect[1]:
+        h = top_band_bottom - rect[1]
+        out["可拖带_上边框"] = {
+            "矩形": [cli_left, rect[1], cli_right, top_band_bottom],
+            "高": h,
+            "说明": "窗口顶边到第一个占位控件（%s「%s」）之间这条带**只属于标题栏**，拖它 = 移动窗口"
+                    % (top_owner["类型"], (top_owner["名称"] or "(无题)")[:24]),
+        }
+    elif cli:
+        out["可拖带_上边框"] = {
+            "矩形": None, "高": 0,
+            "说明": "**没有可用顶部可拖带** —— 占位控件（%s「%s」）顶边已贴到窗口顶边，"
+                    "拖这条带会落在该控件上，不会移动窗口。改用下面的边框带。"
+                    % (top_owner["类型"] if top_owner else "?",
+                       (top_owner.get("名称") or "(无题)")[:24] if top_owner else "?"),
+        }
+    else:
+        out["可拖带_上边框"] = {"矩形": None, "高": 0, "说明": "客户区几何读不到，无法推断"}
+
+    # ── ② 左右/下边框带：厚度 = 客户区与外框的差 ──
+    if cli:
+        left_w = cxo + cli[0] - rect[0]
+        right_w = rect[2] - (cxo + cli[2])
+        bottom_h = rect[3] - (cyo + cli[3])
+        out["边框厚度"] = {"左": left_w, "右": right_w, "下": bottom_h}
+        if left_w > 0:
+            out["可拖带_左边框"] = {"矩形": [rect[0], rect[1], cxo + cli[0], rect[3]], "宽": left_w}
+        if right_w > 0:
+            out["可拖带_右边框"] = {"矩形": [cxo + cli[2], rect[1], rect[2], rect[3]], "宽": right_w}
+        if bottom_h > 0:
+            out["可拖带_下边框"] = {"矩形": [rect[0], cyo + cli[3], rect[2], rect[3]], "高": bottom_h}
+
+    # ── ③ 内容区：最浅的 DocumentControl；没有就用顶部带以下的客户区 ──
+    if doc_rect is not None:
+        content_rect = doc_rect
+        out["内容区"] = {
+            "矩形": doc_rect,
+            "来源": "UIA DocumentControl（可直接 read / type / scroll）",
+        }
+    elif cli and top_band_bottom is not None:
+        content_rect = [cxo + cli[0], top_band_bottom, cxo + cli[2], cyo + cli[3]]
+        out["内容区"] = {
+            "矩形": content_rect,
+            "来源": "无 DocumentControl ⇒ 取顶部占位控件以下的客户区（**内容区未经验证**，仅供拖拽落点参考）",
+        }
+    else:
+        out["内容区"] = {"矩形": None, "来源": "推断不出来（客户区几何缺失）"}
+
+    # ── ④ 拖拽推荐点：上边框正中的一个实际可拖点 + 边框带 ──
+    rec = {}
+    if out.get("可拖带_上边框", {}).get("矩形"):
+        r = out["可拖带_上边框"]["矩形"]
+        rec["拖标题栏"] = [(r[0] + r[2]) // 2, (r[1] + r[3]) // 2]
+    if out.get("可拖带_左边框"):
+        r = out["可拖带_左边框"]["矩形"]
+        rec["拖左边框"] = [(r[0] + r[2]) // 2, (r[1] + r[3]) // 2]
+    if doc_rect:
+        rec["内容区中心"] = [(doc_rect[0] + doc_rect[2]) // 2, (doc_rect[1] + doc_rect[3]) // 2]
+    rec["**别拖这里**"] = (
+        "顶部占位控件（%s「%s」矩形 %s）**不是标题栏** —— 它是窗口最上面那条"
+        "「铺开且不贯穿到底」的控件（Win11 记事本这里是标签页行，资源管理器这里是"
+        "工具栏/标签行）。拖它会落在该控件上，**不会移动窗口**；能拖的只有上面的"
+        "「可拖带」和左右的「边框带」。"
+        % (top_owner["类型"] if top_owner else "?",
+           (top_owner.get("名称") or "(无题)")[:24] if top_owner else "?",
+           top_owner.get("矩形") if top_owner else None))
+    out["拖拽推荐点"] = rec
+    return out
 
 
 def find_control(hwnd, name, max_depth=10):
@@ -367,6 +1250,96 @@ MOUSEEVENTF_MOVE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP = 0x0001, 0x0002, 0x0
 MOUSEEVENTF_WHEEL, WHEEL_DELTA = 0x0800, 120
 INPUT_MOUSE, INPUT_KEYBOARD = 0, 1
 KEYEVENTF_UNICODE, KEYEVENTF_KEYUP = 0x0004, 0x0002
+KEYEVENTF_SCANCODE = 0x0008               # ★ 2026-10-10 新增：带真实扫描码注入
+MAPVK_VK_TO_VSC = 0
+
+
+# ───────────────────── 扫描码注入（2026-10-10 为 VirtualBox 靶新增）─────────
+# 为什么需要这一套（实测出来的，不是推的）：
+#   本文件原有的两条按键路径**都不带硬件扫描码**——
+#     · send_unicode：wVk=0 + KEYEVENTF_UNICODE（wScan 填的是码点，不是 scancode）
+#     · send_vk     ：wScan=0
+#   而 VirtualBox 模拟的是 PS/2 键盘（VBoxManage showvminfo 写明
+#   Keyboard Device: PS/2 Keyboard），PS/2 模型只认扫描码，收到没有扫描码的
+#   事件直接丢弃。表现极具迷惑性：坐标点击能正常穿透 guest，一发按键就全灭，
+#   连 host key（Right Ctrl）都按不动，看起来像「键盘模式没切」。
+#
+# 所以新增这条路径：用 VkKeyScan 查「这个字符要按哪个键、要不要 Shift」，
+# 再用 MapVirtualKey 换真实 scancode，以 KEYEVENTF_SCANCODE 注入。
+#
+# 边界（明写在代码里，别当成万能的）：
+#   · VkKeyScan 换不出的字符（中文、全角符号等）自动回退 UNICODE 路径并记账，
+#     不静默吞掉；
+#   · 这条路径只在显式开启时使用（do_keys/do_type 的 scan_code=True 或命令行
+#     --scan-code），默认行为与改前逐字节一致；
+#   · 走扫描码意味着经过键盘布局与输入法，与 UNICODE 直写码点的语义不同。
+_VkKeyScanW = ctypes.WINFUNCTYPE(
+    ctypes.c_short, ctypes.c_wchar)(("VkKeyScanW", user32))
+_MapVirtualKeyW = ctypes.WINFUNCTYPE(
+    ctypes.c_uint, ctypes.c_uint, ctypes.c_uint)(("MapVirtualKeyW", user32))
+
+
+def send_scan(scancode, down=True):
+    """按真实扫描码注入一次按键（KEYEVENTF_SCANCODE 路径）。
+
+    按 MS 约定：置了 KEYEVENTF_SCANCODE 后 wVk 必须置 0，wScan 才被采用。
+    """
+    flags = KEYEVENTF_SCANCODE | (KEYEVENTF_KEYUP if not down else 0)
+    inp = INPUT(type=INPUT_KEYBOARD,
+                ki=KEYBDINPUT(0, scancode, flags, 0, None))
+    user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
+
+
+def vk_to_scancode(vk):
+    """虚拟键码 → 扫描码；换不出返回 0。"""
+    return _MapVirtualKeyW(vk, MAPVK_VK_TO_VSC)
+
+
+def send_vk_scan(vk, down=True):
+    """send_vk 的扫描码版（快捷键用：Ctrl/Backspace/方向键等）。
+
+    换不出扫描码时回退到 send_vk，并返回 False 告诉调用方「这次没走扫描码」，
+    由上层记账——不静默降级。
+    """
+    sc = vk_to_scancode(vk)
+    if not sc:
+        send_vk(vk, down)
+        return False
+    send_scan(sc, down)
+    return True
+
+
+def send_text_scan(text, gap=0.012):
+    """把一段文本按扫描码逐字符打出去。返回 (走扫描码的字符数, 回退字符列表)。
+
+    用 VkKeyScanW 拿「vk + Shift 状态」：大写字母/符号会要求按住 Shift，
+    这条路径会如实处理，不是只按 A-Z 数字。
+    """
+    shift_sc = vk_to_scancode(0x10)          # VK_SHIFT
+    n = 0
+    fallback = []
+    for ch in text:
+        vks = _VkKeyScanW(ch)
+        if vks == -1:
+            send_unicode(ch)                  # 换不出（如中文）→ 回退原路径
+            fallback.append(ch)
+            continue
+        vk = vks & 0xFF
+        need_shift = bool((vks >> 8) & 1)
+        sc = vk_to_scancode(vk)
+        if not sc:
+            send_unicode(ch)
+            fallback.append(ch)
+            continue
+        if need_shift:
+            send_scan(shift_sc, True)
+        send_scan(sc, True)
+        send_scan(sc, False)
+        if need_shift:
+            send_scan(shift_sc, False)
+        n += 1
+        time.sleep(gap)
+    return n, fallback
 
 
 def send_mouse(flags, x=0, y=0, data=0):
@@ -383,12 +1356,83 @@ def send_unicode(ch):
         user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
 
 
+def send_text(text, gap=0.012, nl="enter"):
+    """按文本逐字发键，但**换行/制表符必须走虚拟键码**。
+
+    2026-10-10 晚实测坑一（记事本，229 → 224 字）：
+    `send_unicode("\\n")` 发出去的是 KEYEVENTF_UNICODE 的码点 0x0A，
+    而 Notepad 这类标准编辑控件只认 WM_KEYDOWN 的 VK_RETURN(0x0D) ——
+    换行被**静默丢弃**，一字不报错，回读才发现少了 5 个换行。
+    （扫描码路径 `send_text_scan` 本身没问题：VkKeyScanW 能把 "\\n" 映射成 0x0D。）
+
+    2026-10-10 晚实测坑二（WorkBuddy 聊天框，1127 字被拆成多条消息自动发出）：
+    换行**一律翻成 VK_RETURN 在聊天框里等于「发送」** —— 一段多行任务文本
+    被每个换行切成一段、每段立刻提交，凭空造出两个垃圾任务在跑。
+    所以换行发什么**必须由调用语境决定**，不能写死：
+
+      nl="enter"       发 VK_RETURN —— 文档/编辑器语境（`do_type` 默认）
+      nl="shift_enter" 发 Shift+VK_RETURN —— 聊天框/表单语境（`do_fill` 默认）
+      nl="space"       换行降级成空格 —— 单行输入框，Enter 会提交表单
+
+    默认值是 "enter" 是为了不改变 `do_type` 的既有行为；
+    **凡是往「输入框」而不是「文档」里打字的，必须显式选 shift_enter 或 space。**
+    """
+    if nl not in ("enter", "shift_enter", "space"):
+        raise ValueError("nl 只能是 enter / shift_enter / space，收到 %r" % (nl,))
+    for ch in text:
+        if ch in ("\n", "\r"):
+            if nl == "enter":
+                send_vk(0x0D)
+            elif nl == "shift_enter":
+                send_vk(0x10, True)      # 按住 Shift
+                send_vk(0x0D)
+                send_vk(0x10, False)
+            else:
+                send_unicode(" ")
+        elif ch == "\t":
+            send_vk(0x09)
+        else:
+            send_unicode(ch)
+        time.sleep(gap)
+
+
 def click_at(x, y):
     user32.SetCursorPos(int(x), int(y))
     time.sleep(0.08)
     send_mouse(MOUSEEVENTF_LEFTDOWN)
     time.sleep(0.05)
     send_mouse(MOUSEEVENTF_LEFTUP)
+
+
+def post_click(hwnd, x, y):
+    """把一次左键点击**后台投递**给**目标窗口 hwnd** 的客户区坐标 (x,y)。
+
+    返回 (投递目标句柄, 客户区坐标, 消息条数, 屏幕点下最深的那层窗口)；异常交给调用方。
+
+    四个要点（每一个踩过都会变成"看着成功其实没点到"）：
+      1. **不抢焦点**：全程不调 SetForegroundWindow、不碰 SetCursorPos，也不产生
+         系统输入事件 —— 这正是这条通路存在的唯一理由（工单 T4 要求 4）。
+      2. **投给目标窗口本身**（工单 T4 原话：「PostMessage … 到**目标窗口**客户区坐标」）。
+         2026-10-08 预扫实测纠偏：先前版本投给 `WindowFromPoint` 找到的最深子窗口，
+         结果在 VirtualBoxVM（Qt6）上**完全无效** —— 实测该窗口整片客户区被一个
+         铺满的子窗口盖住（该子窗口客户区原点就在屏幕 y=0），鼠标消息投进去
+         无人处理，前/后证据图**逐像素相同（0/1172171）**、窗口清单也无新弹窗。
+         投给顶层窗口后即被消费（见 _预扫记录）。所以"最深子窗口"只作**诊断**保留，
+         不再当投递目标 —— 框架型窗口（Qt/WinUI/XAML）的承点是顶层，子窗口是噪音。
+      3. lParam 要用**客户区坐标**（ScreenToClient 换算），不是屏幕坐标 —— 把屏幕
+         坐标塞进 lParam 是这类代码最常见的错，表现是整片点偏。
+      4. 最深子窗口记进返回值第 4 项，写进输出日志的「深点窗口」字段，便于事后复盘
+         "到底点到了谁"；它**不参与**投递，也就不可能因此点偏。
+    """
+    deep = user32.WindowFromPoint(wt.POINT(int(x), int(y))) or hwnd
+    target = hwnd
+    c = wt.POINT(int(x), int(y))
+    if not user32.ScreenToClient(target, ctypes.byref(c)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    lp = ((c.y & 0xFFFF) << 16) | (c.x & 0xFFFF)
+    for msg, wp in ((WM_MOUSEMOVE, 0), (WM_LBUTTONDOWN, MK_LBUTTON), (WM_LBUTTONUP, 0)):
+        user32.PostMessageW(target, msg, wp, lp)
+    return target, (c.x, c.y), 3, deep
 
 
 def drag(from_xy, to_xy, steps=12):
@@ -425,44 +1469,48 @@ def send_vk(vk, down=True):
     user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
 
 
-def do_keys(hwnd, vk=0x41, ctrl=False, times=1, dry=False, wait=0.06):
+def do_keys(hwnd, vk=0x41, ctrl=False, times=1, dry=False, wait=0.06, scan_code=False):
     """C 级：发送虚拟键组合。vk 默认 0x41=Ctrl+A。
 
     ctrl=True 时按"按住 Ctrl → 敲键 → 松开 Ctrl"的顺序；times>1 时连敲（如退格清空）。
+
+    scan_code=True 走**扫描码注入**（VirtualBox 等 PS/2 键盘模拟的目标必需，
+    见 send_text_scan 的注释）。默认 False —— 行为与改前逐字节一致。
     """
     info, why = check_target(hwnd)
     if why:
-        log(f"⛔ 拒绝按键：{why}")
-        return 3
+        return _tell_next(3, why, hwnd, extra="（按键动作 vk=0x%X）" % vk)
     try:
         gate.require(gate.C, f"按键 vk=0x{vk:X} ctrl={ctrl} ×{times}")
     except gate.GateDenied as e:
-        log(f"⛔ 未获授权，不按键：{e}")
-        return 9
-    if not info["foreground"] and not dry:
-        log("⛔ 按键前窗口必须在前台（按键会发给当前焦点）—— 拒绝")
-        return 5
+        return _gate_denied(e, hwnd, gate.C, "按键")
+    # ★ ③ 动作前自动置前（不再因"不在前台"直接拒绝）
+    _fg = ensure_foreground(hwnd, "按键", dry=dry)
+    if _fg:
+        return _fg
     if dry:
         log(f"（演练）⌨ 按键 vk=0x{vk:X} ctrl={ctrl} ×{times}")
         return 0
     before = evidence(hwnd, "before")
+    _send = send_vk_scan if scan_code else send_vk
     if ctrl:
-        send_vk(0x11, True)                 # VK_CONTROL down
+        _send(0x11, True)                   # VK_CONTROL down
         time.sleep(0.03)
     for _ in range(max(1, times)):
-        send_vk(vk, True)
+        _send(vk, True)
         time.sleep(0.02)
-        send_vk(vk, False)
+        _send(vk, False)
         time.sleep(wait)
     if ctrl:
         time.sleep(0.03)
-        send_vk(0x11, False)                # VK_CONTROL up
+        _send(0x11, False)                  # VK_CONTROL up
     time.sleep(0.4)
     after = evidence(hwnd, "after")
     fp0, fp1 = _img_fp(before.get("文件") or ""), _img_fp(after.get("文件") or "")
     changed = None if (fp0 is None or fp1 is None) else (fp1 != fp0)
     ev = "" if changed is None else ("　✔ 页面已变化" if changed else "　⚠ 页面无变化")
-    log(f"⌨ 按键 [vk=0x{vk:X}{' +Ctrl' if ctrl else ''} ×{times}] 窗口「{info['title']}」"
+    log(f"⌨ 按键 [vk=0x{vk:X}{' +Ctrl' if ctrl else ''} ×{times}"
+        f"{' 扫描码' if scan_code else ''}] 窗口「{info['title']}」"
         f"　前图={before.get('文件') or '无'} 后图={after.get('文件') or '无'}" + ev)
     return 0
 
@@ -480,8 +1528,7 @@ def do_fill(hwnd, xy, text, dry=False, clear=True):
     """
     info, why = check_target(hwnd)
     if why:
-        log(f"⛔ 拒绝填字段：{why}")
-        return 3
+        return _tell_next(3, why, hwnd, extra="（填字段动作）")
     _mb = require_no_modal(hwnd, "填字段")
     if _mb:
         return _mb
@@ -492,16 +1539,17 @@ def do_fill(hwnd, xy, text, dry=False, clear=True):
         else:
             gate.require(gate.C, f"填字段 {len(text)} 字")
     except gate.GateDenied as e:
-        log(f"⛔ 未获授权，不填字段：{e}")
-        return 9
+        return _gate_denied(e, hwnd, gate.C, "填字段")
     x, y = xy
     r = info["rect"]
     if not (r[0] <= x <= r[2] and r[1] <= y <= r[3]):
-        log(f"⛔ 坐标 ({x},{y}) 不在窗口矩形 {r} 内 —— 拒绝")
-        return 5
-    if not info["foreground"] and not dry:
-        log("⛔ 填字段前窗口必须在前台（按键会发给当前焦点）—— 拒绝")
-        return 5
+        return _tell_next(
+            5, f"**坐标类**：填字段坐标 ({x},{y}) 不在窗口矩形 {r} 内", hwnd,
+            extra=_dpi_report(hwnd))
+    # ★ ③ 动作前自动置前（不再因"不在前台"直接拒绝）
+    _fg = ensure_foreground(hwnd, "填字段", dry=dry)
+    if _fg:
+        return _fg
     if dry:
         log(f"（演练）⌨ 填字段 坐标({x},{y}) 「{text}」{'（先清空）' if clear else ''}")
         return 0
@@ -519,9 +1567,10 @@ def do_fill(hwnd, xy, text, dry=False, clear=True):
         time.sleep(0.06)
         send_vk(0x11, False)
         time.sleep(0.2)
-    for ch in text:
-        send_unicode(ch)
-        time.sleep(0.012)
+    # 表单/聊天框语境：换行发 Shift+Enter。**绝不能发裸 Enter** ——
+    # 2026-10-10 实测：往 WorkBuddy 聊天框发多行文本，裸 Enter 把 1127 字
+    # 拆成多条消息自动提交，凭空造出两个垃圾任务（见 send_text 的坑二）。
+    send_text(text, nl="shift_enter")
     time.sleep(0.5)
     b1 = evidence(hwnd, "fill1")
     f0, f1 = _img_fp(b0.get("文件") or ""), _img_fp(b1.get("文件") or "")
@@ -563,12 +1612,19 @@ def _img_fp(path):
         return None
 
 
-def do_click(hwnd, name=None, xy=None, dry=False, force_coord=False, retry=1):
-    """force_coord=True：**强制走坐标点击**（考核用，专门练 SendInput 那条退路）。"""
+def do_click(hwnd, name=None, xy=None, dry=False, force_coord=False, retry=1,
+             post=False, post_force=False):
+    """force_coord=True：**强制走坐标点击**（考核用，专门练 SendInput 那条退路）。
+
+    post=True：**后台投递模式** —— 本来要走坐标的那一次点击改用 PostMessage 投给
+    目标窗口，不抢前台焦点；按 post_compat.json 分档，判定不消费/未登记则自动
+    **回退** SendInput 前台路线并在输出留一行原因。
+    post_force=True：后台投递且**跳过兼容表**（仅用于兼容性预扫）。
+    ⚠ 两者都默认关；关掉时本函数行为与改前完全一致（逐字节）。
+    """
     info, why = check_target(hwnd)
     if why:
-        log(f"⛔ 拒绝点击：{why}")
-        return 3
+        return _tell_next(3, why, hwnd, extra="（点击动作 %s）" % (name or xy))
     # 模态对话框前置检查（2026-09-18 新增）：被挡就拒绝，别做出"看着成功其实无效"的动作
     _mb = require_no_modal(hwnd, "点击")
     if _mb:
@@ -580,39 +1636,92 @@ def do_click(hwnd, name=None, xy=None, dry=False, force_coord=False, retry=1):
         else:
             gate.require(gate.B, f"点击 {name or xy}")
     except gate.GateDenied as e:
-        log(f"⛔ 未获授权，不点击：{e}")
-        return 9
+        return _gate_denied(e, hwnd, gate.B, "点击")
 
     before = {} if dry else evidence(hwnd, "before")
     method, detail = None, {}
+    # 后台投递：只有"这次真的要走坐标"时才需要判定，所以判定放在两条坐标路径里，
+    # 由 _try_post() 统一决定「投递」还是「回退」，回退原因当场打出来（不静默）。
+    _post_mode = bool(post or post_force)
+    use_post = False
+
+    # ★ ③ 动作前自动置前 —— **必须放在任何几何/坐标校验之前**。
+    #   2026-10-10 实测踩到的坑：窗口**最小化**时 GetWindowRect 返回哨兵矩形
+    #   [-32000,-32000,-31763,-31961]，于是"坐标不在窗口矩形内"这条校验先炸了，
+    #   rc=5 的坐标类文案盖住了真正的原因（窗口根本没还原）—— 判据③要的是
+    #   "丢到后台再执行必须一次成功"，所以必须**先还原再量**。
+    #   后台投递模式（--post）**绝不置前**：置前会把它"不抢焦点"的立足点拆掉；
+    #   但它也不量坐标（走 PostMessage 客户区坐标），所以不冲突。
+    _restored = False          # 是否刚经历过"还原"（决定要不要重解控件几何）
+    if not use_post and not _post_mode and not dry:
+        try:
+            _restored = bool(ctypes.windll.user32.IsIconic(wt.HWND(int(hwnd))))
+        except Exception:
+            _restored = False
+        _fg = ensure_foreground(hwnd, "点击", dry=dry)
+        if _fg:
+            return _fg
+        before = evidence(hwnd, "before")     # 还原后重新取证（还原前的图是哨兵垃圾像素）
+
+    def _try_post():
+        ok, why = resolve_post(info, post_force)
+        if ok:
+            detail["投递依据"] = why
+            return True
+        log(f"   ↩ 已回退到 SendInput 前台路线：{why}")
+        detail["已回退"] = why     # 也写进 detail，让它出现在最终那条日志的 JSON 里
+        return False
 
     if name:
         c = find_control(hwnd, name)
         if c is None:
-            log(f"⛔ 窗口里找不到名为「{name}」的控件，不做任何动作")
-            return 4
+            return _tell_next(
+                4, f"窗口里找不到名为「{name}」的控件，不做任何动作", hwnd,
+                extra="名字匹配是**子串**匹配（name in 控件名）。先看工具实际看到的控件：\n"
+                      "      " + _cmd_targets(hwnd))
+        # ★ ③ 若函数开头刚做过 SW_RESTORE，控件的 UIA 矩形可能是**还原前**读到的
+        #   （最小化时控件树常报空矩形或哨兵值）—— 重新解析一次控件，拿还原后的几何。
+        #   只在"确实刚还原过"时才重解，正常路径零额外开销。
+        if not dry and _restored:
+            try:
+                c2 = find_control(hwnd, c.Name)
+                if c2 is not None:
+                    c = c2
+            except Exception:
+                pass
         x, y, r, r_ok = _center(c)
         detail = {"控件": c.Name, "类型": c.ControlTypeName, "矩形": r, "中心": [x, y]}
         if (not force_coord) and _has(c, "Invoke"):
             method = "UIA.Invoke（无鼠标事件）"
+            if _post_mode:
+                log("   ℹ --post 未启用：该控件支持 UIA.Invoke，本来就不产生鼠标事件（比投递更干净）")
             if not dry:
                 getattr(c, "GetInvokePattern")().Invoke()
         elif (not force_coord) and _has(c, "SelectionItem"):
             method = "UIA.SelectionItem.Select（无鼠标事件）"
+            if _post_mode:
+                log("   ℹ --post 未启用：该控件支持 UIA.SelectionItem，本来就不产生鼠标事件")
             if not dry:
                 getattr(c, "GetSelectionItemPattern")().Select()
         else:
             # 只能点坐标（或考核强制走坐标）—— 这时矩形必须真实，否则"中心"会算成 (0,0) 点到屏幕左上角
             if not r_ok:
-                log(f"⛔ 控件「{c.Name}」矩形为空（未渲染），只能点坐标时会点到 (0,0) —— 拒绝")
-                return 5
+                return _tell_next(
+                    5, f"**控件未渲染**：控件「{c.Name}」矩形为空([0,0,0,0])，"
+                       f"走坐标路径会点到屏幕左上角 (0,0)", hwnd,
+                    extra="这类控件（虚拟化列表项、未滚动到的标签页）必须先滚动进视野；\n"
+                          "      或改用支持 UIA 的同类控件（targets 里「已渲染」字段为 true 的那些）。\n"
+                          "      下一步：" + _cmd_targets(hwnd))
             wrect = win_info(hwnd)["rect"]
             if not (wrect[0] <= x <= wrect[2] and wrect[1] <= y <= wrect[3]):
-                log(f"⛔ 控件中心 ({x},{y}) 不在窗口矩形 {wrect} 内 —— 拒绝")
-                return 5
-            if not info["foreground"] and not dry:
-                log("⛔ 只能点坐标，但目标窗口不在前台 —— 拒绝（会点到别的窗口上）")
-                return 5
+                return _tell_next(
+                    5, f"**坐标类**：控件「{c.Name}」中心 ({x},{y}) 不在窗口矩形 {wrect} 内", hwnd,
+                    extra=_dpi_report(hwnd))
+            if _post_mode:
+                use_post = _try_post()
+            # ★ ③ 置前已在函数开头做过（在坐标校验之前，见那里的注释）——
+            #   这里**不再重复一次**：重复调用会在日志里打两遍"自动置前成功"，
+            #   而且窗口若在此刻被抢走，这里补一次也来不及（下面的反竞态会拦）。
             # 反竞态：标签栏会滚动/有动画，矩形可能在"读到"与"点到"之间变掉 →
             # 要求隔 0.25 秒两次读数**完全一致**才动手，否则宁可不点。
             r1 = r
@@ -621,29 +1730,65 @@ def do_click(hwnd, name=None, xy=None, dry=False, force_coord=False, retry=1):
                 c2 = find_control(hwnd, c.Name) or c
                 x, y, r2, ok2 = _center(c2)
                 if (not ok2) or r2 != r1:
-                    log(f"⛔ 控件矩形不稳定 {r1} → {r2}（界面正在滚动/动画）—— 拒绝点击，避免点错地方")
-                    return 5
-            method = ("SendInput 坐标点击（考核强制）" if force_coord
-                      else "SendInput 坐标点击（该控件不支持 Invoke）")
-            if not dry:
-                click_at(x, y)
+                    return _tell_next(
+                        5, f"**反竞态拒绝**：控件「{c.Name}」矩形不稳定 {r1} → {r2}"
+                           f"（界面正在滚动/动画）", hwnd,
+                        extra="这是刻意设计的护栏：动的手指比读到的坐标慢，宁可不点也不点错。\n"
+                              "      下一步：等界面停下（或先 scroll 到位）再重试；"
+                              "滚动类控件可改用 UIA Scroll（本工具默认就会优先走它）。")
+            if use_post:
+                method = "PostMessage 后台投递（不抢前台焦点）"
+                if not dry:
+                    _tg, _cx, _n, _dp = post_click(hwnd, x, y)
+                    detail["投递目标"] = _tg
+                    detail["客户区坐标"] = [_cx[0], _cx[1]]
+                    detail["深点窗口"] = _dp
+            else:
+                method = ("SendInput 坐标点击（考核强制）" if force_coord
+                          else "SendInput 坐标点击（该控件不支持 Invoke）")
+                if not dry:
+                    click_at(x, y)
         if not r_ok:
             detail["备注"] = "控件未渲染（矩形为空）；本次走 UIA 模式，不涉及坐标"
     else:
         x, y = xy
-        r = info["rect"]
+        # ★ ③ 这里必须**重新取**矩形：函数开头为置前做过 SW_RESTORE，还原前后
+        #   GetWindowRect 差很远（最小化时是 [-32000,…] 哨兵值）。沿用开头那份
+        #   info["rect"] 会把"已还原的窗口"按"最小化的哨兵矩形"去校验，照样报 rc=5。
+        r = win_info(hwnd)["rect"] if not dry else info["rect"]
         if not (r[0] <= x <= r[2] and r[1] <= y <= r[3]):
-            log(f"⛔ 坐标 ({x},{y}) 不在目标窗口矩形 {r} 内 —— 拒绝")
-            return 5
-        if not info["foreground"] and not dry:
-            log("⛔ 坐标点击要求目标窗口在前台，当前不在 —— 拒绝")
-            return 5
-        method = "SendInput 坐标点击"
-        detail = {"坐标": [x, y]}
+            return _tell_next(
+                5, f"**坐标类**：点击坐标 ({x},{y}) 不在目标窗口矩形 {r} 内", hwnd,
+                extra=_dpi_report(hwnd))
+        if _post_mode:
+            use_post = _try_post()
+        if use_post:
+            method = "PostMessage 后台投递（不抢前台焦点）"
+            detail.update({"坐标": [x, y]})
+            if not dry:
+                _tg, _cx, _n, _dp = post_click(hwnd, x, y)
+                detail["投递目标"] = _tg
+                detail["客户区坐标"] = [_cx[0], _cx[1]]
+                detail["深点窗口"] = _dp
+        else:
+            # ★ ③ 置前已在函数开头做过（见那里的注释），这里不再重复。
+            method = "SendInput 坐标点击"
+            detail.update({"坐标": [x, y]})
 
     changed = None
     attempts = 0
-    if not dry and method.startswith("SendInput"):
+    if not dry and use_post:
+        # 后台投递：只比对**一次**，绝不重投 —— 重投在"按钮/菜单项"上等于双击（开了又关），
+        # 会把观察结果搅乱。所以这条路径不走下面的重试循环。
+        # ⚠ 这个信号只是**提示**：WinUI3 这类界面刚还原时有渲染残留，前后图会差几个像素。
+        #   判定"吃不吃投递"要以**功能性判据**（菜单有没有开、标签有没有切）为准。
+        attempts = 1
+        time.sleep(0.45)
+        after = evidence(hwnd, "after")
+        fp0 = _img_fp(before.get("文件") or "")
+        fp1 = _img_fp(after.get("文件") or "")
+        changed = None if (fp0 is None or fp1 is None) else (fp1 != fp0)
+    elif not dry and method.startswith("SendInput"):
         fp0 = _img_fp(before.get("文件") or "")
         while True:
             attempts += 1
@@ -669,6 +1814,8 @@ def do_click(hwnd, name=None, xy=None, dry=False, force_coord=False, retry=1):
         ev += f"　✔ 页面已变化（共点 {attempts} 次）"
     elif changed is False:
         ev += f"　⚠⚠ 页面无变化（点了 {attempts} 次都没反应）—— **别当成功，去核验**"
+        if use_post:
+            ev += "　⚠ 后台投递无反应：该应用很可能不消费 PostMessage（预扫结论候选＝不兼容）"
     if attempts > 1:
         detail["重试次数"] = attempts - 1
     log(f"{'（演练）' if dry else ''}🖱 点击 [{method}] 窗口「{info['title']}」 {json.dumps(detail, ensure_ascii=False)}" + ev)
@@ -691,8 +1838,7 @@ def scroll_pct(hwnd):
 def do_scroll(hwnd, amount, dry=False, force_wheel=False):
     info, why = check_target(hwnd)
     if why:
-        log(f"⛔ 拒绝滚动：{why}")
-        return 3
+        return _tell_next(3, why, hwnd, extra="（滚动动作）")
     # 模态对话框前置检查（2026-09-18 新增）：被挡就拒绝，别做出"看着成功其实无效"的动作
     _mb = require_no_modal(hwnd, "滚动")
     if _mb:
@@ -700,8 +1846,7 @@ def do_scroll(hwnd, amount, dry=False, force_wheel=False):
     try:
         gate.require(gate.B, f"滚动 {amount}")
     except gate.GateDenied as e:
-        log(f"⛔ 未获授权，不滚动：{e}")
-        return 9
+        return _gate_denied(e, hwnd, gate.B, "滚动")
     auto, root = _uia(hwnd)
     # 优先找支持 Scroll 的控件
     target = None
@@ -735,17 +1880,19 @@ def do_scroll(hwnd, amount, dry=False, force_wheel=False):
             return 0
         except Exception as e:
             log(f"   UIA Scroll 不可用（{str(e)[:60]}），改用鼠标滚轮")
-    if not info["foreground"]:
-        log("⛔ 滚轮事件发给光标下的窗口，目标不在前台时不可控 —— 拒绝")
-        return 5
+    # ★ ③ 动作前自动置前：滚轮事件发给**光标下的窗口**，不在前台时不可控
+    _fg = ensure_foreground(hwnd, "滚动(滚轮)", dry=dry)
+    if _fg:
+        return _fg
     x, y, rr, ok_rect = _center(root)
     if not ok_rect:                       # 根控件矩形为空时，退回窗口矩形中心
         r = info["rect"]
         x, y = (r[0] + r[2]) // 2, (r[1] + r[3]) // 2
     r = info["rect"]
     if not (r[0] <= x <= r[2] and r[1] <= y <= r[3]):
-        log(f"⛔ 滚轮落点 ({x},{y}) 不在窗口矩形 {r} 内 —— 拒绝")
-        return 5
+        return _tell_next(
+            5, f"**坐标类**：滚轮落点 ({x},{y}) 不在窗口矩形 {r} 内", hwnd,
+            extra=_dpi_report(hwnd))
     user32.SetCursorPos(x, y)
     time.sleep(0.12)
     if not dry:
@@ -757,27 +1904,93 @@ def do_scroll(hwnd, amount, dry=False, force_wheel=False):
     return 0
 
 
-def doc_control(hwnd):
-    _auto, root = _uia(hwnd)
-    found = []
+# ─────────────────── D17 阶段二（2026-10-10）：无响应窗口前置 fail-closed ──────
+# 根因（事件 #1043，DSH 逐调用计时实测钉死，不是推测）：
+#   `doc_control` → `_uia` → `auto.ControlFromHandle` 对**不响应**（没在抽消息循环）
+#   的窗口会**无限等待** —— 实测 >40s 不返回，只能 kill。
+#   而同一窗口上 `GetWindowText`/`GetClassName` 0.003s、`win_info` 0.085s、
+#   `modal_blocker` 0.026s、`check_target` 0.043s、`IsHungAppWindow` 0.000s **全部秒回**
+#   （Windows 给的是缓存标题）。⇒ 卡点唯一且明确，就落在 UIA 那一步。
+#
+# 危害：闸门**已经放行**了，动作却永远不返回 ⇒ 真遇到无响应的应用，整个 act 会挂住。
+#
+# 修法：**进 UIA 之前**先问一句 `IsHungAppWindow`，命中就 fail-closed 拒绝并留痕。
+#   「不进 UIA」是这件事的关键 —— 进去就出不来了，守卫必须落在 `_uia` 前面。
+_HUNG_SEEN = set()
+UIA_HANG_TIMEOUT = 6.0     # ControlFromHandle 的超时（秒）。6s 够快，
+                           # 又不至于把「慢但正常的大窗口」误判成挂死。
 
-    def walk(c, d=0):
-        if d > 8 or found:
-            return
+
+class _UiATimeout(Exception):
+    pass
+
+
+def is_hung(hwnd):
+    # 该窗口是否「不响应」（没在抽消息）。实测 0.000s，随便问都不卡。
+    try:
+        return bool(user32.IsHungAppWindow(wt.HWND(int(hwnd))))
+    except Exception:
+        return False
+
+
+def hung_guard(hwnd, what="读文档"):
+    """无响应窗口守卫。命中返回 True（**调用方必须据此拒绝**，不要继续往下走）。"""
+    try:
+        h = int(hwnd)
+    except Exception:
+        return False
+    if not is_hung(h):
+        return False
+    _HUNG_SEEN.add(h)
+    log(f"⛔ 目标窗口不响应（IsHungAppWindow=1），**fail-closed 拒绝「{what}」，不进 UIA**"
+        f"（实测 ControlFromHandle 对这种窗口会无限等待 >40s，进去就挂死）")
+    return True
+
+
+DOC_MAX_DEPTH = 12          # 原为 8。**够不到浏览器页面文档**（实测正文在 9–11 层）。
+DOC_MAX_NODES = 5000        # 安全阀：UIA 树超大时别把时间/内存耗死。
+
+
+def doc_control(hwnd):
+    # ★ D17 阶段二守卫：必须在 `_uia` **之前**。见上面 hung_guard 的说明。
+    if hung_guard(hwnd, "取文档控件"):
+        return None
+    _auto, root = _uia(hwnd)
+
+    # ★ A2-F3：改成 **BFS，取「最浅」的 DocumentControl**。
+    #
+    # 为什么不能只把 8 改成 12：原实现是 **DFS + 「找到就全局停」**，拿到的是
+    # 「先序遍历里遇到的第一个」，**不保证是最浅的**。UIA 树里越浅的越可能是
+    # 「这个窗口的正文」（框架性控件），越深的多半是嵌套内容（比如 iframe 内的文档）。
+    # 一旦取错，`read_doc` / `scroll_pct` / `read_selection` **三个核验同时废**
+    # —— 这就是 A2-F3 「一处取错三个全废」的由来。
+    # BFS 天然保证「先找到的就是最浅的」，**加深也不会因此取错**。
+    #
+    # 深度上限的来由：Edge 页面正文实测在 9–11 层，8 不够；12 留一层余量。
+    # 调深容易、调浅不会更安全（只会更早放弃），所以宁深勿浅 —— 但**前提是 BFS**，
+    # 否则深了反而会取错。**这两件事必须一起改，只改数字是危险的。**
+    q = collections.deque([(root, 0)])
+    seen = 0
+    while q:
+        c, d = q.popleft()
+        seen += 1
+        if seen > DOC_MAX_NODES:
+            log(f"⛔ UIA 树已遍历 {seen} 个节点仍未找到文档控件，放弃"
+                f"（上限 {DOC_MAX_NODES}，防在超大树上耗死）")
+            return None
         try:
             if c.ControlTypeName == "DocumentControl":
-                found.append(c)
-                return
+                return c
         except Exception:
             pass
+        if d >= DOC_MAX_DEPTH:
+            continue
         try:
             for ch in c.GetChildren():
-                walk(ch, d + 1)
+                q.append((ch, d + 1))
         except Exception:
             pass
-
-    walk(root)
-    return found[0] if found else None
+    return None
 
 
 def read_doc(hwnd):
@@ -786,7 +1999,14 @@ def read_doc(hwnd):
         return None, None, "未获授权"
     c = doc_control(hwnd)
     if c is None:
-        return None, None, "找不到文本编辑区"
+        # ★ D17：区分「窗口不响应」与「真找不到控件」—— 两者都返回 None，
+        #   但对调用者是完全不同的结论，不能都报成「找不到文本编辑区」。
+        try:
+            hung = int(hwnd) in _HUNG_SEEN
+        except Exception:
+            hung = False
+        return None, None, ("目标窗口不响应（IsHungAppWindow=1），已拒绝读文档"
+                            if hung else "找不到文本编辑区")
     try:
         return c, c.GetValuePattern().Value, "ValuePattern"
     except Exception:
@@ -815,13 +2035,11 @@ def do_focus(hwnd, dry=False):
     """把白名单窗口切到前台（打字/拖拽的前置条件）。属于动作，记 B 级。"""
     info, why = check_target(hwnd)
     if why:
-        log(f"⛔ 拒绝切前台：{why}")
-        return 3
+        return _tell_next(3, why, hwnd, extra="（切前台动作）")
     try:
         gate.require(gate.B, "切前台")
     except gate.GateDenied as e:
-        log(f"⛔ 未获授权，不切前台：{e}")
-        return 9
+        return _gate_denied(e, hwnd, gate.B, "切前台")
     if not dry:
         try:
             user32.ShowWindow(hwnd, 9)            # SW_RESTORE
@@ -837,20 +2055,36 @@ def do_focus(hwnd, dry=False):
     return 0 if (dry or now_fg) else 6
 
 
-def do_type(hwnd, text, dry=False, allow_if_starts_with=None, force_send=False):
+def _norm_nl(s):
+    """核验前统一换行表示。
+
+    2026-10-10 晚实测：记事本 UIA 的 ValuePattern 把换行回读成**孤立的 \\r**
+    （既不是 \\n 也不是 \\r\\n），所以多行文本跟原始输入做**原样**比较必然不相等，
+    do_type 会一路报「❌ 读回不一致」，把人往「打错了」的方向带 ——
+    实测字是全对的（229/229，只有 5 个换行符表示不同）。
+
+    这里**只**放行换行表示这一种差异，其余任何字符不一致照旧判 FAIL。
+    """
+    return s.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def do_type(hwnd, text, dry=False, allow_if_starts_with=None, force_send=False,
+             scan_code=False):
     """C 级：打字（含中文走 Unicode）。
 
     两种模式：
       ① **文档模式**（默认，安全阀拉满）：必须有 UIA 文本区，且**只允许往空文档（或训练靶）打**，
          打完整字符回读核验 —— 防的是"把字打进用户的真实文件"。
-      ② **网页表单模式**（`--force-send`，2026-09-19 新增）：目标没有 UIA 文本区时（微信内置浏览器
-         之类），直接发键。**核验从"UIA 回读"降级为"外部截图"**，并且**没有"空文档"这道保险**
-         —— 所以仅在**用户明确授权的表单填写**场景使用，命令行必须显式写 `--force-send`。
+    ② **网页表单模式**（`--force-send`，2026-09-19 新增）：目标没有 UIA 文本区时（微信内置浏览器
+       之类），直接发键。**核验从"UIA 回读"降级为"外部截图"**，并且**没有"空文档"这道保险**
+       —— 所以仅在**用户明确授权的表单填写**场景使用，命令行必须显式写 `--force-send`。
+
+    scan_code=True（命令行 `--scan-code`）走**扫描码注入**，给 VirtualBox 这类
+    PS/2 键盘模拟的目标用（见 send_text_scan 的注释）。默认 False。
     """
     info, why = check_target(hwnd)
     if why:
-        log(f"⛔ 拒绝打字：{why}")
-        return 3
+        return _tell_next(3, why, hwnd, extra="（打字动作）")
     # 模态对话框前置检查（2026-09-18 新增）：被挡就拒绝，别做出"看着成功其实无效"的动作
     _mb = require_no_modal(hwnd, "打字")
     if _mb:
@@ -858,46 +2092,72 @@ def do_type(hwnd, text, dry=False, allow_if_starts_with=None, force_send=False):
     try:
         gate.require(gate.C, f"打字 {len(text)} 字")
     except gate.GateDenied as e:
-        log(f"⛔ 未获授权，不打字：{e}")
-        return 9
-    if not info["foreground"] and not dry:
-        log("⛔ 打字前窗口必须在前台（按键会发给当前焦点）—— 拒绝")
-        return 5
+        return _gate_denied(e, hwnd, gate.C, "打字")
+    # ★ ③ 动作前自动置前（不再因"不在前台"直接拒绝）
+    _fg = ensure_foreground(hwnd, "打字", dry=dry)
+    if _fg:
+        return _fg
     c, before, how = read_doc(hwnd)
     if before is None and not force_send:
-        log(f"⛔ 打不了字：{how}")
-        return 4
+        return _tell_next(4, f"打不了字：{how}", hwnd,
+                          extra="打字需要 UIA 文本区来做「只往空文档打」的安全阀。\n"
+                                "      若目标确实没有 UIA 文本区（微信内置浏览器之类），"
+                                "才用网页表单模式（**用户须明确授权**）：加 --force-send")
     if before is None and force_send:
         log("⚠ 目标无 UIA 文本区 → 走【网页表单模式】：直接发键，"
             "**不做 UIA 回读核验**，改用前后截图比对（2026-09-19 补，此前是盲打无核验）")
         b0 = {} if dry else evidence(hwnd, "typesend0")
         before = ""
-        for i, ch in enumerate(text):
-            send_unicode(ch)
-            time.sleep(0.012)
+        n_scan, fb_chars = 0, []
+        if scan_code:
+            n_scan, fb_chars = send_text_scan(text)
+        else:
+            send_text(text)
         time.sleep(0.45)
         b1 = {} if dry else evidence(hwnd, "typesend1")
         f0, f1 = _img_fp(b0.get("文件") or ""), _img_fp(b1.get("文件") or "")
         changed = None if (f0 is None or f1 is None) else (f1 != f0)
         ev = "" if changed is None else ("　✔ 页面已变化" if changed else "　⚠⚠ 页面无变化——别当成功，去核验")
         log(f"{'（演练）' if dry else ''}⌨ 打字 [网页表单模式 {len(text)} 字"
+            f"{' 扫描码' if scan_code else ''}"
             f"{'，含中文' if any(ord(x) > 127 for x in text) else ''}] 窗口「{info['title']}」"
             f"　前图={b0.get('文件') or '无'} 后图={b1.get('文件') or '无'}" + ev)
+        if scan_code:
+            log(f"   扫描码注入：{n_scan}/{len(text)} 字符走了扫描码；"
+                f"回退 UNICODE 的字符：{''.join(fb_chars) or '无'}")
         return 0 if (dry or changed is not False) else 8
     # ★ 最关键的一道保险：只往空文档（或带训练标记的靶文档）里打字，绝不可能污染用户的真实文件
     if before.strip() != "" and not (allow_if_starts_with and before.startswith(allow_if_starts_with)):
-        log(f"⛔ 目标文档里已有 {len(before)} 个字符，且不是训练靶 —— 拒绝打字"
-            f"（防止把字打进用户的真实文件里）")
-        return 7
+        # ① rc=7 必须**自带下一步**：报出当前字符数 + 清空命令原文。
+        #   现场（证据 §三 错 4→"改完接着打"）当时只回了"文档非空"，调用方得自己
+        #   摸索出"Ctrl+A + Delete"这条合规通路 —— 那是工具本该给的。
+        first = (before[:40].replace("\n", "␊").replace("\r", "␍"))
+        return _tell_next(
+            7,
+            f"打不了字：目标文档里已有 **{len(before)} 个字符**，且不是训练靶",
+            hwnd,
+            extra=("  文档开头 40 字：「%s」\n"
+                   "  这道护栏防的是「把字打进用户的真实文件里」，**不要绕**。\n"
+                   "  合规清空命令原文（两条都可用，推荐先 read 再清）：\n"
+                   "      %s\n"
+                   "      python -X utf8 act.py keys --hwnd %s --vk 0x41 --ctrl"
+                   "     # Ctrl+A 全选\n"
+                   "      python -X utf8 act.py keys --hwnd %s --vk 0x08 --times 3"
+                   "   # 退格清空（times 给足即可）\n"
+                   "  清完用 %s 验字符数为 0，再重跑本次打字。"
+                   % (first, _cmd_read(hwnd), hwnd, hwnd, _cmd_read(hwnd))))
     if not dry:
-        for ch in text:
-            send_unicode(ch)
-            time.sleep(0.012)
+        send_text(text)
     time.sleep(0.45)
     _, after, _ = read_doc(hwnd)
-    ok = (after == before + text)
-    log(f"{'（演练）' if dry else ''}⌨ 打字 [{len(text)} 字{'（含中文）' if any(ord(x) > 127 for x in text) else ''}] "
-        f"窗口「{info['title']}」 {'✅ 读回逐字符一致' if ok else '❌ 读回不一致'} "
+    want = before + text
+    ok = (after == want) or (_norm_nl(after) == _norm_nl(want))
+    nl_only = (after != want)
+    mark = ("✅ 读回逐字符一致（仅换行表示不同）" if nl_only
+            else "✅ 读回逐字符一致") if ok else "❌ 读回不一致"
+    log(f"{'（演练）' if dry else ''}⌨ 打字 [{len(text)} 字"
+        f"{'（含中文）' if any(ord(x) > 127 for x in text) else ''}] "
+        f"窗口「{info['title']}」 {mark} "
         f"（{len(before)} → {len(after) if after else 'None'} 字）")
     return 0 if (dry or ok) else 8
 
@@ -906,21 +2166,34 @@ def do_drag(hwnd, frm, to, dry=False):
     """D 级：在文本编辑区里拖拽选字。结果用"读回选中的文本"来核验。"""
     info, why = check_target(hwnd)
     if why:
-        log(f"⛔ 拒绝拖拽：{why}")
-        return 3
+        return _tell_next(3, why, hwnd, extra="（拖拽动作）")
     try:
         gate.require(gate.D, f"拖拽 {frm}→{to}")
     except gate.GateDenied as e:
-        log(f"⛔ 未获授权，不拖拽：{e}")
-        return 9
+        return _gate_denied(e, hwnd, gate.D, "拖拽")
+    # ★ ③ 动作前自动置前 —— **必须在取窗口矩形之前**：
+    #   2026-10-10 实测：窗口最小化时 GetWindowRect 返回哨兵矩形
+    #   [-32000,-32000,…]，"端点不在窗口矩形内"会先炸，把真正的原因
+    #   （窗口没还原）盖成一条坐标类 rc=5。判据③要的是"丢后台也一次成功"，
+    #   所以先还原、再量 rect、再校端点。
+    #   现场原貌（证据 §三 错 8）就是"窗口丢前台就开拖 ⇒ 两次 rc=5"。
+    _fg = ensure_foreground(hwnd, "拖拽", dry=dry)
+    if _fg:
+        return _fg
+    if not dry:
+        info, _why2 = check_target(hwnd)
+        info = info or win_info(hwnd)      # 还原后重取矩形（还原前是哨兵值）
     r = info["rect"]
     for p in (frm, to):
         if not (r[0] <= p[0] <= r[2] and r[1] <= p[1] <= r[3]):
-            log(f"⛔ 拖拽端点 {p} 不在窗口矩形 {r} 内 —— 拒绝")
-            return 5
-    if not info["foreground"] and not dry:
-        log("⛔ 拖拽要求窗口在前台 —— 拒绝")
-        return 5
+            # ① rc=5 坐标类：报 DPI 缩放因子 + 坐标口径 + 换算
+            #   现场（证据 §三 错 5）：「拖拽用逻辑坐标 ⇒ rc=5 端点不在窗口矩形内」，
+            #   当时根本不知道 act.py 用物理像素、也不知道本机缩放是 1.5×。
+            return _tell_next(
+                5, f"**坐标类**：拖拽端点 {p} 不在窗口矩形 {r} 内", hwnd,
+                extra=_dpi_report(hwnd) +
+                "\n  另注：拖拽两端**都**必须在窗口矩形内；"
+                "拖窗口边框请参考 targets 输出的「可拖带」。")
     if not dry:
         drag(frm, to)
     time.sleep(0.4)
@@ -932,10 +2205,21 @@ def do_drag(hwnd, frm, to, dry=False):
 
 
 def main():
+    # ── 启动自检闸门（派单 ②）─────────────────────────────────────────────
+    # ★ 真正的拦截已挪到**模块顶部**（`raise SystemExit(_selftest_or_die())`）：
+    #   放这里太晚了 —— 用托管 Python 跑时，第 1 行 `import win32gui` 就把进程打死，
+    #   本函数根本执行不到。（2026-10-10 派单要求的正是「第一行就报全」。）
+    #   这里只留一道**兜底**：万一将来有人把顶部那道闸拆了，至少不会静默带病运行。
+    if _SELFTEST_MISS:
+        return _selftest_or_die()
     ap = argparse.ArgumentParser()
-    ap.add_argument("action",
-                    choices=["targets", "click", "scroll", "focus", "type", "drag", "read", "keys", "fill"])
-    ap.add_argument("--hwnd", type=int, required=True)
+    ap.add_argument("action", nargs="?",
+                    choices=["targets", "click", "scroll", "focus", "type", "drag", "read", "keys", "fill"],
+                    help="动作名；纯只读诊断（--snap-check）可不给")
+    # ★ --hwnd 从 required 改 nargs="?"：① 的 --snap-check 是**纯文件只读诊断**
+    #   （只看快照 json，不碰任何窗口），逼它编一个 --hwnd 是没道理的。
+    #   给所有动作保留"不给就报 2 + 提示"的原有语义（见下面的入口守卫）。
+    ap.add_argument("--hwnd", type=int, default=None)
     ap.add_argument("--name")
     ap.add_argument("--xy")
     ap.add_argument("--amount", type=int, default=-3)
@@ -953,8 +2237,42 @@ def main():
                     help="fill：不要先清空（默认会 Ctrl+A 覆盖旧值；仅在目标本来就是空字段时才加）")
     ap.add_argument("--force-send", action="store_true",
                     help="打字：**网页表单模式** —— 目标没有 UIA 文本区时，直接发键，核验改由外部截图负责")
+    ap.add_argument("--scan-code", action="store_true",
+                    help="打字/按键：**扫描码注入** —— 用 MapVirtualKey 换真实 scancode 再发。"
+                         "VirtualBox 等 PS/2 键盘模拟的目标必需（没扫描码的事件它直接丢弃）。"
+                         "不影响鼠标；中文等换不出扫描码的字符会自动回退原路径并记账")
     ap.add_argument("--compact", action="store_true", help="targets：紧凑文本，一行一个控件")
+    # ── ① rc=5 快照类：只读诊断（派单 ① 明列）─────────────────────────────
+    ap.add_argument("--snap-check", action="store_true",
+                    help="① 只读：诊断「前后快照路径集」是否可比（rc=5 快照类）。"
+                         "列出快照目录、两侧各自拿到的路径集、缺 --paths 的那一侧，"
+                         "并给出可粘贴的重拍命令。**不碰窗口、不过闸、不扣额度**。")
+    ap.add_argument("--snap-before", default="before", metavar="TAG",
+                    help="--snap-check：基准快照 tag（默认 before，即 验动作.py 的 --before）")
+    ap.add_argument("--snap-after", default="after", metavar="TAG",
+                    help="--snap-check：对比快照 tag（默认 after，即 验动作.py 的 --tag）")
+    ap.add_argument("--post", action="store_true",
+                    help="click：**后台投递模式** —— 本来要走坐标的那次点击改用 PostMessage 投给目标窗口，"
+                         "**不抢前台焦点**；按 post_compat.json 分档，不消费/未登记则自动回退 SendInput 并留一行原因")
+    ap.add_argument("--post-force", action="store_true",
+                    help="click：后台投递且**跳过兼容表**（仅用于兼容性预扫；仍过闸 + 白名单 + 模态检查）")
     a = ap.parse_args()
+
+    # ── 入口守卫（--hwnd 由 required 改为可选之后的兜底）────────────────────
+    # ★ --snap-check 是**纯文件只读诊断**：它只看快照 json，跟窗口无关，
+    #   所以放行「无 hwnd」；其余动作仍然必须有 hwnd —— 少了就走 ① 的 rc=2 提示，
+    #   而不是 argparse 的英文 usage 崩（调用方要的是"下一步"，不是 "the following
+    #   arguments are required"）。
+    if a.snap_check:
+        pass
+    elif not a.action:
+        return _tell_next(2, "缺动作名（且没给 --snap-check）", a.hwnd)
+    elif a.hwnd is None:
+        return _tell_next(2, "缺 --hwnd（除 --snap-check 外所有动作都必须给）", a.hwnd)
+
+    if (a.post or a.post_force) and a.action != "click":
+        print(f"⛔ --post / --post-force 只在 click 上生效：{a.action} 没有「投递一次左键」这回事。")
+        return 2
 
     if a.action == "fill":
         if not a.xy:
@@ -964,7 +2282,31 @@ def main():
         return do_fill(a.hwnd, xy, a.text or "", a.dry_run, clear=not a.no_clear)
 
     if a.action == "keys":
-        return do_keys(a.hwnd, a.vk, a.ctrl, a.times, a.dry_run)
+        return do_keys(a.hwnd, a.vk, a.ctrl, a.times, a.dry_run,
+                        scan_code=a.scan_code)
+
+    # ── ① rc=5「快照类」出口（派单 ① 明列的第三类 rc=5）────────────────────
+    # 为什么 act.py 要有这条路：派单 ① 把 rc=5 拆成**坐标类 / 快照类 / 前台类**，
+    #   但快照那一条的真身在 `验动作.py check`（新线工具），act.py 里原本没有落点 ——
+    #   调用方在 act.py 侧撞上「前后快照路径集不一致」时，没有任何入口能问
+    #   "缺的是哪一侧的 --paths、两侧当时各拿到什么"。
+    # 本岔口**纯只读**：不碰窗口、不碰闸门、不扣额度，任何时刻都能跑。
+    if a.snap_check:
+        try:
+            gate.require_any(gate.PERCEIVE_SCOPES, "查快照路径集")
+        except gate.GateDenied as e:
+            return _gate_denied(e, a.hwnd, None, "查快照路径集")
+        extra = _snapshot_path_report(a.snap_before, a.snap_after,
+                                      " ；".join(_snap_dirs()) or "(无)")
+        # 统一走 rc=5 的外观：现象 + 采集到的证据 + 下一步。
+        # 这是**诊断**命令，目的是让调用方一眼看清"我这组快照能不能判"。
+        why = ("快照路径集诊断（派单 ① rc=5 快照类）："
+               "before=%s / after=%s" % (a.snap_before or "<未给>", a.snap_after or "<未给>"))
+        rc = _tell_next(5, why, a.hwnd, extra=extra)
+        print()
+        print("  ℹ 本条是**只读诊断**：rc=5 在这里表示「我按 rc=5 的形状把快照可比性摆给你看」，")
+        print("    不是「本次动作失败」。真正的判定仍由 `验动作.py check` 出（它才认 rc=5）。")
+        return rc
 
     if a.action == "read":
         try:
@@ -988,9 +2330,9 @@ def main():
             return 9
         info, why = check_target(a.hwnd)
         if why:
-            print("⛔ " + why)
-            return 3
-        ts = targets(a.hwnd)
+            return _tell_next(3, why, a.hwnd)
+        ts, geo = targets(a.hwnd, with_geo=True)
+        bands = _bands(a.hwnd, geo)
         if a.compact:
             print(f"窗口：{info['title']}　前台={info['foreground']}　可交互控件 {len(ts)} 个")
             for t in ts:
@@ -998,8 +2340,30 @@ def main():
                     t["类型"][:17], t["名称"][:44], t["中心"][0], t["中心"][1],
                     ",".join(t["模式"]),
                     "  ★当前选中" if t.get("选中") else ""))
+            # ★ ④ 紧凑模式也**必须**带出可操作区 —— 调用方最常用的就是这条命令，
+            #   把它藏在 --json 里等于没做。
+            print("  ── 可操作区（④）──")
+            print("     窗口矩形       : %s" % bands.get("窗口矩形"))
+            print("     可拖拽窗口     : %s（%s）" % (bands.get("可拖拽窗口"), bands.get("窗口样式")))
+            ab = bands.get("可拖带_上边框", {})
+            if ab.get("矩形"):
+                print("     可拖带·上边框  : %s（高 %spx）" % (ab["矩形"], ab.get("高")))
+                print("                      %s" % ab.get("说明"))
+            else:
+                print("     可拖带·上边框  : **无** —— %s" % ab.get("说明"))
+            lb = bands.get("可拖带_左边框", {}).get("矩形")
+            rb = bands.get("可拖带_右边框", {}).get("矩形")
+            bb = bands.get("可拖带_下边框", {}).get("矩形")
+            print("     可拖带·边框    : 左=%s 右=%s 下=%s（厚度 %s）"
+                  % (lb, rb, bb, bands.get("边框厚度")))
+            cb = bands.get("内容区", {})
+            print("     内容区         : %s（%s）" % (cb.get("矩形"), cb.get("来源")))
+            print("     拖拽推荐点     : %s" % json.dumps(bands.get("拖拽推荐点", {}),
+                                                        ensure_ascii=False))
+            print("     坐标系         : %s" % bands.get("坐标系"))
             return 0
-        print(json.dumps({"窗口": info, "白名单": "OK", "可交互控件": ts},
+        print(json.dumps({"窗口": info, "白名单": "OK", "可交互控件": ts,
+                          "可操作区(④)": bands},
                          ensure_ascii=False, indent=1))
         return 0
     if a.action == "click":
@@ -1007,14 +2371,16 @@ def main():
         if not a.name and not xy:
             print("要 --name 或 --xy")
             return 1
-        return do_click(a.hwnd, a.name, xy, a.dry_run, force_coord=a.coord, retry=max(0, a.retry))
+        return do_click(a.hwnd, a.name, xy, a.dry_run, force_coord=a.coord, retry=max(0, a.retry),
+                        post=a.post, post_force=a.post_force)
     if a.action == "focus":
         return do_focus(a.hwnd, a.dry_run)
     if a.action == "type":
         if a.text is None:
             print("要 --text")
             return 1
-        return do_type(a.hwnd, a.text, a.dry_run, force_send=a.force_send)
+        return do_type(a.hwnd, a.text, a.dry_run, force_send=a.force_send,
+                       scan_code=a.scan_code)
     if a.action == "drag":
         if not (a.xy and a.to):
             print("要 --xy 起点 --to 终点")

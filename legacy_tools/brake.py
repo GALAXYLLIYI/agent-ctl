@@ -22,10 +22,10 @@ import os
 import sys
 import time
 
-# ★ 不写死本机路径：换机器/换用户名就废（开源的最低要求）。
-#   而且**必须**和 src/agentctl/gate.py 的 BRAKE_FLAG 指向同一个文件，
-#   否则「面板里拉急停」和「命令行 brake stop」各拉各的，
-#   两边都显示成功，急停却没全局生效 —— 本机永远看不出来，一换机就露馅。
+# ★ T10 治本（2026-10-09）：不再写死本机桌面路径。
+#   必须与 agent-ctl\src\agentctl\gate.py 的 BRAKE_FLAG 指向同一个文件，
+#   否则「面板拉急停」与「热键拉急停」各拉各的，两边都显示成功、急停却没全局生效。
+#   env AGENTCTL_BRAKE_FLAG 保留 —— T9/S2-4 的沙箱测试姿势依赖它。
 _APP_DIR = os.environ.get("AGENTCTL_APP_DIR") or os.path.join(
     os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "AgentCtl")
 FLAG = os.environ.get("AGENTCTL_BRAKE_FLAG") or os.path.join(_APP_DIR, "_急停.flag")

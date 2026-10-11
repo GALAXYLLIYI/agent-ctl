@@ -23,6 +23,7 @@ ALIAS = {
     "status": "ctl_status", "lease": "ctl_lease", "brake": "ctl_brake",
     "timeline": "ctl_timeline", "verify": "ctl_verify", "witness": "ctl_witness",
     "windows": "ctl_windows", "shot": "ctl_shot", "tree": "ctl_tree",
+    "find": "ctl_find",           # 2026-10-07：别名表漏了它，CLI 就调不到
     "click": "ctl_click", "type": "ctl_type", "fill": "ctl_fill",
     "authorize": "ctl_authorize", "replay": "ctl_replay",
     "record": "ctl_record", "browser": "ctl_browser",

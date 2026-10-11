@@ -134,9 +134,10 @@ AgentCtl 是这台 Windows 机器上**电脑控制的唯一入口**：看屏幕�
 | code | 含义 | **你该做的事** |
 |---|---|---|
 | `0` | 成功 | 继续 |
-| `3` | 白名单/敏感窗口拒绝 | **停手**。这个窗口不在白名单里；要加得让用户改配置 |
+| `3` | **敏感窗口**拒绝 | **永久停手**。用户的授权弹窗（标题 `DSH电脑控制授权`）任何动作一律禁止，不问、不放行 |
 | `4` | 找不到控件 | 重新 `ctl_windows` + `ctl_tree` 看现状；**不要瞎点坐标** |
 | `5` | 坐标/前台/窗口不稳定 | 重新观测（见 §3 的 capture_id） |
+| `7` | 这个窗口用户还没放行 | **等**。平台会自动弹窗问用户，同意一次管 30 分钟。⛔ 别绕道用别的手段去动那个窗口 |
 | `8` | **动作发出去了，但画面/页面没变化** | ⛔ **不许当成功**。去核验；必要时重试或停手报告 |
 | `9` | 没通行证 | **停下，向用户申请**。⛔ 不许试图绕过 |
 | `10` | 租约被别的 agent 持有 | 只能只读；等，或告诉用户是谁在动手 |
@@ -246,8 +247,9 @@ GET /v1/events?event_id=10231&limit=5
 | `ctl_status` | `GET /v1/status` | — |
 | `ctl_windows` | `POST /v1/perceive/windows` | `only_visible`(true), `limit`(40) |
 | `ctl_shot` | `POST /v1/perceive/shot` | `hwnd`(省略=整屏), `region`=[l,t,r,b], `scale`(0.5), `format`("jpeg"), `quality`(70), `inline`(false), `look`(false), `why`("") |
-| `ctl_tree` | `POST /v1/perceive/tree` | `hwnd`*, `max_nodes`(400), `max_depth`(6), `compact`(true) |
-| `ctl_click` | `POST /v1/act/click` | `hwnd`*, 二选一：`name` 或 `xy`=[x,y]；**走 xy 时 `from_capture` 必填**；`button`("left"), `retry`(1), `dry_run`(false) |
+| `ctl_tree` | `POST /v1/perceive/tree` | `hwnd`*, `max_nodes`(600), `max_depth`(25), `roles`(["interactive","text"]), `detail`(false) |
+| `ctl_find` | `POST /v1/perceive/find` | `hwnd`*, `query`*, `limit`(40), `max_nodes`(3000), `detail`(false) |
+| `ctl_click` | `POST /v1/act/click` | `hwnd`*, 三选一（按可靠度）：`eid`（配 `expect` 核对名字）→ `name` → `xy`=[x,y]（**走 xy 时 `from_capture` 必填**）；`button`("left"), `retry`(1), `dry_run`(false) |
 | `ctl_type` | `POST /v1/act/type` | `hwnd`*, `text`*, `clear`(true), `force_send`(false) |
 | `ctl_fill` | `POST /v1/act/fill` | `hwnd`*, `xy`*, `from_capture`*, `text`*, `clear`(true) |
 | `ctl_lease` | `POST /v1/lease` | `action`*("acquire"/"renew"/"release"/"status"), `actor`, `scopes`=["B"], `ttl_sec`(600，上限 600) |
@@ -336,22 +338,76 @@ agent: （自动醒）收到，B 级，继续
 标准姿势：**扫描时 `look=true`，决定要动了再补一次 `look=false`** ——
 后一次返回的 `capture_id` 才是坐标动作要绑的那个。
 
-**★ `ctl_tree` 返回的节点字段（哪个才是"能点"，别看错）**：
+**★ `ctl_tree` / `ctl_find` 返回的节点字段（哪个才是"能点"，别看错）**：
+
+`ctl_find` 直接返回结构化节点；`ctl_tree` 默认只给**紧凑文本**，要结构化就加 `detail=true`。
 
 ```jsonc
-{ "level": 2, "type": "ButtonControl", "name": "关闭标签页",
-  "automation_id": "CloseButton", "class": "...", "rect": [l,t,r,b],
-  "enabled": true,      // 只是"是否启用"，⛔ 不代表能点
-  "focusable": true,
-  "patterns": ["Invoke"] // ★ 这才代表"能点/能填/能展开"
-}
+{ "eid": "e120",          // ★ 元素 id —— 下一步 ctl_click --eid e120 就点它，别自己算坐标
+  "depth": 3,            // 在树里的层级（渲染时按相对深度缩进）
+  "type": "ButtonControl",
+  "name": "管理订阅",
+  "rect": [1502,494,1618,530],   // [left,top,right,bottom] 物理像素
+  "center": [1560,512],          // rect 的中心，坐标路径用
+  "enabled": true,
+  "role": "interactive",
+  "patterns": ["Invoke"],        // 只有 detail=true 才有
+  "aid": "" }                     // AutomationId，只有 detail=true 才有
 ```
 
 - **判断一个元素能不能操作，看 `patterns`**（`Invoke` 能点、`Value` 能填、`Toggle` 能切换、`SelectionItem` 能选、`ExpandCollapse` 能展开）。
-- ⛔ **`enabled: true` 只说明控件没被禁用**——本机实测它**几乎恒为真**（34/34），拿它当"可点击"会全盘误判。
+  但它**要花钱** —— 每个能力一次 COM 往返，787 节点问全要 ~280 ms，所以默认不给，要就加 `detail=true`。
+- ⛔ **`enabled: true` 只说明控件没被禁用**——本机实测它**几乎恒为真**，拿它当"可点击"会全盘误判。
   （历史工具 `perceive.py` 的旧字段名就叫「可点击」，但取的是 `IsEnabled` 的值——**那个名字是错的，别信**。）
+- ⛔ **`type` 落在交互类型里也不等于点得中** —— 那块坐标可能被上层浮层盖住了。
+  **点了没变化就重新观察，别盲目重试。**
+
+**★ `eid` 是什么，为什么它比坐标和名字都强**：
+
+`eid` 是本次遍历里元素的序号（`e0`、`e1`…）。它**不是缓存坐标** —— 点之前会重新走一遍树
+重新定位，并核对 `expect` 给的名字。界面变了、元素没了或名字对不上，都会**拒绝并让你重来**，
+不会照着旧坐标戳下去。这治的正是本机头号事故「拿旧截图点新画面」。
 
 ---
+
+---
+
+## 4.6-bis ★ 元素树：什么时候该用它，而不是截图（2026-10-07 新增）
+
+`ctl_tree` / `ctl_find` 走 Windows 的 **UI Automation（UIA）无障碍树** —— 读屏软件用的就是它。
+每个控件天生带名字、类型、矩形、可用状态，所以**认界面不靠截图像素、不 OCR、不编码 PNG**。
+
+本机实测（Edge，6 个标签页）：
+
+| 通道 | 耗时 | 拿到什么 |
+|---|---|---|
+| `ctl_shot` look=true | 65 ms | 一张位图，你得自己在像素里找按钮 |
+| `ctl_shot` 留证据 | 185 ms | 同上（**多的 120 ms 全是 PNG 无损编码**） |
+| `ctl_find("订阅")` | 558 ms | **7 个带名字、带 eid、带坐标的元素** |
+| `ctl_tree` 全树 | ~180 ms | 787 节点紧凑文本 |
+
+**为什么它比截图强**：截图里两个长得一样的按钮，模型只能猜；元素树里它们**各有名字**。
+这治的就是「点了才知道点错」—— 反复点回去重做，根子是**选择的依据是像素，不是元素**。
+
+**标准流程**：
+
+```
+ctl_windows                              → 拿到 hwnd
+ctl_find   --hwnd N --query "提交"       → 拿到 eid + 名字 + 坐标
+ctl_click  --hwnd N --eid e120 --expect "提交"   → 点（点前重解析 + 核对）
+```
+
+**什么时候退回截图**：
+
+* `ctl_find` 返回 **0 命中**但你确信界面上有这个东西
+* 目标是 Canvas 自绘 / 游戏 / PDF 内嵌渲染 / 没开无障碍的 Electron
+  （本机实测 Codex 桌面版就只能拿到 22 个外壳节点，页面全黑）
+* 需要看**颜色、布局、图片内容** —— UIA 不给这些
+
+⛔ **拿不到元素树 ≠ 界面上没有。** 尤其注意窗口最小化时 UIA 树是塌的（根矩形会是 0×0），
+这时候返回里会带 `窗口状态` 说明 —— 别把它当成「页面是空的」。
+>
+
 
 ## 5. 时间线怎么用
 
@@ -380,16 +436,17 @@ agent: （自动醒）收到，B 级，继续
 
 ---
 
-## 7. 常用工具一览（完整 16 个见 tools.json）
+## 7. 常用工具一览（完整 20 个见 tools.json）
 
 | 工具 | 干什么 | 要什么证 |
 |---|---|---|
 | `ctl_status` | 服务/闸门/租约/刹车/录制总览 | 免证 |
 | `ctl_windows` | 窗口清单（hwnd/rect/前台/进程） | A |
 | `ctl_shot` | 截图 → 帧号 + capture_id | A |
-| `ctl_tree` | UIA 控件树（能用它就别用坐标） | A |
+| `ctl_tree` | UI 元素树（**不截图**；能用它就别用坐标，更别用截图） | A |
+| `ctl_find` | 按名字搜元素（**先想清楚要什么就用这个**，比拉全树省一个数量级） | A |
 | `ctl_browser` | 浏览器 CDP（pages/text/find/eval） | A |
-| `ctl_click` | 点击（控件名优先；坐标须绑 capture_id） | B |
+| `ctl_click` | 点击（`eid` 优先 → 控件名 → 坐标；坐标须绑 capture_id） | B |
 | `ctl_type` / `ctl_fill` | 打字 / 原子填字段（默认先清空） | C |
 | `ctl_lease` | 申请/释放单写者租约 | 免证（需 token） |
 | `ctl_authorize` | 请用户授权（唤起弹窗） | 免证 |
@@ -415,6 +472,4 @@ agent: （自动醒）收到，B 级，继续
 8. blind_spots 照实转述 —— 别把"我没看到"说成"没发生"。
 ```
 
-> 最后更新：2026-10-07 16:30｜新增 §4.5-bis `ctl_shot` 的 `look` 参数（只看不存 vs 留证据，实测 65 ms vs 185 ms，差的 120 ms 是 PNG 无损编码）；契约 `schema_version` 升到 2、19 个工具、每次 `dispatch()` 响应都带 `notices`
->
-> 2026-10-02 11:00｜经**自足性测试**修订：新增 §1.3 HTTP 细节、§1.4 范围口径统一为 A/B/C/D、§1.5 status 形状、§4.5 参数速查（16 工具＋全部路由）；澄清控件名点击不需要 capture_id、`path` 可读不可改
+> 最后更新：2026-10-07 21:20｜新增 §4.5-bis `ctl_shot` 的 `look` 参数（只看不存 vs 留证据，实测 65 ms vs 185 ms，差的 120 ms 是 PNG 无损编码）；契约 `schema_version` 升到 2、20 个工具、每次 `dispatch()` 响应都带 `notices`

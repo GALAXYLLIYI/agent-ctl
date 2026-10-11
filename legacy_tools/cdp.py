@@ -292,7 +292,14 @@ def cmd_open(a):
     ★ 与手工 Start-Process 的区别：**优先复用已在跑的 CDP 实例**，用 CDP 自己开标签，
       不会每开一次就多一个浏览器进程（今天为此堆了 15 个进程）。
     """
+    import os
     import urllib.request
+    # ★ T14 阶段 0-2：本函数用到 os / subprocess，却只 import 了 urllib.request ——
+    #   走到「复用失败 → 拉新窗口」那条分支（subprocess.Popen）就 NameError。
+    #   上面 gate_check() 里也是函数内 import，照它的写法补，风格一致。
+    #   （os 不在这里补：本函数当前用的是硬编码路径串；打包净化把它换成
+    #     os.path.join 时，gen_legacy.py 会在同处注入 import os。）
+    import subprocess
     url = a.target or a.arg
     if not url:
         print("要开哪个 URL？ 例：cdp.py open http://example.com")
@@ -310,7 +317,7 @@ def cmd_open(a):
         print("  （复用失败，退回拉新窗口）:", str(e)[:110])
     subprocess.Popen([a.exe or "msedge.exe",
                       "--remote-debugging-port=9222", "--remote-allow-origins=*",
-                      "--user-data-dir=" + os.path.join(os.environ.get("LOCALAPPDATA", ""), "AgentCtl", "_edge_cdp"),
+                      "--user-data-dir=" + os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "AgentCtl", "_edge_cdp"),
                       "--new-window", url])
     print("✅ 已拉起浏览器窗口:", url)
     return 0

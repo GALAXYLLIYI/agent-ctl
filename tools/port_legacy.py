@@ -6,7 +6,7 @@ r"""把 legacy_tools/ 里写死的本机路径改成跟机器无关的写法。
 1. 换台机器、换个用户名，这些路径直接不存在，脚本当场崩。
 2. 更要命的是 brake.py 和 gate.py 里的急停 flag：
    平台自己用的是 %LOCALAPPDATA%\AgentCtl\_急停.flag（src/agentctl/gate.py），
-   而 legacy 脚本写死 <工作区>\桌面\_急停.flag。
+   而 legacy 脚本曾写死已作废的桌面急停路径（T10 已收口为统一来源）。
    两边看的是**两个不同的文件** ——「面板里拉急停」和「命令行 brake stop」
    会各拉各的，两边都显示成功，急停其实没全局生效。
    这种 bug 在本机上永远看不出来（路径都在），一换机就露馅。
@@ -59,8 +59,10 @@ def shots_block(name: str) -> str:
 
 # (文件, 原文, 替换文)
 EDITS = [
-    ("brake.py", 'FLAG = r"<工作区>\\桌面\\_急停.flag"', flag_block("FLAG")),
-    ("gate.py", 'BRAKE_FLAG = r"<工作区>\\桌面\\_急停.flag"', flag_block("BRAKE_FLAG")),
+    # ★ T10（2026-10-09）：原来这两条把老线的写死路径转成 env 优先。
+    #   T10 已把老线直接改成 env 优先，转换**无对象**了 —— 留着不会报错，
+    #   只会静默不匹配，等于给后人一个「已在转换」的错觉。故删除。
+    #   防漂移靠 T10 的全机字面量扫描自测（命中即败），不靠这里的转换。
     ("perceive.py", 'SHOTDIR = r"<工作区>\\Documents\\agent-manual\\_监控\\shots"', shots_block("SHOTDIR")),
     ("selftest.py", 'SHOTS = r"<工作区>\\Documents\\agent-manual\\_监控\\shots"', shots_block("SHOTS")),
     ("coord.py",

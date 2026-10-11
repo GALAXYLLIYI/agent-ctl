@@ -43,6 +43,7 @@ from agentctl import gate                                # noqa: E402
 from agentctl.store import Store                         # noqa: E402
 from agentctl.clock import Clock, Witness                # noqa: E402
 from agentctl import tasks_dispatch                     # noqa: E402
+from agentctl import uia_tree                           # noqa: E402（不截图的识别通道）
 
 # ★ 老脚本目录**只从 gate 拿**（A 项，2026-10-04）★
 # 原来这里自己写死 <项目目录>
@@ -305,6 +306,39 @@ def _legacy_env() -> dict:
     return env
 
 
+# ★ D17 · L1 止血（2026-10-09）：动作类老脚本调用的默认上限 120s → 15s。
+#   依据：ZCode 三问答复（dialogue_log id=450）实测 —— 冷启动 import uiautomation
+#   0.10~0.14s、顶层枚举 11 窗 0.10s、树采集 89 节点 0.07s、历史真实动作前后图全 1s 级
+#   ⇒ 15s 有 7 倍以上余量；唯一超 15s 的场景是「无响应窗口的 COM 等待」，而那正是本单要切断的。
+#   动机：单次卡住的上限会被 MCP 同步主循环放大成「整个平台堵住」
+#   （见 框架\2026-10-09_给GLM的互评请求_ctltype挂起.md）。调用方仍可用
+#   args["timeout_sec"] 逐次覆盖。
+ACT_TIMEOUT_SEC = 15
+
+# ★ P0 收口（2026-10-10，Codex 挖出外层缺口 / 用户批准一起解决 / ZCode 实现）★
+#   rc=7 → _ask_then_retry 的弹窗等待原来默认 240s，且**不分渠道**：
+#   ACT_TIMEOUT_SEC 管不到它，最坏账 = 15s(首次 act) + 240s(弹窗) + 15s(重试) ≈ 270s；
+#   而 MCP 主循环是同步的（mcp.py `for line in sys.stdin`），一个 tools/call 卡住，
+#   同一连接后续全部排队 —— 这正是 D17 立单时说的「单次卡住放大成整个平台堵住」，
+#   弹窗这条路径是它想压那个值的 16 倍。
+#   修法按「爆炸半径」定上限（B 的判据不用猜「有没有人在」，用渠道，可靠）：
+#     - MCP 渠道：堵的是整个平台 ⇒ 默认 20s；
+#     - CLI 渠道：只堵调用进程自己 ⇒ 保留 240s，给用户走到屏幕前的时间。
+#   args["ask_timeout_sec"] 显式传值永远最优先。mcp.py 启动时把 CHANNEL 改成 "mcp"。
+CHANNEL = "cli"
+ASK_TIMEOUT_SEC_CLI = 240
+ASK_TIMEOUT_SEC_MCP = 20
+# rc=7 弹窗请求范围用：档位字母 → auth_popup 认的范围串（与 SCOPES 全名一致）
+SCOPES_TXT = {"A": "A级 只读感知", "B": "B级 点击滚动",
+              "C": "C级 打字快捷键", "D": "D级 拖拽"}
+
+
+def _ask_timeout(args: dict) -> int:
+    """弹窗等待上限：显式参数 > 渠道默认。"""
+    return int(args.get("ask_timeout_sec")
+               or (ASK_TIMEOUT_SEC_MCP if CHANNEL == "mcp" else ASK_TIMEOUT_SEC_CLI))
+
+
 def _legacy(name: str, args: list[str], timeout: int = 60) -> tuple[int, str, str]:
     """调用现有脚本（它们自己会过闸门）。返回 (returncode, stdout, stderr)。"""
     if not LEGACY:
@@ -399,6 +433,10 @@ def t_lease(args: dict) -> dict:
     if action == "acquire":
         try:
             L = gate.acquire_lease(actor, args.get("scopes") or ["B"], int(args.get("ttl_sec") or 600))
+        except ValueError as e:
+            # ★ 2026-10-10 修逗号 bug 的配套：范围串看不懂就显式拒，
+            #   绝不把非法档位静默写进租约（改前实测 scopes: [",","B","C","D"]）
+            return env(code=gate.CODE_NO_CTRL, warning=str(e))
         except gate.GateDenied as e:
             return env(code=e.code, data={"holder": gate.lease_status().get("holder")}, warning=e.why)
         _ev("lease_acquire", actor=actor, tool="ctl_lease", payload={"scopes": L["scopes"]})
@@ -491,7 +529,48 @@ def t_witness(args: dict) -> dict:
 
 
 # ── 屏控类：包壳调用老脚本（老脚本自己会过闸门）──
-def _issue_capture_for(hwnd: int, raw_out: str) -> str | None:
+def _issue_capture_from_tree(hwnd: int, raw_out: str) -> str | None:
+    """从元素树签发 capture_id（2026-10-07 新增）。
+
+    元素树**就是一次观测**，不比截图差 —— 而且指纹更准：
+    截图哈希只能告诉你「画面变了」，元素指纹能告诉你「哪个按钮没了/多了」。
+    没有截图文件，所以图像哈希留空（闸门会跳过图像比对，只校验 rect/前台/TTL），
+    **但元素指纹照算，不许假装没有。**
+    """
+    # ★ T15（2026-10-09）：这个函数以前被下面那个截图版**同名覆盖**成死代码，
+    #   于是元素指纹 capture 从 10-07 起从未生效。现在分流命名，两个版本各归各位：
+    #     _issue_capture_from_tree ← ctl_tree / ctl_find / ctl_click 的 eid 解析
+    #     _issue_capture_from_shot ← ctl_shot / ctl_windows（输出是子进程 stdout 字符串）
+    import hashlib as _hl2
+    try:
+        nodes = raw_out.get("节点") or raw_out.get("命中") or []
+        if not nodes:
+            # ⚠ 不可直接 return None —— 那是**削弱**不是收紧。
+            #   ctl_tree 默认不带 --detail 时 uia_tree.tree() 的「节点」就是空列表
+            #   （uia_tree.py:415「"节点": nodes if detail else []」），
+            #   ctl_find 没命中时也是空的。改前这些情况照样签发 capture
+            #   （只是两个哈希都空），改后就静默不发 ⇒ 坐标动作会丢观测绑定。
+            #   所以这里**照旧签一份没指纹的**，保住原有能力；
+            #   有节点时才有真指纹 —— 那才是净收紧。
+            rect0 = _win_rect(hwnd)
+            if rect0 is None:
+                return None
+            return gate.issue_capture(hwnd, rect0, "",
+                                      bool(_is_foreground(hwnd)))
+        sig = [(n.get("type"), (n.get("name") or "")[:40], tuple(n.get("rect") or ()))
+               for n in nodes]
+        blob = json.dumps(sig, ensure_ascii=False, sort_keys=True).encode("utf-8")
+        tree_sha = _hl2.sha256(blob).hexdigest()
+        return gate.issue_capture(hwnd,
+                                  rect=_win_rect(hwnd) or [0, 0, 0, 0],
+                                  image_sha256="",
+                                  foreground=bool(_is_foreground(hwnd)),
+                                  tree_sha256=tree_sha)
+    except Exception:
+        return None
+
+
+def _issue_capture_from_shot(hwnd: int, raw_out: str) -> str | None:
     """从 perceive/act 的输出里尽力取出帧文件路径，算 sha256，签发 capture_id。
 
     取不到就把图像哈希留空（闸门那边会跳过图像比对，只校验 rect／前台／TTL）—— **不许假装有**。
@@ -600,7 +679,7 @@ def _look_only(p):
 def _perceive_inproc(mode: str, hwnd, limit: int, why: str, look: bool = False):
     """进程内走感知。返回 env 或 None（None = 请回退子进程）。"""
     # ★ 输出是纯 JSON，不带那一行授权回显。
-    #   老子进程的 stdout 是「授权成功那行 + JSON」，而 _issue_capture_for 对整个 out 做 json.loads()
+    #   老子进程的 stdout 是「授权成功那行 + JSON」，而 _issue_capture_from_shot 对整个 out 做 json.loads()
     #   → 解析失败 → 窗口截图的 capture_id 一直拿不到（异常被吞，回落成「图像哈希留空」）。
     #   进程内直接给纯 JSON，这个长期隐性缺陷一并修掉。
     p = _load_perceive()
@@ -634,8 +713,17 @@ def _perceive_inproc(mode: str, hwnd, limit: int, why: str, look: bool = False):
         return env(code=gate.CODE_NO_CTRL, warning="进程内感知失败 %s: %s" % (type(e).__name__, e))
     out = json.dumps(res, ensure_ascii=False, indent=1)
     d = {"rc": 0, "raw": out[:4000], "inproc": True, "gate": got}
+    # ★ T12：截断**必须可见**。原先静默砍断，客户端拿到半截 JSON 却毫无信号 ——
+    #   那不是信息少，是信息假（会以为「窗口就这几个，我看完的就是全部」）。
+    #   措辞与格式对齐 uia_tree.py:370-371 的既有做法，保持全仓一致。
+    if len(out) > 4000:
+        d["截断"] = True
+        d["raw_full_len"] = len(out)
+        d["截断说明"] = ("… 还有更多内容，被 4000 字符上限截断了"
+                      "—— 要全的自己调 limit 或换更窄的查询")
     if hwnd and mode == "shot":
-        tok = _issue_capture_for(int(hwnd), out)
+        # ★ T15：mode=="shot" ⇒ out 是**子进程 stdout 字符串** ⇒ 走截图版
+        tok = _issue_capture_from_shot(int(hwnd), out)
         if tok:
             d["capture_id"] = tok
             d["capture_ttl_sec"] = gate.CAPTURE_TTL
@@ -687,11 +775,19 @@ def _perceive(args: dict, extra: list[str]) -> dict:
     if rc != 0:
         return env(code=gate.CODE_NO_CTRL, data={"rc": rc, "raw": (out + err).strip()[:400]},
                    warning=f"老脚本返回码 {rc}")
-    data = {"rc": rc, "raw": out.strip()[:4000]}
+    _o = out.strip()
+    data = {"rc": rc, "raw": _o[:4000]}
+    # ★ T12：同上，回退分支也必须让截断可见。
+    if len(_o) > 4000:
+        data["截断"] = True
+        data["raw_full_len"] = len(_o)
+        data["截断说明"] = ("… 还有更多内容，被 4000 字符上限截断了"
+                          "—— 要全的自己调 limit 或换更窄的查询")
     # ★ 签发 capture_id —— 只读工具也签，这样后续的坐标动作才有得绑（§1.4）
     hwnd = args.get("hwnd")
     if hwnd:
-        tok = _issue_capture_for(int(hwnd), out)
+        # ★ T15：这里 out 同样是**子进程 stdout 字符串** ⇒ 走截图版
+        tok = _issue_capture_from_shot(int(hwnd), out)
         if tok:
             data["capture_id"] = tok
             data["capture_ttl_sec"] = gate.CAPTURE_TTL
@@ -710,8 +806,82 @@ def t_shot(args: dict) -> dict:
 
 
 def t_tree(args: dict) -> dict:
-    return _perceive(args, ["--tree", str(int(args["hwnd"])),
-                            "--nodes", str(int(args.get("max_nodes") or 400))])
+    """**不截图的识别通道**（2026-10-07 重写，走 uia_tree 而不是子进程）。
+
+    老实现慢在两处：spawn 子进程 ~315 ms，加上每个节点穷问 8 个 Pattern
+    （787 节点 × 8 = 6000+ 次 COM 往返）。新实现进程内，且 Pattern 只在 detail 时问。
+
+    ★ 返回**紧凑文本树**，不是 JSON 字典 —— 每节点 9 个字段 × 787 个节点
+      就是几万 token，刷屏等于没信息。
+    ★ 每个可操作元素带 eid（e0、e1...），下一步用 ctl_click 的 eid 直接点，
+      不用自己算坐标 —— 坐标算错就是点错按钮。
+    """
+    return _uia_gate(args, "ctl_tree", lambda h: uia_tree.tree(
+        h,
+        max_nodes=int(args.get("max_nodes") or uia_tree.DEFAULT_MAX_NODES),
+        max_depth=int(args.get("max_depth") or uia_tree.DEFAULT_MAX_DEPTH),
+        detail=bool(args.get("detail")),
+        roles=tuple(args.get("roles") or ("interactive", "text")),
+    ))
+
+
+def t_find(args: dict) -> dict:
+    """按文字/类型/自动化 id 找元素。**先想清楚要点什么就用这个，别拉全树。**
+
+    实测本机 Edge：find("订阅") → 扫 534 节点、命中 7、558 ms，带 eid 和坐标。
+    比拉全树省一个数量级的输出。
+    """
+    return _uia_gate(args, "ctl_find", lambda h: uia_tree.find(
+        h, args.get("query") or "",
+        max_nodes=int(args.get("max_nodes") or uia_tree.FIND_MAX_NODES),
+        limit=int(args.get("limit") or 40),
+        detail=bool(args.get("detail")),
+    ))
+
+
+def _uia_gate(args: dict, tool: str, fn):
+    """UIA 读取走 A 级闸门（只读感知），进程内，不 spawn。"""
+    h = int(args.get("hwnd") or 0)
+    if not h:
+        return env(code=gate.CODE_NO_CTRL, warning=tool + " 缺 hwnd")
+    try:
+        gate.require_any(gate.PERCEIVE, tool + " 读 UI 元素树", count=False)
+    except gate.GateDenied as e:
+        return env(code=gate.CODE_UNAUTH, warning="未获授权 —— " + str(e))
+    try:
+        st = uia_tree.window_state(h)
+        bad = st["最小化"] or st["根矩形宽"] <= 0 or st["根矩形高"] <= 0
+        if bad and not args.get("force"):
+            return env(code=gate.CODE_NO_CTRL,
+                       data={"窗口状态": st},
+                       warning=tool + " 读不了这个窗口：" + str(st["说明"]),
+                       blind_spots=["拿不到元素树时**不能**据此说界面上没有这个东西 —— "
+                                    "换个窗口状态（叫醒/切前台）再试，或退回 ctl_shot"])
+        res = fn(h)
+    except uia_tree.UiaUnavailable as e:
+        return env(code=gate.CODE_NO_CTRL, warning=str(e),
+                   blind_spots=["UIA 不可用 ≠ 界面上没有；Canvas/游戏/Electron 本来就瞎"])
+    except Exception as e:
+        return env(code=gate.CODE_NO_CTRL,
+                   warning="读元素树失败 %s: %s" % (type(e).__name__, e))
+    res["窗口状态"] = st
+    d = {"结果": res}
+    # 元素树也是一次观测 —— 而且是比截图**更严**的观测。签发凭据，
+    # 这样走坐标的点击照样受「必须绑定最近一次观测」这条规矩管。
+    # ★ T15：res 是 **dict**（uia_tree.tree/find 的返回值）⇒ 走元素指纹版
+    tok = _issue_capture_from_tree(h, res)
+    if tok:
+        d["capture_id"] = tok
+        d["capture_ttl_sec"] = gate.CAPTURE_TTL
+        # ★ 2026-10-10 名副实（Codex 实测抓到「节点: [] 两个指纹都空还自称元素树」）：
+        #   默认轻量模式不采集节点 ⇒ 没有元素指纹可算（凭据只绑定 hwnd/rect/前台）。
+        #   改前这里一律写「元素树（不是图像）」，冒领了没采集到的东西。照实说。
+        if res.get("节点") or res.get("命中"):
+            d["capture_指纹"] = "元素树（不是图像）"
+        else:
+            d["capture_指纹"] = ("本次未采集节点（默认轻量模式），元素指纹不可用 —— "
+                                 "凭据只绑定窗口/位置/前台；要元素指纹请带 --detail 重新采集")
+    return env(ok=True, code=0, data=d)
 
 
 def t_replay(args: dict) -> dict:
@@ -1007,8 +1177,16 @@ def _require_write(actor: str) -> dict | None:
         gate.require_lease(actor or "unknown")       # ← 不返回它，只是校验
         return None
     except gate.GateDenied as e:
-        return env(code=e.code,
-                   warning=f"{e.why} —— 写动作必须先 ctl_lease acquire（actor={actor}）")
+        # ★ T12：actor 为空时**说清缺的是什么**并给可复制命令。
+        #   原样拼出来是「（actor=）」空值，实测完全看不出该传什么。
+        #   ⚠ 判定逻辑一个字没动 —— actor 空仍然拒绝（fail-closed 不变）。
+        if not actor:
+            _w = ("%s —— 写动作必须先 ctl_lease acquire；且本次调用**没带 actor**，"
+                  "请加 --actor <你的名字>（或设 AGENTCTL_ACTOR 环境变量），"
+                  "例：ctl_click --actor <你的名字> --hwnd X --xy <x>,<y>" % e.why)
+        else:
+            _w = "%s —— 写动作必须先 ctl_lease acquire（actor=%s）" % (e.why, actor)
+        return env(code=e.code, warning=_w)
 
 
 def _bind_capture(args: dict, hwnd: int) -> dict | None:
@@ -1020,7 +1198,10 @@ def _bind_capture(args: dict, hwnd: int) -> dict | None:
     xy = args.get("xy")
     if not xy:
         return None
-    tok = args.get("from_capture")
+    # ★ T12：收参两个名字都认 —— 返回字段叫 capture_id，收参却叫 from_capture，
+    #   照字面传 --capture_id 会**静默失效**（code=12），实测踩过两次。
+    #   ★ 两者都要过 verify_capture 的窗口/前台/TTL 三重校验，多认不放宽任何约束。
+    tok = args.get("from_capture") or args.get("capture_id")
     if not tok:
         return env(code=gate.CODE_STALE_CAPTURE,
                    warning="走坐标的动作必须带 from_capture（先 ctl_shot 或 ctl_tree 拿 capture_id）"
@@ -1047,16 +1228,23 @@ def _bind_capture(args: dict, hwnd: int) -> dict | None:
 
 
 def _map_rc(rc: int, out: str, err: str) -> dict:
-    """把老脚本的返回码映射成契约错误码（0/3/4/5/8/9）。"""
+    """把老脚本的返回码映射成契约错误码。
+
+    ★ 2026-10-07 新增 rc=7：不是拒绝，是「这个窗口用户还没点头，去问一声」。
+      用户指示「不整名单限制，每次都问」—— 静态 whitelist.json 废掉了，
+      改成第一次碰某个窗口时弹窗问，同意后本次任务内放行。
+    """
     txt = (out + err).strip()
     if rc == 0:
         return env(ok=True, code=0, data={"rc": rc, "raw": out.strip()[:3000]})
-    m = {3: gate.CODE_DENY_WHITELIST, 9: gate.CODE_UNAUTH, 4: gate.CODE_NO_CTRL,
+    m = {3: gate.CODE_DENY_WHITELIST, 7: gate.CODE_NEEDS_ASK, 9: gate.CODE_UNAUTH,
+         4: gate.CODE_NO_CTRL,
          5: gate.CODE_UNSTABLE, 8: gate.CODE_NO_CHANGE, 127: gate.CODE_NO_CTRL}
     code = m.get(rc, gate.CODE_NO_CTRL)
     warn = {8: "动作发出去了，但页面/画面没有变化 —— ⛔ **不许当成功**",
             9: "未获授权 —— 先 ctl_authorize 拿通行证",
             3: "白名单/敏感窗口拒绝",
+            7: "这个窗口用户还没点头 —— 需要先在弹窗里确认",
             5: "坐标/前台/窗口稳定性拒绝"}.get(code, f"老脚本返回码 {rc}")
     if rc == 127:
         warn = f"找不到老脚本（LEGACY={LEGACY}）"
@@ -1086,14 +1274,129 @@ def _act(action: str, args: dict, argv: list[str], scope: str = "B") -> dict:
     err = _bind_capture(args, hwnd)
     if err:
         return err
-    rc, out, e = _legacy("act.py", argv, timeout=int(args.get("timeout_sec") or 120))
+    rc, out, e = _legacy("act.py", argv, timeout=int(args.get("timeout_sec") or ACT_TIMEOUT_SEC))
     r = _map_rc(rc, out, e)
-    if r.get("ok") and args.get("from_capture"):
+
+    # ★ rc=7：老脚本说「这个窗口你没点头过」。那就**替你问** ——
+    #   用户指示的是「每次都问」，不是「拒绝」，所以这一下必须真的弹窗，
+    #   不能把决定权丢回给 agent（agent 自己会给自己点头）。
+    #   同意 → 记一次放行（默认 30 分钟）→ 原样重试一次。
+    #   ★ 2026-10-10 补（今晚实测踩到）：弹窗必须按**本动作真实需要的档位**请求 ——
+    #     原来写死「B级」，type/fill 要的是 C：用户批了弹窗也只签出一张 B 证，
+    #     重试必然再吃 rc=9，还把共享的通行证文件覆盖掉（今晚 22:33/22:37 连废三张）。
+    if rc == 7 and not args.get("_asked"):
+        r2 = _ask_then_retry(args, argv, out, scope=scope)
+        if r2 is not None:
+            r = r2
+
+    # ★ T12：与 _bind_capture 同步双读。漏了这条，用 capture_id 传入的观测
+    #   **永远不会被消费** ⇒ 同一张 capture_id 可被无限次复用（安全性回归）。
+    _cap = args.get("from_capture") or args.get("capture_id")
+    if r.get("ok") and _cap:
         try:
-            gate.consume_capture(args["from_capture"])
+            gate.consume_capture(_cap)
         except Exception:
             pass
     return r
+
+
+def _ask_then_retry(args, argv, first_out, scope: str = "B"):
+    """弹窗问用户要不要操作这个窗口。同意 → 放行 → 重试一次。
+
+    返回重试后的信封。★ 2026-10-10 P0：超时/拒绝不再静默返回 None ——
+    那会让调用方只看到一句含糊的 rc=7「还没点头」，分不清「没弹出来」「没人应答」
+    「用户拒绝了」三种处境，也没下一步。现在：
+      弹窗根本没弹出来（参数/环境错）      → None（保留原 rc=7，不发明新语义）
+      弹窗等满上限没人应答（rc=124）        → code=7 + ask=timeout + waited_sec + NEXT_STEP
+      弹窗被关闭/拒绝                       → code=7 + ask=declined + NEXT_STEP
+    code 都仍是 CODE_NEEDS_ASK —— 调用方的处理逻辑不变，只是把话说全。
+    ★ scope：本动作真实需要的档位（_act 传入），弹窗按它请求；
+      args["ask_scope"] 仍可显式覆盖。写死「B级」会让 type/fill 的重试必死（见 _act 注）。
+    **最多问一次**（args["_asked"] 防循环）—— 用户拒绝了就不该反复骚扰。
+    """
+    hwnd = int(args.get("hwnd") or 0)
+    scope_txt = args.get("ask_scope") or SCOPES_TXT.get(scope, scope)
+    why = ""
+    for ln in (first_out or "").splitlines():
+        if "要操作窗口" in ln or "不在白名单" in ln:
+            why = ln.strip()
+            break
+
+    def pop(reason):
+        try:
+            # 注意：这里**不能**再把脚本名塞进参数里 —— _legacy 自己会加，
+            # 多写一次 argparse 会报「unrecognized arguments: auth_popup.py」，
+            # 弹窗压根不弹，只留一句看不懂的 stderr。
+            argv2 = ["--request", scope_txt,
+                     "--minutes", str(int(args.get("ask_minutes") or 30)),
+                     "--acts", str(int(args.get("ask_acts") or 20)),
+                     "--note", reason]
+            return _legacy("auth_popup.py", argv2, timeout=_ask_timeout(args))
+        except Exception:
+            return None
+
+    pr = pop(why or "要操作一个新窗口")
+    if pr is None:
+        # 弹窗本身没弹出来 —— 保留原 rc=7 原样，让「弹窗坏了」和「用户没点头」可区分
+        return None
+    if pr[0] == 124:
+        return env(code=gate.CODE_NEEDS_ASK,
+                   data={"rc": 7, "ask": "timeout", "waited_sec": _ask_timeout(args),
+                         "raw": (first_out or "")[:1500]},
+                   warning="弹窗已弹，等了 %ds 没人应答 —— 需人工授权。NEXT_STEP: "
+                           "用户回到屏幕前时重试本动作；或由用户在终端跑 auth_popup 线下签证，"
+                           "或经用户把该窗口加进白名单" % _ask_timeout(args))
+    if pr[0] != 0:
+        return env(code=gate.CODE_NEEDS_ASK,
+                   data={"rc": 7, "ask": "declined", "popup_rc": pr[0],
+                         "raw": ((pr[1] or "") + (pr[2] or ""))[:1500]},
+                   warning="弹窗被关闭/拒绝 —— 用户没点头。NEXT_STEP: 不要原样重试同一窗口，"
+                           "先跟用户线下确认要不要放行")
+
+    try:
+        info = _win_info_for(hwnd)
+        _legacy_approve_target(info)
+    except Exception:
+        return None
+
+    a2 = dict(args)
+    a2["_asked"] = 1
+    rc, out, e = _legacy("act.py", argv, timeout=int(args.get("timeout_sec") or ACT_TIMEOUT_SEC))
+    rr = _map_rc(rc, out, e)
+    _cap2 = args.get("from_capture") or args.get("capture_id")
+    if rr.get("ok") and _cap2:
+        try:
+            gate.consume_capture(_cap2)
+        except Exception:
+            pass
+    rr["data"] = {**(rr.get("data") or {}), "ask": "用户已口头点头，本次任务内放行"}
+    return rr
+
+
+def _win_info_for(hwnd: int) -> dict:
+    """取窗口的 (标题, 进程, 类名) —— 放行记录和弹窗说明都要用。"""
+    try:
+        import win32gui                                  # noqa: PLC0415
+        import win32process                              # noqa: PLC0415
+        import psutil                                    # noqa: PLC0415
+        h = int(hwnd)
+        tid = win32process.GetWindowThreadProcessId(h)[1]
+        return {"title": win32gui.GetWindowText(h) or "",
+                "process": psutil.Process(tid).name() if tid else "",
+                "class": win32gui.GetClassName(h) or ""}
+    except Exception as e:
+        return {"title": "", "process": "", "class": "", "error": str(e)}
+
+
+def _legacy_approve_target(info: dict) -> bool:
+    """让老脚本把这个窗口记进「本次任务已放行」。"""
+    try:
+        rc, out, e = _legacy("act.py", ["approve", "--process", info.get("process") or "",
+                                        "--class", info.get("class") or ""],
+                             timeout=20)
+        return rc == 0
+    except Exception:
+        return False
 
 
 def _xy(xy):
@@ -1117,6 +1420,53 @@ def _xy(xy):
 
 def t_click(args: dict) -> dict:
     hwnd = int(args.get("hwnd") or 0)
+
+    # ★ 2026-10-07 加 eid：**不把 eid 当缓存坐标用**，点之前重新走一遍树解析，
+    #   还要核对名字 —— 界面变了就拒绝，而不是照着旧坐标戳下去。
+    #   本机头号事故「拿旧截图点新画面」在这里同理有复发机会，就堵在这。
+    eid = args.get("eid")
+    if eid:
+        try:
+            st = uia_tree.window_state(hwnd)
+        except Exception:
+            st = {}
+        if st.get("最小化") or not st.get("根矩形宽"):
+            return env(code=gate.CODE_NO_CTRL, warning="点 eid 之前窗口不可读（%s），先把窗口叫醒" % st.get("说明", "未知"))
+        try:
+            nodes, _ = uia_tree.walk(hwnd, roles=("all",))
+        except Exception as e:
+            return env(code=gate.CODE_NO_CTRL, warning="重新解析 eid 失败 %s: %s" % (type(e).__name__, e))
+        hit = None
+        for n in nodes:
+            if n["eid"] == str(eid):
+                hit = n
+                break
+        if hit is None:
+            return env(code=gate.CODE_NO_CTRL, warning="元素 %s 现在不存在了（扫到 %d 个节点）。界面变了，重新 ctl_find 再点。" % (eid, len(nodes)))
+        want = args.get("expect")
+        if want and str(want).strip() and str(want).strip() not in (hit["name"] or ""):
+            return env(code=gate.CODE_NO_CTRL, warning="元素 %s 现在叫『%s』，不是你看到的『%s』—— 不点" % (eid, hit["name"], want))
+        if not hit.get("enabled", True):
+            return env(code=gate.CODE_NO_CTRL, warning="元素 %s（%s）是禁用状态，不点" % (eid, hit["name"]))
+        args = {**args, "xy": list(hit["center"]), "_eid_hit": {"eid": eid, "name": hit["name"], "type": hit["type"], "rect": hit["rect"]}}
+
+        # ★ 2026-10-07 实机跑出来的 bug：eid 路径被要求另外交 from_capture，拿到 code=12。
+        #   这自相矛盾 —— 上面刚重新走了一遍树，那就是一次**新鲜**的观测，
+        #   再要一个 capture 等于把同一件事要两遍。
+        #
+        #   而且让 agent 交「上一次」ctl_find 的 capture_id 反而**更弱**：
+        #   那是窗口还没变时的旧观测，而我们手里这个是点之前那一刻的。
+        #
+        #   所以：eid 解析即观测绑定，这里就地签一份替 agent 补上。
+        #   「先看再动」这条规矩没被削弱 —— 被绑的是更近的那一次。
+        # ★ T15：元素命中 ⇒ 走元素指纹版
+        tok = _issue_capture_from_tree(hwnd, {"命中": [hit]})
+        if not tok:
+            return env(code=gate.CODE_NO_CTRL,
+                       warning="eid 解析到了，但观测凭据签发失败 —— 宁可不点，也不点一个绑不住的动作")
+        args = {**args, "from_capture": tok}
+        args["_eid_hit"] = {**args["_eid_hit"], "capture_id": tok}
+
     argv = ["click", "--hwnd", str(hwnd)]
     if args.get("name"):
         argv += ["--name", str(args["name"])]
@@ -1130,7 +1480,8 @@ def t_click(args: dict) -> dict:
     r = _act("click", args, argv)
     if r.get("ok"):
         r["data"] = {**(r.get("data") or {}), "frame_before": None, "frame_after": None,
-                     "note": "按控件名点击不依赖观测；走坐标时已校验 capture_id"}
+                     "note": "按控件名/eid 点击不依赖观测；走坐标时已校验 capture_id",
+                     "点到": args.get("_eid_hit")}
     return r
 
 
@@ -1141,7 +1492,9 @@ def t_type(args: dict) -> dict:
         argv += ["--force-send"]
     if args.get("dry_run"):
         argv += ["--dry-run"]
-    return _act("type", args, argv)
+    # ★ 2026-10-10：type 老线要 C 级（act.py do_type gate.require(C)），
+    #   新线预检与 rc=7 弹窗都必须按 C 走 —— 传 B 会让弹窗签出没用的 B 证。
+    return _act("type", args, argv, scope="C")
 
 
 def t_fill(args: dict) -> dict:
@@ -1154,7 +1507,8 @@ def t_fill(args: dict) -> dict:
         argv += ["--no-clear"]
     if args.get("dry_run"):
         argv += ["--dry-run"]
-    return _act("fill", args, argv)
+    # ★ 2026-10-10：fill 老线同样要 C 级（do_fill gate.require(C)），理由同 t_type
+    return _act("fill", args, argv, scope="C")
 
 
 def t_browser(args: dict) -> dict:
@@ -1223,6 +1577,7 @@ TOOLS = {
     "ctl_windows": t_windows,
     "ctl_shot": t_shot,
     "ctl_tree": t_tree,
+    "ctl_find": t_find,
     "ctl_replay": t_replay,
     "ctl_authorize": t_authorize,
     "ctl_record": t_record,

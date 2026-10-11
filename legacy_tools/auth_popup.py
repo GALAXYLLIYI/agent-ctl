@@ -16,6 +16,16 @@
   python auth_popup.py --request "A级 只读感知"    # 申请一次授权（默认 10 分钟）
   python auth_popup.py --status                   # 看当前通行证
   python auth_popup.py --check "A级 只读感知"      # 校验通行证是否可用（供控制脚本调用）
+
+T5 新增（可选，最小改动）：
+  python auth_popup.py --request "B级 点击滚动" \
+      --targets '{"pids":[1234],"title_contains":["记事本"],"actions":["click"]}'
+    → 把这张证**再收紧到具体目标**。三项都可选：
+        pid/pids           只认这些 pid
+        title_contains     只认窗口标题含这些片段之一的
+        action/actions     只认这些动作名
+    → **不填 --targets 就完全不写 targets 键** —— 与改前的证逐字节一致。
+    → 校验（谁按目标放行）在 gate.py；本文件只管「签发时把目标写进证里」。
 """
 import argparse
 import datetime
@@ -27,10 +37,17 @@ import secrets
 import sys
 import time
 
+# ★ D18：跨进程锁**只 import 共享模块，不复制**（T14 整单就是在消灭双份漂移，复制等于造新债）。
+#   锁文件与 gate.py 同源：`<AUTHDIR>/gate.lock` —— 两侧共用同一份 auth_pass.json。
+from gate_lock import LockTimeout, lock_path  # noqa: E402
+from gate_lock import exclusive as _lock_exclusive  # noqa: E402
+from gate_lock import save_json  # noqa: E402
+
 BASE = os.path.dirname(os.path.abspath(__file__))
 AUTHDIR = os.path.join(BASE, "_auth")
 KEYFILE = os.path.join(AUTHDIR, "auth_key.json")
 PASSFILE = os.path.join(AUTHDIR, "auth_pass.json")
+LOCKFILE = lock_path(AUTHDIR)
 LOGFILE = os.path.join(AUTHDIR, "auth.log")
 LOCK_SECONDS = 60
 MIN_LEN = 4
@@ -58,11 +75,9 @@ def _load(path, default):
 
 
 def _save(path, obj):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(obj, f, ensure_ascii=False, indent=1)
-    os.replace(tmp, path)
+    # ★ D18·R1：原子写（唯一临时名 + 有界重试替换）统一在共享模块 gate_lock.save_json；
+    #   本函数只留老名字转发。改前它与 gate._save 各写一份、且已开始漂移（一份有 makedirs、一份没有）。
+    save_json(path, obj)
 
 
 def verifier(key, salt):
@@ -72,8 +87,82 @@ def verifier(key, salt):
                                bytes.fromhex(salt), PBKDF_ITER).hex()
 
 
+# ────────────────────── T5：可选「目标三元组」targets ──────────────────────
+# 签发侧只做三件事：解析 --targets、在弹窗上如实显示、**填了才写进证里**。
+# 判定（谁按目标放行）在 gate.py —— 别在这里重复一套，免得好好的两套口径各自跑偏。
+_TARGET_ALIAS = {
+    "pids": "pids", "pid": "pids",
+    "title_contains": "titles",
+    "actions": "actions", "action": "actions",
+}
+
+
+def _norm_popup_targets(raw):
+    """把 --targets 的 JSON 串规整成 gate 侧认的三元组。
+    没给 → None。给得不对 → 抛 ValueError（**宁可不发证，也不发一张含糊的证**）。"""
+    if raw is None or str(raw).strip() == "":
+        return None
+    try:
+        obj = json.loads(raw)
+    except Exception as e:
+        raise ValueError(f"--targets 不是合法 JSON：{e}")
+    if not isinstance(obj, dict):
+        raise ValueError(f"--targets 必须是 JSON 对象，本次是 {type(obj).__name__}")
+    norm = {"pids": [], "titles": [], "actions": []}
+    for k, v in obj.items():
+        ks = str(k)
+        if ks.startswith("_"):
+            continue                       # 下划线开头 = 注释，不参与判定（与 gate.py 同规矩）
+        g = _TARGET_ALIAS.get(ks)
+        if not g:
+            raise ValueError(f"--targets 里有闸门不认识的键「{ks}」"
+                             "（只认 pid/pids、title_contains、action/actions）")
+        vals = v if isinstance(v, (list, tuple)) else [v]
+        norm[g].extend(str(x).strip() for x in vals if str(x).strip())
+    if not (norm["pids"] or norm["titles"] or norm["actions"]):
+        raise ValueError("--targets 里没有可判定的项（三项都空）"
+                         "—— 空声明不等于不限制，拒绝签发")
+    out = {}
+    if norm["pids"]:
+        pids = []
+        for x in norm["pids"]:
+            try:
+                pids.append(int(float(x)))
+            except Exception:
+                raise ValueError(f"--targets 里的 pid「{x}」不是整数")
+        out["pids"] = pids
+    if norm["titles"]:
+        out["title_contains"] = norm["titles"]
+    if norm["actions"]:
+        out["actions"] = norm["actions"]
+    return out
+
+
+def _sum_targets(tg):
+    """一行话把三元组说清（弹窗上给用户当场核对）。"""
+    parts = []
+    if tg.get("pids"):
+        parts.append("pid " + "/".join(str(x) for x in tg["pids"]))
+    if tg.get("title_contains"):
+        parts.append("窗口标题含 " + "/".join(f"「{x}」" for x in tg["title_contains"]) + " 之一")
+    if tg.get("actions"):
+        parts.append("动作名 " + "/".join(tg["actions"]) + " 之一")
+    return " · ".join(parts)
+
+
+def targets_note():
+    """通行证带 targets 时补一句提醒：按目标放行是 gate.py 判的。
+    不带 targets 时返回空串 ⇒ --status/--check 的输出与改前逐字节一致。"""
+    p = _load(PASSFILE, {})
+    if isinstance(p, dict) and "targets" in p:
+        return ("\n   ⚠ 本证带目标三元组 targets：本命令只查范围/时限/次数，"
+                "真正「按目标放行」由 gate.py 判"
+                "（guard 侧只做 pid+动作名，窗口标题项不实现）")
+    return ""
+
+
 # ────────────────────────── 弹窗 ──────────────────────────
-def _popup(kind, scope="", minutes=10, acts=20):
+def _popup(kind, scope="", minutes=10, acts=20, note="", targets=None):
     """kind: 'set' 设置密钥 / 'request' 申请授权。返回 (结果, 密钥文本或 None)。"""
     import tkinter as tk
     state = {"result": None, "key": None}
@@ -95,8 +184,15 @@ def _popup(kind, scope="", minutes=10, acts=20):
               "唯一硬要求：别用你的名字、别用本机文件或对话里出现过的词。", 10, "#aaaaaa")
     else:
         label("电脑控制授权申请", 13, "#ffffff", 12)
+        if note:
+            # 2026-10-07 加：窗口审批要用。note 只**显示**，绝不混进 scope ——
+            # scope 会被切分后存成通行证范围，塞别的东西进去会让范围对不上。
+            label(note, 11, "#7ee787", 8)
         label(f"本次申请范围：{scope}\n有效期：{minutes} 分钟（过期或撤销即失效）\n"
               f"动作次数上限：{acts} 次（用完即止）", 11, "#ffd479")
+        if targets:
+            label("本次限定目标（targets）：\n" + _sum_targets(targets)
+                  + "\n目标对不上、或拿不到目标信息 → 一律拒绝", 10, "#8fd3f4")
 
     lock = _load(KEYFILE, {})
     locked_until = lock.get("locked_until", 0)
@@ -150,14 +246,21 @@ def _popup(kind, scope="", minutes=10, acts=20):
         if hmac.compare_digest(verifier(key, rec["salt"]), rec["verifier"]):
             expires = time.time() + minutes * 60
             scopes = [s.strip() for s in scope.split(",") if s.strip()]
-            _save(PASSFILE, {"scope": "、".join(scopes), "scopes": scopes, "issued": _now(),
-                             "expires_at": expires,
-                             "expires": datetime.datetime.fromtimestamp(expires).strftime("%Y-%m-%d %H:%M:%S"),
-                             "acts_limit": acts, "nonce": secrets.token_hex(8), "consumed": False})
+            pass_rec = {"scope": "、".join(scopes), "scopes": scopes, "issued": _now(),
+                        "expires_at": expires,
+                        "expires": datetime.datetime.fromtimestamp(expires).strftime("%Y-%m-%d %H:%M:%S"),
+                        "acts_limit": acts, "nonce": secrets.token_hex(8), "consumed": False}
+            if targets is not None:
+                # ★ 只有用户真填了目标才写这个键。绝不能写成 targets=None ——
+                #   gate.py 用 `"targets" in p` 判存在，写了键就等于「声明了目标」，
+                #   会把一张不设限的老证变成受限证。
+                pass_rec["targets"] = targets
+            _save(PASSFILE, pass_rec)
             rec["fail_count"] = 0
             _save(KEYFILE, rec)
             state["result"] = "granted"
-            log(f"✅ 授权通过：范围「{scope}」 {minutes} 分钟，动作上限 {acts} 次")
+            log(f"✅ 授权通过：范围「{scope}」 {minutes} 分钟，动作上限 {acts} 次"
+                + (f"，限定目标〔{_sum_targets(targets)}〕" if targets is not None else ""))
             e1.delete(0, "end")
             root.destroy()
         else:
@@ -192,20 +295,30 @@ def _popup(kind, scope="", minutes=10, acts=20):
 
 # ────────────────────────── 命令 ──────────────────────────
 def check_pass(scope=None, consume=False):
-    p = _load(PASSFILE, {})
-    if not p:
-        return False, "没有通行证"
-    if p.get("consumed"):
-        return False, "通行证已被使用"
-    if time.time() > p.get("expires_at", 0):
-        return False, f"通行证已过期（{p.get('expires')}）"
-    if scope and p.get("scope") != scope:
-        return False, f"通行证范围不符：持「{p.get('scope')}」，要用「{scope}」"
-    if consume:
-        p["consumed"] = True
-        p["consumed_at"] = _now()
-        _save(PASSFILE, p)
-    return True, f"范围「{p.get('scope')}」有效至 {p.get('expires')}"
+    """★ D18·R3：整段「读 → 判定 → 写回」进**跨进程锁**（与 gate.require 同一把锁）。
+
+    改前这里不取锁，而 gate.require 已取锁 ⇒ 后者能把前者的 `consumed` 覆盖回去：
+    实测（把窗口拉到确定顺序）stale 写回后 `consumed=False`、`consumed_at` 消失
+    ⇒ **已消费的证复活**。等锁超时按本模块契约返回 `(False, 原因)`，不抛异常。
+    """
+    try:
+        with _lock_exclusive(AUTHDIR):
+            p = _load(PASSFILE, {})
+            if not p:
+                return False, "没有通行证"
+            if p.get("consumed"):
+                return False, "通行证已被使用"
+            if time.time() > p.get("expires_at", 0):
+                return False, f"通行证已过期（{p.get('expires')}）"
+            if scope and p.get("scope") != scope:
+                return False, f"通行证范围不符：持「{p.get('scope')}」，要用「{scope}」"
+            if consume:
+                p["consumed"] = True
+                p["consumed_at"] = _now()
+                _save(PASSFILE, p)
+            return True, f"范围「{p.get('scope')}」有效至 {p.get('expires')}"
+    except LockTimeout as e:
+        return False, f"{e}，本次拒绝（不越权）"
 
 
 def main():
@@ -214,26 +327,40 @@ def main():
     ap.add_argument("--request")
     ap.add_argument("--minutes", type=int, default=10)
     ap.add_argument("--acts", type=int, default=20, help="本张通行证的动作用量上限")
+    ap.add_argument("--note", default="", help="只显示在弹窗上的一句话（不进通行证范围）")
     ap.add_argument("--status", action="store_true")
     ap.add_argument("--check")
     ap.add_argument("--consume", action="store_true")
+    ap.add_argument("--targets", help="T5 可选：把这张证再收紧到具体目标，JSON 形如 "
+                                      '{"pids":[1234],"title_contains":["记事本"],"actions":["click"]}'
+                                      "（只在 --request 时生效；不填则不写 targets 键）")
     a = ap.parse_args()
+
+    if a.targets and not a.request:
+        print("⚠ --targets 只在 --request（签发新证）时才有意义，本次忽略")
 
     if a.set:
         return 0 if _popup("set") == "set" else 5
     if a.status:
         ok, why = check_pass()
-        print(("✅ " + why) if ok else ("— " + why))
+        print((("✅ " + why) if ok else ("— " + why)) + targets_note())
         return 0 if ok else 3
     if a.check is not None:
         ok, why = check_pass(a.check or None, a.consume)
-        print(("✅ " + why) if ok else ("⛔ " + why))
+        print((("✅ " + why) if ok else ("⛔ " + why)) + targets_note())
         return 0 if ok else 3
     if a.request:
-        r = _popup("request", a.request, a.minutes, a.acts)
+        try:
+            tg = _norm_popup_targets(a.targets)
+        except ValueError as e:
+            print(f"⛔ 不签发：{e}")
+            return 4
+        r = _popup("request", a.request, a.minutes, a.acts, a.note, targets=tg)
         if r == "granted":
             ok, why = check_pass()
             print("通行证已签发：" + why)
+            if tg:
+                print("   └ 已写入限定目标：" + _sum_targets(tg))
             return 0
         print("未授权：" + (r or "窗口被关闭"))
         return 3

@@ -59,6 +59,7 @@
     "3": "白名单/敏感窗口拒绝",
     "4": "找不到控件",
     "5": "坐标/前台/窗口稳定性拒绝",
+    "7": "窗口还没被用户放行 —— 会自动弹窗问一次，同意后本次任务内（30 分钟）不再问。不同意就停在这，别绕道用别的手段去动那个窗口。",
     "8": "动作发出去了但页面/画面没有变化（★ 不许当成功）",
     "9": "未获授权（没有有效通行证）",
     "10": "租约被别的 actor 持有（单写者冲突）",
@@ -311,8 +312,8 @@
     },
     {
       "name": "ctl_tree",
-      "title": "控件树",
-      "description": "UIA 控件树（限深度/节点数）。只读属性，不 Invoke。控件树优先于坐标：能用 UIA 就别用坐标。",
+      "title": "元素树（不截图）",
+      "description": "★ **不截图的识别通道。** 读 Windows 的 UI Automation（UIA）无障碍树，读屏软件用的就是它。每个控件天生带名字、类型、矩形、可用状态，所以认题、认选项、认按钮**不靠截图像素、不 OCR、不编码 PNG**。实测本机 Edge：787 节点 / 393 ms，页面 DOM 全穿透。\n\n★ **优先用 ctl_find**，别默认拉全树 —— 全树在复杂页面上就是刷屏。\n\n★ 每个可操作元素带 eid（e0、e1…），下一步用 ctl_click 的 eid 点它，**不用自己算坐标** —— 坐标算错就是点错按钮。\n\n★ 边界：UIA 看不见 Canvas 自绘 / 游戏画面 / PDF 内嵌 / 没开无障碍的 Electron。**拿不到元素树 ≠ 界面上没有这个东西**，这种情况退回 ctl_shot。\n\n★ 只读属性，不 Invoke、不点击。",
       "annotations": {
         "readOnlyHint": true,
         "destructiveHint": false,
@@ -328,15 +329,32 @@
           },
           "max_nodes": {
             "type": "integer",
-            "default": 400
+            "default": 600
           },
           "max_depth": {
             "type": "integer",
-            "default": 6
+            "default": 25
           },
-          "compact": {
+          "detail": {
             "type": "boolean",
-            "default": true
+            "default": false,
+            "description": "要不要带上交互能力（Invoke/Toggle/Value…）。默认 false —— 每个能力都是一次 COM 往返，787 节点问全要 ~280 ms。"
+          },
+          "roles": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "interactive",
+                "text",
+                "all"
+              ]
+            },
+            "default": [
+              "interactive",
+              "text"
+            ],
+            "description": "收哪几类元素。interactive=能点的，text=有字的，all=全要。"
           }
         },
         "required": [
@@ -344,12 +362,53 @@
         ],
         "additionalProperties": false
       },
-      "returns": "{ hwnd, node_count, truncated, nodes: [{ level, type, name, automation_id, class, rect, enabled, focusable, patterns }], capture_id }"
+      "returns": "{ 结果: { 句柄, 节点数, 截断, 耗时_ms, 树(紧凑文本) }, 窗口状态, capture_id }"
+    },
+    {
+      "name": "ctl_find",
+      "title": "按名字找元素",
+      "description": "★ **先想清楚要什么就用这个，别拉全树。** 按文字/类型/自动化 id 搜 UI 元素，返回带 eid 和坐标的命中列表。实测本机 Edge：搜「订阅」扫 534 节点、命中 7、558 ms，输出只有 7 行 —— 而拉全树是几百行。",
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "gate": "A",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "hwnd": {
+            "type": "integer"
+          },
+          "query": {
+            "type": "string",
+            "description": "要搜的文字，同时匹配名字/类型/自动化 id；空字符串 = 列出全部可交互元素。"
+          },
+          "limit": {
+            "type": "integer",
+            "default": 40
+          },
+          "max_nodes": {
+            "type": "integer",
+            "default": 3000
+          },
+          "detail": {
+            "type": "boolean",
+            "default": false
+          }
+        },
+        "required": [
+          "hwnd"
+        ],
+        "additionalProperties": false
+      },
+      "returns": "{ 结果: { 命中: [{eid,type,name,rect,center,enabled}], 命中数, 扫过节点, 截断, 耗时_ms }, 窗口状态, capture_id }"
     },
     {
       "name": "ctl_click",
       "title": "点击",
-      "description": "点击目标。优先按控件名（UIA），其次按屏幕坐标；坐标路径必须带 from_capture（观测-动作绑定）。动作前后各取一帧，返回 frame_before/frame_after。",
+      "description": "点击。三条路径按可靠度排：① eid（元素 id，点前重解析+核对）② name（按控件名）③ xy（裸坐标，必须配 from_capture）。",
       "annotations": {
         "readOnlyHint": false,
         "destructiveHint": false,
@@ -397,6 +456,14 @@
           "dry_run": {
             "type": "boolean",
             "default": false
+          },
+          "eid": {
+            "type": "string",
+            "description": "★ 首选：ctl_tree / ctl_find 返回的元素 id（如 e120）。**不是缓存坐标** —— 点之前会重新解析一遍，界面变了就拒绝并让你重来。比 name 稳：name 可能有重名，eid 不会。"
+          },
+          "expect": {
+            "type": "string",
+            "description": "★ 强建议：写下你刚才看到的那个元素的名字。点击前会核对，对不上就拒绝 —— 防「界面悄悄变了，戳到别的东西上」。"
           }
         },
         "required": [
@@ -404,7 +471,7 @@
         ],
         "additionalProperties": false
       },
-      "returns": "{ clicked: {name|xy}, changed: boolean, change_ratio, frame_before, frame_after }"
+      "returns": "{ 点到: {eid,name,type,rect}, changed: boolean, change_ratio }"
     },
     {
       "name": "ctl_type",
@@ -953,5 +1020,6 @@
     "step_3": "POST /v1/perceive/shot  body: {\"scale\":0.5}  → 拿 capture_id",
     "step_4": "POST /v1/act/click  body: {\"hwnd\":N,\"xy\":[x,y],\"from_capture\":\"...\"}",
     "step_5": "GET /v1/events?from=...&to=...  → 复核"
-  }
+  },
+  "_2026-10-07_白名单废止": "用户指示「不整名单限制，每次都问」。legacy_tools/whitelist.json 已作废：里面的 8 个条目一次性转成了 asked_targets.json 里的放行记录，之后不再读。现在起，任何**没见过**的窗口第一次被操作时都会弹窗问用户；同意一次管 30 分钟。**敏感窗口黑名单不在这条里** —— 用户自己的授权弹窗（标题 DSH电脑控制授权）任何动作一律禁止，不问、不放行。"
 }

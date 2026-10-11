@@ -14,8 +14,10 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import os
 import re
+import shutil
 import sys
 import zipfile
 from collections import Counter
@@ -24,10 +26,16 @@ from pathlib import Path
 sys.stdout.reconfigure(encoding="utf-8")
 
 ROOT = Path(__file__).resolve().parent.parent
-# ★ 从**已净化**的 legacy_tools/ 取，不是从 baseline/。
-#   baseline/ 是另一个项目的快照，里面有真实手机号和 _auth 授权状态，
-#   而且被 .gitignore 排除了 —— 从那里打包等于把隐私发到 GitHub Releases。
-LEGACY_SRC = ROOT / "legacy_tools"
+# ★ T14 阶段 2（2026-10-09）：legacy_tools 不再是手工维护的实体目录。
+#   打包时**现场从老线真源生成**（tools\gen_legacy.py：dsh-viewer-plugin\tools
+#   → 复制 + 净化绝对路径 + 补齐 import + 落 md5 台账），用完即弃。
+#   理由：老线唯一真源，手工维护两份必然漂移（实测漂移 10 个文件）。
+#   旧目录保留在盘上作归档，但**不再参与打包**。
+#
+#   仍从**已净化**的产物取，不是从 baseline/：baseline/ 是另一个项目的快照，
+#   里面有真实手机号和 _auth 授权状态，被 .gitignore 排除 —— 从那里打包
+#   等于把隐私发到 GitHub Releases。
+LEGACY_SRC = None            # 由 main() 现场生成后填入
 
 # 进包的目录（白名单，不在表里的一律不发）
 DIRS = ["src", "contract", "stubs", "vendor"]
@@ -50,6 +58,9 @@ ALWAYS_EXCLUDE_DIRS = {
 }
 ALWAYS_EXCLUDE_EXT = {".pyc", ".pyo", ".pyd", ".log"}
 
+# ★ T14 阶段 2：以 _ 开头但**必须随包发**的文件（显式白名单，不靠通配）
+KEEP_NAMES = {"_md5台账.md"}
+
 # 隐私扫描（与 tools/make_legacy_dir.py 同一套判据）——
 # 打包是**最后一道闸**，不假设上游一定干净。
 PAT_MOBILE = re.compile(r"(?<!\d)1[3-9]\d{9}(?!\d)")
@@ -70,9 +81,49 @@ SECRET_NAMES = {
 # legacy_tools 里这些是控制链路，少一个就废
 LEGACY_REQUIRED = ["perceive.py", "act.py", "gate.py", "auth_popup.py"]
 
+# ★ T7-3（2026-10-09）发行包白名单清空 —— 用户拍板。
+#   开发线 legacy_tools\whitelist.json 里有 8 条白名单，其中不少是**用户的私人应用**
+#   （AnythingLLM / WorkBuddy / Trae / 学习通 / Codex 桌面端…），每条都是「经用户指示」加入的。
+#   白名单的语义是「系统自动放行操作的目标窗口」—— 它跟着发行包走，
+#   等于把用户的授权面复制给每一个装它的人。
+#   ⇒ 打包时把 whitelist 数组**清空**，只留 _关于 / _字段 两个说明字段。
+#     装完之后任何窗口都不自动放行，一律走弹窗向用户现问。
+#   这跟用户的长期指示一致（core.py 记着「不整名单限制，每次都问」）。
+#   开发线那一份**一个字都不动**（用户明确「不同步」），只清发行包。
+WHITELIST_SHIPPED_EMPTY = True
+
+
+def blank_whitelist(name: str, data: bytes) -> bytes | None:
+    """白名单文件在**打包时**清空。返回清空后的字节；不是白名单文件则返回 None。
+
+    为什么放在这里而不是改源文件：源文件是用户的开发环境，
+    要保留白名单才能继续干活；清空只发生在发出去的那一份上。
+    """
+    if not WHITELIST_SHIPPED_EMPTY or name != "whitelist.json":
+        return None
+    try:
+        d = json.loads(data.decode("utf-8"))
+    except Exception as e:
+        raise SystemExit(
+            "[X] whitelist.json 解析失败，拒绝发包（宁可不发也不发一个"
+            "用户看不懂的白名单）：%s: %s" % (type(e).__name__, e))
+    if not isinstance(d, dict):
+        raise SystemExit("[X] whitelist.json 顶层不是对象，拒绝发包")
+    n = len(d.get("whitelist") or [])
+    d["whitelist"] = []
+    d["_发行包说明"] = (
+        "本文件由打包流程清空：发行包不携带任何自动放行条目。"
+        "装完之后任何窗口都需要向用户现问授权。开发线的原始白名单不在此文件里。")
+    print("  · 白名单清空：剔除 %d 条自动放行条目（用户拍板 T7-3）" % n)
+    return json.dumps(d, ensure_ascii=False, indent=2).encode("utf-8")
+
 
 def guard(path: Path, rel: Path, keep_private: bool = False) -> str:
     """敏感检查：命中就直接 SystemExit，不给「照发」的选项。"""
+    # ★ T14 阶段 2：md5 台账必须随包留档（工单判据 5），但它以 _ 开头，
+    #   会被下面的「_ 开头 = 一次性脚本」规则挡掉 —— 显式放行，别靠通配。
+    if path.name in KEEP_NAMES:
+        return ""
     # ★ src/ 下**不能**按「_ 开头 = 一次性脚本」过滤。
     #   第一版一刀切，把 src/agentctl/__init__.py 和 _bundled_deps.py 一起排掉了，
     #   装完一跑就 ImportError: cannot import name '_bundled_deps' from 'agentctl'
@@ -122,9 +173,41 @@ def add_dir(z: zipfile.ZipFile, src: Path, arc: str, st: dict, keep_private: boo
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default=str(ROOT / "dist" / "agentctl.zip"))
+    ap.add_argument("--legacy-src", default=None,
+                    help="覆盖打包源（默认：现场从老线真源生成，不再用手工目录）")
     args = ap.parse_args()
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
+
+    # ── T14 阶段 2：现场生成 legacy 打包源 ──────────────────────────────
+    if args.legacy_src:
+        legacy_src = Path(args.legacy_src)
+        print("打包源（指定）：%s" % legacy_src)
+    else:
+        sys.path.insert(0, str(ROOT / "tools"))
+        import gen_legacy
+
+        legacy_src = Path(args.out).parent / "_legacy_for_pack"
+        if legacy_src.is_dir():
+            shutil.rmtree(legacy_src)
+        print("打包源：从老线真源现场生成 → %s" % legacy_src)
+        rc = gen_legacy.main_for_pack(legacy_src)
+        if rc != 0:
+            raise SystemExit("[X] legacy 源生成失败（净化规则有未命中项），不发包")
+        print()
+
+    # ── pyflakes 常驻门槛（T14 阶段 3 落地，此前从 T13 起一直挂着）────
+    #  只拦「运行到那行才崩」的那类（undefined / redefinition / 语法错），
+    #  unused 这类存量债只提醒不拦 —— 简单全量当致命会被存量卡死，
+    #  等于门槛名存实亡；全放行又等于没门槛。按后果分，才落得了地。
+    sys.path.insert(0, str(ROOT / "tools"))
+    import lint_gate
+
+    print("pyflakes 常驻门槛：")
+    lint_targets = [str(ROOT / "src" / "agentctl"), str(legacy_src)]
+    if lint_gate.main(lint_targets) != 0:
+        raise SystemExit("[X] pyflakes 致命项不为零 —— 有会让程序崩在半路的问题，不发包")
+    print()
 
     st = {"files": 0, "bytes": 0, "skip": []}
     tmp = out.with_suffix(".zip.tmp")
@@ -148,13 +231,13 @@ def main() -> int:
             st["bytes"] += len(data)
 
         # legacy_tools：控制链路的底座（窗口枚举/键鼠注入/OCR 都在里面）
-        if not LEGACY_SRC.is_dir():
-            raise SystemExit("[X] 找不到 legacy 脚本源目录：%s" % LEGACY_SRC)
+        if not legacy_src.is_dir():
+            raise SystemExit("[X] 找不到 legacy 脚本源目录：%s" % legacy_src)
         got = set()
-        for p in sorted(LEGACY_SRC.rglob("*")):
+        for p in sorted(legacy_src.rglob("*")):
             if p.is_dir():
                 continue
-            rel = p.relative_to(LEGACY_SRC)
+            rel = p.relative_to(legacy_src)
             why = guard(p, rel)
             if why:
                 st["skip"].append((str(rel), why))
@@ -174,6 +257,10 @@ def main() -> int:
                 bad.append("密钥赋值")
             if bad:
                 raise SystemExit("[X] 隐私闸门拦下（不发）：%s —— %s" % (rel, "、".join(bad)))
+            # ★ T7-3：白名单在**发出去的那一份**里清空，源文件不动。
+            blanked = blank_whitelist(rel.name, data)
+            if blanked is not None:
+                data = blanked
             z.writestr("app/legacy_tools/" + rel.as_posix(), data)
             got.add(rel.name)
             st["files"] += 1
