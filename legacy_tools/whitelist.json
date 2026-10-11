@@ -1,12 +1,13 @@
 {
   "_关于": "可操作窗口白名单。改这里就能授权新窗口，不用改代码。",
-  "_字段": "process=进程名; class=窗口类名; why=为什么放行。★注意：act.py 的匹配是进程与类名**精确相等**，class 写空**不会**变成『只按进程名』，那样只会永远匹配不上（这是 ChatGPT.exe 条目在 2026-10-09 被摘除前一直失效的原因）。要放行一个窗口，class 必须填它真实的窗口类名（用 ctl_windows 查）。",
+  "_字段": "process=进程名; class=窗口类名; why=为什么放行。★注意：act.py 的匹配是进程与类名**精确相等**，class 写空**不会**变成『只按进程名』，那样只会永远匹配不上。要放行一个窗口，class 必须填它真实的窗口类名（用 win_list.py 查）。",
+  "_怎么查类名": "python -X utf8 win_list.py —— 会列出每个可见窗口的 hwnd / 进程 / 窗口类 / 标题。",
   "_已撤销": [
     {
-      "process": "ChatGPT.exe",
-      "原理由": "2026-10-03 经用户指示加入：用户看不懂桌面端英文界面，要我替他点设置项/模型/权限菜单。",
-      "撤销时间": "2026-10-09",
-      "撤销理由": "用户裁决：ChatGPT.exe 不放行。（另注：即使不撤销，它也一直没生效 —— class 留空与真实类名 Chrome_WidgetWin_1 精确比对不匹配，是一条静默失效的条目。保留在这里是防止将来有人『顺手修好这个 bug』把它变成真的放行。）"
+      "process": "（示例）SomeApp.exe",
+      "原理由": "20XX-XX-XX 经使用者指示加入，用来读它的界面内容。",
+      "撤销时间": "20XX-XX-XX",
+      "撤销理由": "使用者裁决不再放行。留在 _已撤销 里是为了防止将来有人『顺手修好这个 bug』把它变成真的放行。"
     }
   ],
   "whitelist": [
@@ -16,49 +17,10 @@
       "why": "记事本：框架指定的训练靶"
     },
     {
-      "process": "VirtualBoxVM.exe",
-      "class": "Qt680QWindowIcon",
-      "why": "VirtualBox 虚拟机窗口（白名单内是沙箱）"
-    },
-    {
-      "process": "WeChatAppEx.exe",
-      "class": "Chrome_WidgetWin_0",
-      "why": "微信内置浏览器（用户的实操/考试站点跑在这里）"
-    },
-    {
-      "process": "AnythingLLM.exe",
-      "class": "Chrome_WidgetWin_1",
-      "why": "2026-09-23 经用户指示「你申请一下」加入：用控制系统在 AnythingLLM 界面生成一个 API Key，供 DSH / Trae 共享记忆层使用。窗口是本地 Electron 应用，操作范围仅限生成/读取该 Key。 实际窗口类名 Chrome_WidgetWin_1（Electron）。"
-    },
-    {
-      "process": "WorkBuddy.exe",
-      "class": "Chrome_WidgetWin_1",
-      "why": "2026-09-24 经用户指示「动用电脑控制测试」加入：在 WorkBuddy 里跑模型评测套件，对比各模型表现。操作范围仅限：新建会话、输入测试题目、读取输出。"
-    },
-    {
-      "process": "TRAE SOLO CN.exe",
-      "class": "Chrome_WidgetWin_1",
-      "why": "2026-09-24 同上：在 Trae SOLO CN 里跑同一套评测题，横向对比平台+模型。操作范围仅限：新建会话、输入题目、读取输出。"
-    },
-    {
       "process": "WindowsTerminal.exe",
       "class": "CASCADIA_HOSTING_WINDOW_CLASS",
-      "why": "2026-09-24 经用户指示「我启动给你，你先申请控制权限」加入：MiMoCode（v0.1.15，Xiaomi）跑在 Windows 终端里，用户要我用控制系统看它界面、在里面切换模型与跑评测题。⚠️ 注意：WindowsTerminal 是共享资源，若用户同时开着别的标签页，我只看标题为 MiMoCode 的那个窗口。操作范围仅限：读该窗口内容、切模型、输入评测题目。"
-    },
-    {
-      "process": "DeepSeek Harness.exe",
-      "class": "Chrome_WidgetWin_1",
-      "why": "2026-09-25 经用户指示「授权电脑控制，它开了，你看看内容怎么样」加入：用户装了 DSH 官方桌面版 v0.1.7-rc.1（官方构建但为测试版，EV 签名已验）。要我读它的界面内容（4 种模式、插件面板含「智能体团队与 Subagent」、回答区的任务式设计）。操作范围：读窗口内容、点开模式/面板菜单查看、**发消息派工单**。★ 2026-10-10 更正：本条原写「不往里面发消息」，但 2026-09-25 起用户已实际授权派单（当夜 ZCode 经生产链路在 DSH 建会话派三任务），2026-10-10 再次确认派单权限，措辞与实际长期不符故更正；**「不改它的设置」仍然有效**。窗口类名 Chrome_WidgetWin_1（Electron）。"
-    },
-    {
-      "process": "cxstudy.exe",
-      "class": "Chrome_WidgetWin_1",
-      "why": "2026-10-02 经用户指示加入（第二次；第一次于同日因用户选定接受边界后由我撤回，现因改用普通完整性终端启动服务方案而恢复）：用户在学习通出题要我用控制系统做，用来验收电脑控制链路。操作范围仅限：恢复窗口、读题面、点选选项、提交本套题；不碰账号资料/钱包/支付/个人信息页、不发消息、不改设置。按 process=cxstudy.exe 精确匹配，不放宽其它 Chrome_WidgetWin_1 窗口。"
-    },
-    {
-      "process": "ZCode.exe",
-      "class": "Chrome_WidgetWin_1",
-      "why": "2026-10-10 21:44 经用户指示加入：用户要求用电脑控制到 ZCode 界面里对话，商量电脑控制系统的收口事宜。操作范围仅限：读它界面内容、发消息商量/派单；不改它的设置。（ZCode.exe 是用户自己的 agent 桌面端，Electron，窗口类名 Chrome_WidgetWin_1 —— 按 _字段 的规则写真实类名，不留空。）"
+      "why": "示例条目：一个 UWP / 终端类应用怎么放行。操作范围仅限读窗口内容、切标签页；不改设置、不碰账号资料页。⚠️ WindowsTerminal 是共享资源，若同时开着别的标签页，只操作标题符合预期的那一个。"
     }
-  ]
+  ],
+  "_模板说明": "★ 这是一份**空白模板**，不含任何真实条目 —— 真实白名单属于使用者私有数据，不进仓库（里面会暴露他在哪些软件上自动操作、以及每个软件的业务用途）。使用者把自己的条目加进 whitelist 数组即可。"
 }

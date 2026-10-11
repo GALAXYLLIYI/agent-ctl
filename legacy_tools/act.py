@@ -14,8 +14,8 @@ import os as _os
 import sys as _sys
 
 # 托管 Python 的路径特征（本机实测）：
-#   托管：<用户目录>\.workbuddy\binaries\python\versions\<ver>\python.exe
-#   系统：<用户目录>\AppData\Local\Programs\Python\Python312\python.exe
+#   托管：%USERPROFILE%\.workbuddy\binaries\python\versions\<ver>\python.exe
+#   系统：%LOCALAPPDATA%\Programs\Python\Python312\python.exe
 # 判据用「路径里有没有 .workbuddy\binaries\python」而不是「版本号」——
 # 版本会变，托管根不会（它是沙箱约定的固定落点）。
 _MANAGED_MARKERS = (".workbuddy" + _os.sep + "binaries" + _os.sep + "python",
@@ -273,10 +273,17 @@ def _cmd_read(hwnd):
 #
 # 为什么不去 import 验动作.py：那个模块在 agent-ctl 下、属新线，act.py 属老线；
 #   跨线 import 会把两条线的耦合重新焊死（本单只动 act.py）。所以这里**只读文件**。
-_SNAP_CANDIDATES = (
-    r"<工作区>\Documents\agent-ctl\work",
-    r"<工作区>\Documents\dsh-viewer-plugin\tools\_work",
-    r"<工作区>\Documents\dsh-viewer-plugin\tools",
+# ★ 不写死本机路径（开源的最低要求，也是 tools/port_legacy.py 的统一规则）。
+#   原先这里写死了三条开发机的绝对路径：换机器/换用户名全部落空，
+#   而且会把目录结构和用户名 <用户> 一起公开到仓库里。
+#   改成：**环境变量 > 脚本自身目录**。真源就放在 tools\ 下，快照目录自然在
+#   同级的 _work\，语义与原来一致，但不再依赖任何人的盘符布局。
+_SNAP_CANDIDATES = tuple(
+    d for d in (
+        os.environ.get("AGENTCTL_SNAP_DIR"),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "_work"),
+        os.path.dirname(os.path.abspath(__file__)),
+    ) if d
 )
 
 

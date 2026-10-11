@@ -36,7 +36,7 @@ src/agentctl/panel_pos.json
 # ── tools/ 只放发布链路那几个，其余一律不进仓 ──
 #   这目录有 100+ 个脚本，绝大多数是开发期的探针和一次性修补
 #   （修RX注释吞行.py / 勘察平台.py / 查路径健康.py …），
-#   里面写死了 <工作区>\... 这类本机路径，还夹着用户自己的工作笔记。
+#   里面写死了开发机的绝对路径（如 F:\<用户名>\...），还夹着本机工作笔记。
 #   它们是**本地资产**，不是项目资产 —— 留在盘上，git 不收。
 tools/*
 !tools/pack_dist.py
@@ -45,9 +45,10 @@ tools/*
 !tools/port_legacy.py
 !tools/scan_legacy.py
 !tools/s5_build.py
+!tools/whitelist_template.json
 
 # ── 过程资产：留本机，不进仓 ──
-#   tests/          验收脚本，每个都写死 <工作区>\Documents\agent-ctl\...
+#   tests/          验收脚本，每个都写死了本机 agent-ctl 仓库的绝对路径
 #                   在别的机器上根本跑不了（它们本来就是自测脚本）。
 #   docs/证据/      验收输出、探针结果，含本机绝对路径和当时的页面截图路径。
 #   docs/详细设计_v1.md / 基线摘要与开工任务书.md

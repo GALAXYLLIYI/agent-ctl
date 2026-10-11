@@ -58,6 +58,13 @@ CONTROL_CHAIN = ["perceive.py", "act.py", "gate.py", "auth_popup.py",
 PERMANENT_DROP = {
     # ① 私人数据
     "case_data.json": "真实手机号/身份证，私人数据",
+    # ★ 2026-11 加：真实窗口白名单同样是私人数据，而且泄露面更大。
+    #   那份文件里每条都带个人批注，写着各人在哪些软件上自动操作、以及那些
+    #   软件的业务用途（考试页、业务系统…）。原样拷进公开仓库，等于把
+    #   「用控制系统在特定站点上自动操作」这件事直接贴出去。
+    #   与本脚本下方 PERMANENT_DROP 第②类的立场完全一致 —— 不是修不好，
+    #   是根本不属于本项目。改为从 tools/whitelist_template.json 生成空白模板。
+    "whitelist.json": "使用者真实窗口白名单（私人数据），改用空白模板",
     # ② DSH 项目的东西（路径全指向 <另一项目> / <工作手册>）
     "★远程命脉保护清单.md": "DSH 的远程保护清单，与本项目无关",
     "guardian_policy.json": "DSH 的 guardian 策略配置",
@@ -131,6 +138,17 @@ def main() -> int:
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_bytes(data)
         copied += 1
+
+    got = {p.name for p in DST.glob("*")}
+
+    # ★ 从模板生成空白白名单（不放行真实的那份，见 PERMANENT_DROP 里的说明）
+    tpl = ROOT / "tools" / "whitelist_template.json"
+    if tpl.is_file():
+        (DST / "whitelist.json").write_text(
+            tpl.read_text(encoding="utf-8"), encoding="utf-8")
+        print("whitelist.json ← 空白模板（真实白名单是私人数据，不进仓）")
+    else:
+        print("[X] 缺 tools/whitelist_template.json，无法生成空白白名单")
 
     got = {p.name for p in DST.glob("*")}
     missing = [n for n in CONTROL_CHAIN if n not in got]
