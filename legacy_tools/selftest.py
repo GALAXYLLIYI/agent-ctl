@@ -33,15 +33,24 @@ OK, FAIL, SKIP = [], [], []
 
 
 def check(name, fn):
+    """契约：True=通过；("skip", 原因)=跳过并说明；None=跳过(原因未知)；其它=失败。
+
+    ★2026-10-12 加 ("skip", 原因)：原来跳过只印「前置条件不足」，看不出到底缺什么
+      （是缺截图？缺手册目录？），而且**掩盖了「其实一个都没查」**这类空转通过。
+      跳过必须说清原因，否则读者会以为绿的都查过了。
+    """
     try:
         r = fn()
     except Exception as e:
         FAIL.append((name, "异常: %s" % str(e)[:90]))
         return
+    if isinstance(r, tuple) and len(r) == 2 and r[0] == "skip":
+        SKIP.append((name, str(r[1])[:120]))
+        return
     if r is True:
         OK.append(name)
     elif r is None:
-        SKIP.append(name)
+        SKIP.append((name, "前置条件不足（该项没写原因，视为未验证）"))
     else:
         FAIL.append((name, r if isinstance(r, str) else "返回 False"))
 
@@ -49,6 +58,10 @@ def check(name, fn):
 def run(args):
     p = subprocess.run([PY] + args, capture_output=True)
     return p.returncode, (p.stdout + p.stderr).decode("utf-8", errors="replace")
+
+
+NO_SHOT = ("skip", "shots 目录里没有可用截图 —— 先跑一次截图类动作，"
+                   "或设 AGENTCTL_SHOTS_DIR 指向已有截图的目录")
 
 
 def newest_shot():
@@ -75,11 +88,14 @@ def t_locator_contract():
     import option_locator
     p = newest_shot()
     if not p:
-        return None
+        return NO_SHOT
     from PIL import Image
     r = option_locator.find_options(Image.open(p))
     if not r:
-        return None            # 图里可能就是没有选项，不算失败
+        # ★已知盲区：这里无法区分「这张图本来就没有选项」与「定位器彻底坏了」，
+        #   两者都返回空。要真正覆盖，需要一张【已知含选项】的固定图当夹具。
+        return ("skip", "这张图没定位到选项 ⇒ 无法区分「图本来没选项」与「定位器坏了」。"
+                        "★盲区：需一张已知含选项的固定图才能覆盖")
     if len(r[0]) != 6:
         return "返回元素数 = %d（应为 6：cy,cx,bh,bw,ratio,fill）" % len(r[0])
     return True
@@ -91,7 +107,7 @@ def t_locator_deterministic():
     import option_locator
     p = newest_shot()
     if not p:
-        return None
+        return NO_SHOT
     from PIL import Image
     a = option_locator.find_options(Image.open(p))
     b = option_locator.find_options(Image.open(p))
@@ -102,7 +118,7 @@ def t_locator_deterministic():
 def t_zoomgrid():
     p = newest_shot()
     if not p:
-        return None
+        return NO_SHOT
     rc, out = run([os.path.join(HERE, "zoomgrid.py"), p, "--box", "0,0,200,200", "--scale", "2"])
     if rc != 0:
         return "退出码 %d: %s" % (rc, out.strip().splitlines()[-1][:80] if out.strip() else "")
@@ -121,7 +137,9 @@ def t_mem_guard():
 def t_gate_denies_without_pass():
     rc, out = run([os.path.join(HERE, "gate.py"), "--check", "B级 点击滚动"])
     if rc == 0:
-        return None          # ★ 有证在生效 → 应记为「跳过」，不是失败（2026-09-20 修）
+        # ★ 有证在生效 → 应记为「跳过」，不是失败（2026-09-20 修）
+        return ("skip", "此刻有有效通行证在生效 ⇒ 这条安全不变量验不了"
+                        "（要验请让证过期，或清掉 _auth/auth_pass.json）")
     return True if ("过期" in out or "已被使用" in out or "未获授权" in out
                     or "通行证" in out) else "拒绝信息看不懂: " + out.strip()[:80]
 
@@ -147,17 +165,34 @@ def t_no_silent_action():
 def t_manual_footer():
     import datetime
     bad = []
+    seen = 0                      # ★2026-10-12：数一遍到底查了几个文件
     for f in ("SKILLS.md", "LOG.md"):
         p = os.path.join(os.environ.get("AGENTCTL_MANUAL_DIR", ""), f)
         if not os.path.exists(p):
             continue
+        seen += 1
         raw = open(p, encoding="utf-8").read()
         mt = datetime.datetime.fromtimestamp(os.path.getmtime(p)).strftime("%Y-%m-%d %H:%M")
-        for line in raw.splitlines():
-            if "最后更新" in line:
-                if mt not in line:
-                    bad.append("%s 页脚(%s)≠磁盘(%s)" % (f, line.strip()[-16:], mt))
-                break
+        # ★2026-10-12 修匹配逻辑（原来「任何含"最后更新"的行 + 只取第一处」有两个错）：
+        #   ① 太松：LOG.md 里一条散文日志行含「最后更新」，被当成页脚 ⇒ 诊断文本是散文
+        #   ② 取第一处：手册是【多分节】文件（SKILLS.md 有 19 处），第一处是几周前的
+        #      分节页脚，拿它跟文件 mtime 比**永远不成立** ⇒ 这项检查一直在误报
+        #   现在只认【块引用形态的文件级页脚】「> 最后更新：…」，且取【最后一处】。
+        foots = [ln.strip() for ln in raw.splitlines()
+                 if ln.strip().startswith(">") and "最后更新" in ln]
+        if not foots:
+            bad.append("%s 找不到文件级页脚（形如 `> 最后更新：…`）" % f)
+            continue
+        last = foots[-1]
+        if mt not in last:
+            head = last.split("｜")[0].replace(">", "").replace("最后更新：", "").strip()
+            bad.append("%s 页脚标「%s」≠磁盘 mtime「%s」（取的是最后一处块引用页脚）"
+                       % (f, head[:24], mt))
+    if seen == 0:
+        # ★ 关键：一个文件都没查到 ⇒ 这是"没验"，不是"通过"。
+        #   原实现直接 return True，于是在没设 AGENTCTL_MANUAL_DIR 时**永远绿**。
+        return ("skip", "没找到手册文件（SKILLS.md / LOG.md）—— 设 AGENTCTL_MANUAL_DIR "
+                        "指向 agent-manual 目录，或从该目录运行；本次未验证")
     return True if not bad else "；".join(bad)
 
 
@@ -181,12 +216,19 @@ def main():
         check(name, fn)
     for n in OK:
         print("  ✅ %s" % n)
-    for n in SKIP:
-        print("  ○  %s  （跳过：前置条件不足）" % n)
+    for n, why in SKIP:
+        print("  ○  %s  （跳过：%s）" % (n, why))
     for n, why in FAIL:
         print("  ❌ %s  → %s" % (n, why))
     print("-" * 62)
-    print(" 通过 %d ｜ 跳过 %d ｜ 失败 %d" % (len(OK), len(SKIP), len(FAIL)))
+    print(" 通过 %d ｜ 跳过 %d ｜ 失败 %d ｜ 共 %d 项"
+          % (len(OK), len(SKIP), len(FAIL), len(tests)))
+    if quick and not SKIP:
+        # ★ 别让"只跑了 6 项"看着像"全绿"。
+        print("  ⚠ --quick：另有 3 项依赖截图的检查【本次根本没运行】"
+              "（定位器返回契约 / 定位确定性 / zoomgrid 可跑）")
+    if SKIP:
+        print("  ⚠ 跳过 %d 项 = 这些不变量【本次没有验证过】，不等于通过。" % len(SKIP))
     return 1 if FAIL else 0
 
 
