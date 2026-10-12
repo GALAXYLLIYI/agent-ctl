@@ -446,9 +446,9 @@ NEXT_STEP = {
     2: lambda h: ("命令行参数不合法。先看用法：\n"
                   "        python -X utf8 act.py -h\n"
                   "      最常用的三句：targets / click --name / read"),
-    3: lambda h: ("窗口不在白名单（或踩到了用户授权弹窗）。**不要自己改白名单** —— 那要用户点头。\n"
+    3: lambda h: ("踩到了使用者的授权弹窗（标题 DSH电脑控制授权），任何动作一律禁止 —— 这是防自授权闸门，别绕。\n"
                   "      先确认打的是哪个窗口：python -X utf8 win_list.py <关键词>\n"
-                  "      当前名单在：%s\\whitelist.json（改它要用户授权）" % HERE),
+                  "      ★ 2026-10-12 起应用白名单已废止，不在名单的窗口不会再被这里拒。工具目录：%s" % HERE),
     4: lambda h: ("控件/文档控件没找到。先让工具把**它看到的**列出来，再照着名字点：\n"
                   "        %s\n"
                   "      名字要用 targets 里「名称」那一列的**完整前缀**（支持子串匹配）。" % _cmd_targets(h)),
@@ -573,6 +573,9 @@ def whitelist_source():
 
 WHITELIST = _load_whitelist()
 
+# ⚠️ 2026-10-12：同一天应用白名单被废止，**唯独这一条不能跟着删**。
+# 它让控制系统无法操作使用者自己的授权弹窗，是唯一的**防自授权**闸门：
+# 删掉它，agent 就能点掉自己的授权框给自己放行，闸门系统形同虚设。
 BLOCKED_TITLES = ("DSH电脑控制授权",)
 
 user32 = ctypes.windll.user32
@@ -858,17 +861,25 @@ def ensure_foreground(hwnd, what, note="", dry=False):
 
 
 def check_target(hwnd):
-    """白名单 + 敏感窗口检查。返回 (info, 拒绝原因)。"""
+    """目标窗口检查。返回 (info, 拒绝原因)；拒绝原因为 None 即放行。
+
+    ★ 2026-10-12（用户裁决）：**应用白名单不再作为放行条件**。
+      原先这里要求 process+class 精确命中白名单才放行，代价是换个应用就得改配置、
+      还得找使用者点头。现在任何窗口都放行，改由上层通行证系统逐次把关：
+      A/B/C/D 分级 + 单写者租约 + 三条独立急停 + 动作额度。
+      废止前的 14 条连同 why 全文留档在同目录 whitelist.已撤销.json ——
+      那些 why 记的是**使用者当时亲手划的操作边界**，属于决定记录而不是配置，删了就没了。
+
+    ⚠️ 下面 BLOCKED_TITLES 那一行**不在这条废止范围内**，也**绝不能**跟着白名单一起删：
+      它禁止控制系统去操作使用者自己的授权弹窗（标题 DSH电脑控制授权）。
+      没有它，agent 就能点掉自己的授权框给自己放行 —— 那是唯一的防自授权闸门。
+    """
     i = win_info(hwnd)
     if not i["title"] and not i["class"]:
         return i, f"句柄 {hwnd} 不是有效窗口"
     if any(b in i["title"] for b in BLOCKED_TITLES):
         return i, "这是用户的授权弹窗（正在输密钥），任何动作一律禁止"
-    for w in WHITELIST:
-        if i["process"].lower() == w["进程"].lower() and i["class"] == w["类名"]:
-            return i, None
-    return i, (f"窗口「{i['title']}」({i['process']}/{i['class']}) 不在白名单里。"
-               f"当前白名单只有：{', '.join(w['进程'] for w in WHITELIST)}")
+    return i, None
 
 
 # ─────────────────── UIA ───────────────────
