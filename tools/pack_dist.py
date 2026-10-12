@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 r"""打分发包：把仓库裁成 dist/agentctl.zip（install.ps1 吃的那种）。
 
-存在的唯一理由是**别把不该发的东西发到 GitHub 上**：仓库里有
+存在的唯一理由是**别把不该发的东西发到公开仓库上**：仓库里有
 baseline/tools_.../_auth/（授权状态、通行证、日志），还有一堆
 一次性调试脚本、备份文件、会话记录。手工 zip -r 一定会漏掉其中之一，
 所以走白名单 + 敏感名闸门。
@@ -34,7 +34,7 @@ ROOT = Path(__file__).resolve().parent.parent
 #
 #   仍从**已净化**的产物取，不是从 baseline/：baseline/ 是另一个项目的快照，
 #   里面有真实手机号和 _auth 授权状态，被 .gitignore 排除 —— 从那里打包
-#   等于把隐私发到 GitHub Releases。
+#   等于把隐私发到公开仓库的发行版里。
 LEGACY_SRC = None            # 由 main() 现场生成后填入
 
 # 进包的目录（白名单，不在表里的一律不发）
@@ -118,6 +118,15 @@ def blank_whitelist(name: str, data: bytes) -> bytes | None:
     return json.dumps(d, ensure_ascii=False, indent=2).encode("utf-8")
 
 
+# ★ 备份/临时文件的【明确命名模式】（2026-10-12 加）。
+#   原来是 `".bak" in path.name` —— 与 verify_dist.py 里**同一个错**：
+#   真实备份叫 core.py_bak_W1toW7_20261005（是 _bak_，**不含 ".bak"**）⇒ 一个都拦不住。
+#   实测后果：包里有 4 份过期源码备份（brake_daemon/core/gate/widget 各一份，core.py 单份 87KB）。
+#   ★ 更值得记的一点：verify_dist.py 的 docstring 明写「不复用打包脚本的判据、宁可误报」，
+#     却照抄了同一个错模式 ⇒ **裁判和运动员一起错，独立核验在这一点上失效**。
+BACKUP_PAT = re.compile(r"(\.bak($|[._])|_bak[._]|\.old($|[._])|\.orig($|[._])|\.tmp$|~$|\.swp$)", re.I)
+
+
 def guard(path: Path, rel: Path, keep_private: bool = False) -> str:
     """敏感检查：命中就直接 SystemExit，不给「照发」的选项。"""
     # ★ T14 阶段 2：md5 台账必须随包留档（工单判据 5），但它以 _ 开头，
@@ -140,7 +149,7 @@ def guard(path: Path, rel: Path, keep_private: bool = False) -> str:
         return "本机运行数据/缓存"
     if path.suffix.lower() in ALWAYS_EXCLUDE_EXT:
         return "编译产物/日志"
-    if ".bak" in path.name:
+    if BACKUP_PAT.search(path.name):
         return "备份文件"
     if path.name.startswith("_") and not keep_private:
         return "一次性脚本"
@@ -283,7 +292,25 @@ def main() -> int:
     for why, n in Counter(w for _, w in st["skip"]).most_common(8):
         print("    %s: %d" % (why, n))
     print()
-    print("发布：git tag v1.2.0 && gh release create v1.2.0 dist/agentctl.zip")
+    # ★2026-10-12 改：原来写死 "git tag v1.2.0 && gh release create …" ——
+    #   仓库在 **Gitee**（gh 用不上），而且 v1.2.0 是手写的旧版本号，改一次就过期。
+    #   现在版本号从 README 现读，发布口径按 Gitee 写，并把「仓库不公开=别人装不上」顶出来。
+    _v = None
+    try:
+        _m = re.search(r"版本\s*([0-9]+\.[0-9]+\.[0-9]+)",
+                       (ROOT / "README.md").read_text(encoding="utf-8"))
+        if _m:
+            _v = _m.group(1)
+    except Exception:
+        pass
+    print()
+    print("发布（仓库在 Gitee，不是 GitHub；gh 用不上）：")
+    if _v:
+        print("  git tag v%s && git push origin v%s" % (_v, _v))
+        print("  然后在 Gitee 仓库页 → 发行版/Release 新建，把 dist/agentctl.zip 附上")
+    else:
+        print("  先在 README 里标明版本号，再打 tag；然后在 Gitee 仓库页建 Release 并附上本 zip")
+    print("  ★ 仓库若仍是私有，别人 `irm` 装不上（匿名请求会拿到 403）—— 公开前别对外发安装命令")
     return 0
 
 

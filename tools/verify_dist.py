@@ -25,6 +25,12 @@ BAD_NAMES = {
 }
 PAT = re.compile(r"credential|secret|token|password|passwd|api[_-]?key|\.pem$|\.pfx$|\.key$", re.I)
 
+# ★ 备份/临时文件的【明确命名模式】（2026-10-12 加）。
+#   故意不写「下划线开头」—— src/ 下有 __init__.py / _bundled_deps.py 这类合法文件，
+#   一刀切会误报（实测报过这两个）；而真正的备份是 core.py_bak_W1toW7_20261005 这种
+#   `_bak_` 形态，旧判据 ".bak" in base **抓不到**（漏报）。两头都错，所以重写。
+BACKUP_PAT = re.compile(r"(\.bak($|[._])|_bak[._]|\.old($|[._])|\.orig($|[._])|\.tmp$|~$|\.swp$)", re.I)
+
 MUST = [
     "app/src/agentctl_main.py",
     "app/src/agentctl/__init__.py",
@@ -60,7 +66,7 @@ with zipfile.ZipFile(ZIP) as z:
             bad.append("含本机运行数据目录：%s" % n)
         if low.endswith((".pyc", ".pyd", ".log")):
             warn.append("编译产物/日志：%s" % n)
-        if ".bak" in base or base.startswith("_"):
+        if BACKUP_PAT.search(base):
             warn.append("临时/备份：%s" % n)
 
 miss = [m for m in MUST if m not in names]
@@ -75,6 +81,9 @@ for w in warn[:10]:
     print("  [!] " + w)
 if len(warn) > 10:
     print("  [!] …… 另有 %d 条同类" % (len(warn) - 10))
+if warn:
+    print("  [!] 提醒合计 %d 条（不阻断，但要看；判据 = tools/verify_dist.py 的 BACKUP_PAT）"
+          % len(warn))
 for m in miss:
     print("  [X] 缺件：%s" % m)
 
