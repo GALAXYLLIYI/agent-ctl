@@ -202,12 +202,11 @@ def _flash_alert_sync(ok=True, why=""):
         root = tk.Tk()
         root.overrideredirect(True)
         root.attributes("-topmost", True)
-        sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
+        sw, _ = root.winfo_screenwidth(), root.winfo_screenheight()
         w, h = 560, 96
         root.geometry("%dx%d+%d+%d" % (w, h, (sw - w) // 2, 90))
         bg = "#C42B1C" if ok else "#8A1A1A"
         root.configure(bg=bg)
-        import time as _t
         tk.Label(root, text=("⛔ 急停已生效" if ok else "⛔ 急停失败"),
                  bg=bg, fg="#FFFFFF", font=("Microsoft YaHei UI", 26, "bold")).pack(pady=(14, 0))
         tk.Label(root, text=why or ("一切自动控制已停止。解除：面板「▶ 解除急停」" if ok else ""),

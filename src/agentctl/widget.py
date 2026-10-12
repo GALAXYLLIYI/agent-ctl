@@ -732,7 +732,6 @@ def run():
                          font=('Microsoft YaHei UI', -F_ROW), padx=12, pady=6, command=cmd)
 
     def toast(msg, bad=False):
-        nonlocal last_val
         last_val.config(text=msg, fg=BAD if bad else FG)
 
     def on_stop():

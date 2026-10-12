@@ -19,7 +19,6 @@ import json
 import os
 import secrets
 import sys
-import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))

@@ -29,36 +29,38 @@ def load() -> dict:
     """逐个 import，返回 {模块名: 成功?}。**缺哪个就少哪个能力，如实报出来**，
     不让服务整体起不来。只在需要时调用（别在每次 CLI 调用都跑）。"""
     r: dict[str, bool] = {}
+    # ★ 下面每行赋值写成 `X is not None`（恒 True）只为让 pyflakes 看见 import 被引用；
+    #   这些 import 的真正用途是给 PyInstaller 静态分析（见文件头），运行期行为与 `= True` 完全一致。
 
     # ── pywin32（perceive.py / act.py 必需）──
     try:
-        import win32gui; r["win32gui"] = True
+        import win32gui; r["win32gui"] = win32gui is not None
     except Exception:
         r["win32gui"] = False
     try:
-        import win32api; r["win32api"] = True
+        import win32api; r["win32api"] = win32api is not None
     except Exception:
         r["win32api"] = False
     try:
-        import win32con; r["win32con"] = True
+        import win32con; r["win32con"] = win32con is not None
     except Exception:
         r["win32con"] = False
     try:
-        import win32process; r["win32process"] = True
+        import win32process; r["win32process"] = win32process is not None
     except Exception:
         r["win32process"] = False
     try:
-        import win32ui; r["win32ui"] = True
+        import win32ui; r["win32ui"] = win32ui is not None
     except Exception:
         r["win32ui"] = False
     try:
-        import win32clipboard; r["win32clipboard"] = True
+        import win32clipboard; r["win32clipboard"] = win32clipboard is not None
     except Exception:
         r["win32clipboard"] = False
 
     # ── UIA / COM ──
     try:
-        import uiautomation; r["uiautomation"] = True
+        import uiautomation; r["uiautomation"] = uiautomation is not None
     except Exception:
         r["uiautomation"] = False
     try:
@@ -66,61 +68,61 @@ def load() -> dict:
     except Exception:
         r["comtypes"] = False
     try:
-        import comtypes.client; r["comtypes.client"] = True
+        import comtypes.client; r["comtypes.client"] = comtypes is not None
     except Exception:
         r["comtypes.client"] = False
 
     # ── 图像 / 采集 ──
     try:
-        from PIL import Image; r["PIL.Image"] = True
+        from PIL import Image; r["PIL.Image"] = Image is not None
     except Exception:
         r["PIL.Image"] = False
     try:
-        from PIL import ImageGrab; r["PIL.ImageGrab"] = True
+        from PIL import ImageGrab; r["PIL.ImageGrab"] = ImageGrab is not None
     except Exception:
         r["PIL.ImageGrab"] = False
     try:
-        from PIL import ImageDraw; r["PIL.ImageDraw"] = True
+        from PIL import ImageDraw; r["PIL.ImageDraw"] = ImageDraw is not None
     except Exception:
         r["PIL.ImageDraw"] = False
     try:
-        from PIL import ImageFont; r["PIL.ImageFont"] = True
+        from PIL import ImageFont; r["PIL.ImageFont"] = ImageFont is not None
     except Exception:
         r["PIL.ImageFont"] = False
     try:
-        from PIL import ImageStat; r["PIL.ImageStat"] = True      # ★ 漏过它，冻结后 perceive.py 直接崩
+        from PIL import ImageStat; r["PIL.ImageStat"] = ImageStat is not None      # ★ 漏过它，冻结后 perceive.py 直接崩
     except Exception:
         r["PIL.ImageStat"] = False
     try:
-        import mss; r["mss"] = True
+        import mss; r["mss"] = mss is not None
     except Exception:
         r["mss"] = False
 
     # ── 其它控制链路依赖 ──
     try:
-        import win32com.client; r["win32com.client"] = True
+        import win32com.client; r["win32com.client"] = win32com is not None
     except Exception:
         r["win32com.client"] = False
     try:
-        import websocket; r["websocket"] = True                   # cdp.py 走 CDP 要用
+        import websocket; r["websocket"] = websocket is not None                   # cdp.py 走 CDP 要用
     except Exception:
         r["websocket"] = False
     try:
-        import zstandard; r["zstandard"] = True
+        import zstandard; r["zstandard"] = zstandard is not None
     except Exception:
         r["zstandard"] = False
 
     # ── 其它 ──
     try:
-        import psutil; r["psutil"] = True
+        import psutil; r["psutil"] = psutil is not None
     except Exception:
         r["psutil"] = False
     try:
-        import numpy; r["numpy"] = True
+        import numpy; r["numpy"] = numpy is not None
     except Exception:
         r["numpy"] = False
     try:
-        import tkinter; r["tkinter"] = True
+        import tkinter; r["tkinter"] = tkinter is not None
     except Exception:
         r["tkinter"] = False
 
@@ -142,11 +144,11 @@ def load() -> dict:
     except Exception:
         r["winrt.windows.globalization"] = False
     try:
-        import winrt.windows.foundation; r["winrt.windows.foundation"] = True
+        import winrt.windows.foundation; r["winrt.windows.foundation"] = winrt is not None
     except Exception:
         r["winrt.windows.foundation"] = False
     try:
-        import windows_capture; r["windows_capture"] = True
+        import windows_capture; r["windows_capture"] = windows_capture is not None
     except Exception:
         r["windows_capture"] = False
 
