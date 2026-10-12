@@ -1251,6 +1251,35 @@ def _map_rc(rc: int, out: str, err: str) -> dict:
     return env(code=code, data={"rc": rc, "raw": txt[:3000]}, warning=warn)
 
 
+# ────────────── T17 闭环：动作的独立验证（2026-10-12）──────────────
+# 为什么：GUI 动作**没有返回值**，「接口回执说成功」不等于「事情发生了」。
+# 本项目实测过：对 Chromium 窗口后台点击，接口返回成功、**控件零反应**。
+# 所以调用方可以**在动作【前】**声明一个机器可判的期望（谓词与 tools/验动作.py 同一套），
+# 由 _act 在动作前后各拍一次快照、独立判定；判定不过就**不报 ok**。
+# ★ 只以子进程调脚本、**不 import**：验动作.py 模块级会在缺 psutil 时 sys.exit(3)，
+#   import 它会连累本进程一起退出。子进程也保持"判定逻辑唯一定义处"。
+VERIFY_REL = os.path.join("tools", "验动作.py")
+
+
+def _verify_py():
+    """定位判定器。AGENTCTL_VERIFY_PY 优先，其次仓库根 / _MEIPASS / src 上一级。"""
+    for p in (os.environ.get("AGENTCTL_VERIFY_PY"),
+              os.path.join(ROOT, VERIFY_REL),
+              os.path.join(getattr(sys, "_MEIPASS", ROOT), VERIFY_REL),
+              os.path.join(BASE, VERIFY_REL)):
+        if p and os.path.exists(p):
+            return p
+    return None
+
+
+def _cl_run(py: str, argv: list, timeout: int = 300):
+    """跑一次判定器，返回 (rc, 合并输出)。判定口径由脚本自己负责，这里不解释。"""
+    p = subprocess.run([sys.executable, "-X", "utf8", py] + list(argv),
+                       capture_output=True, text=True, encoding="utf-8",
+                       errors="replace", timeout=timeout)
+    return p.returncode, (p.stdout or "") + (p.stderr or "")
+
+
 def _act(action: str, args: dict, argv: list[str], scope: str = "B") -> dict:
     """统一：**先验证通行证（非消耗）→ 再验租约 → 再验观测绑定 → 调 act.py → 成功后消费 capture_id**。
 
@@ -1274,6 +1303,31 @@ def _act(action: str, args: dict, argv: list[str], scope: str = "B") -> dict:
     err = _bind_capture(args, hwnd)
     if err:
         return err
+
+    # ★ T17 闭环前半（2026-10-12）：声明了 verify_expect ⇒ 先确认判定器在，再拍「前」快照。
+    #   必须在**动作之前**拍 —— 事后补拍无法归因（这是 T3 换来的教训）。
+    #   判定器缺失时【拒绝执行】而不是静默跳过：声明了要验、却验不了，不算完成。
+    #   ★ 键名为什么带 verify_ 前缀：`expect` 这个键 **t_click 早已占用**，含义是
+    #     「你看到的元素名字」（点 eid 前核对名字变没变）。同名不同义会造成静默误判 ——
+    #     实测过：拿 expect 当谓词传进去，动作被当成"元素改名了"直接拒绝不点。
+    exp = (args.get("verify_expect") or "").strip()
+    watch = (args.get("verify_watch") or "").strip()
+    _cl = None
+    if exp:
+        _vy = _verify_py()
+        if not _vy:
+            return env(code=gate.CODE_UNSTABLE,
+                       warning="声明了 verify_expect，但找不到判定器 tools/验动作.py —— "
+                               "无法独立验证就不能算完成（fail-closed）。"
+                               "可用环境变量 AGENTCTL_VERIFY_PY 指定路径，或去掉 verify_expect。")
+        _tagbase = "cl_%d_%d" % (os.getpid(), time.time_ns())
+        _cl = {"py": _vy, "before": _tagbase + "_b", "after": _tagbase + "_a"}
+        _rcv, _outv = _cl_run(_vy, ["snap", "--tag", _cl["before"],
+                                    "--paths", watch, "--expect", exp])
+        if _rcv != 0:
+            return env(code=gate.CODE_UNSTABLE, data={"raw": _outv[-800:]},
+                       warning="动作【前】快照失败 ⇒ 拒绝执行（没拍到「前」，事后无法归因）")
+
     rc, out, e = _legacy("act.py", argv, timeout=int(args.get("timeout_sec") or ACT_TIMEOUT_SEC))
     r = _map_rc(rc, out, e)
 
@@ -1297,6 +1351,39 @@ def _act(action: str, args: dict, argv: list[str], scope: str = "B") -> dict:
             gate.consume_capture(_cap)
         except Exception:
             pass
+
+    # ★ T17 闭环后半（2026-10-12）。四条硬约束：
+    #   ① 不声明 expect 时，**一个字段都不加** ⇒ 输出与改前逐字节一致（非破坏性）
+    #   ② unknown / 快照不可比 都【不算成功】—— 与 验动作.py 同口径
+    #   ③ 动作自身的 rc 与判定 verdict **两个都报**，互不掩盖
+    #   ④ expect 必须在动作前声明（见上面 _cl）
+    if _cl:
+        _rcv, _outv = _cl_run(_cl["py"], ["snap", "--tag", _cl["after"], "--paths", watch])
+        if _rcv != 0:
+            verdict = "unknown"
+            _vdetail = {"snap_error": _outv[-500:]}
+        else:
+            _rcj, _outj = _cl_run(_cl["py"], ["check", "--tag", _cl["after"],
+                                              "--before", _cl["before"],
+                                              "--action", action, "--tier", scope])
+            verdict = {0: "satisfied", 3: "unsatisfied", 4: "unknown",
+                       5: "snapshots-incomparable"}.get(_rcj, "unknown")
+            _vdetail = {"judge_rc": _rcj, "judge_tail": _outj[-700:]}
+        r["verdict"] = verdict
+        r["verify"] = {"expect": exp, "watch": watch,
+                       "action_ok": bool(r.get("ok")), **_vdetail}
+        if r.get("ok") and verdict != "satisfied":
+            _code = gate.CODE_NO_CHANGE if verdict == "unsatisfied" else gate.CODE_UNSTABLE
+            # ★ 顶层也带上 verdict/verify：成功路径是挂在 r["verdict"] 上的，
+            #   失败路径若只放进 data，agent 就得记两个位置 —— 同一件事必须只有一个读法。
+            return env(code=_code, verdict=verdict,
+                       verify={"expect": exp, "watch": watch, "action_ok": True, **_vdetail},
+                       data={"rc": (r.get("data") or {}).get("rc"),
+                             "action_ok": True, "verdict": verdict,
+                             "expect": exp, **_vdetail},
+                       warning="★ 动作执行了，但【独立验证没通过】：verdict=%s。"
+                               "两个结果都在（动作 rc 在 data.rc、判定 verdict 在本条）—— 别只看一个。"
+                               "expect=%s" % (verdict, exp))
     return r
 
 
