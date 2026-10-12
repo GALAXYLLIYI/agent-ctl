@@ -723,6 +723,29 @@ def _owner_chain(hwnd, target, depth=4):
     return False
 
 
+def _ancestor_chain(hwnd, depth=64):
+    """从 hwnd 沿【父/属主链】向上，返回沿途窗口（含自身）。
+
+    ★2026-10-12 新增。原 modal_blocker 只按「同进程有可见对话框」判，于是：
+      ① 目标是对话框【本身】时，枚举会找到它自己 ⇒ 自己把自己挡死（rc=6）
+      ② 目标是对话框【里面的控件】时，那个对话框是它的祖先 ⇒ 同样被挡
+      两种都是假阳性 —— 那个对话框不是挡路的，它就是你要操作的东西。
+    """
+    out, cur = [], hwnd
+    for _ in range(depth):
+        if not cur:
+            break
+        out.append(cur)
+        try:
+            nxt = user32.GetParent(cur)      # 子窗口返回父；顶层弹出窗返回属主
+        except Exception:
+            break
+        if not nxt or nxt == cur:
+            break
+        cur = nxt
+    return out
+
+
 def modal_blocker(hwnd):
     """返回 (是否被挡, 说明)。纯只读探测：只枚举与查询，不做任何动作。"""
     try:
@@ -738,6 +761,11 @@ def modal_blocker(hwnd):
     except Exception:
         return False, ""
 
+    # ★2026-10-12：先算出「目标自己 + 它的全部祖先」。枚举到的对话框若落在这条链上，
+    #   说明它就是目标本人或目标的容器 —— **不是挡路的那个**，必须跳过。
+    #   （修前：目标 = 对话框本身 ⇒ 枚举找到自己 ⇒ 自己把自己挡死，返回 rc=6）
+    _chain = _ancestor_chain(hwnd)
+
     found = []
 
     @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
@@ -745,6 +773,8 @@ def modal_blocker(hwnd):
         try:
             if not user32.IsWindowVisible(h):
                 return True
+            if h in _chain:
+                return True                  # 目标自己 / 目标的祖先 ⇒ 不是挡路的
             cls = win32gui.GetClassName(h) or ""
             if cls not in DIALOG_CLASSES:
                 return True

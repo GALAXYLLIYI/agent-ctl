@@ -196,6 +196,126 @@ def t_manual_footer():
     return True if not bad else "；".join(bad)
 
 
+# ── 10. modal_blocker 不得「自己挡自己」（2026-10-12 T17 修，防回归）──────
+_MODAL_CHILD = """
+import sys, io, ctypes, threading
+import win32gui, win32con
+user32 = ctypes.windll.user32
+mode, flag = sys.argv[1], sys.argv[2]
+
+def wndproc(h, msg, w, l):
+    if msg == win32con.WM_CLOSE:
+        user32.PostQuitMessage(0); return 0
+    if msg == win32con.WM_USER + 1:
+        threading.Thread(target=lambda: user32.MessageBoxW(h, "selftest", "selftest", 0),
+                         daemon=True).start()
+        return 0
+    return user32.DefWindowProcW(h, msg, w, l)
+
+wc = win32gui.WNDCLASS()
+wc.lpfnWndProc = wndproc
+wc.lpszClassName = "AgentCtlModalSelfTest"
+wc.hInstance = win32gui.GetModuleHandle(None)
+try:
+    win32gui.RegisterClass(wc)
+except Exception:
+    pass
+h = win32gui.CreateWindow(wc.lpszClassName, "AgentCtlModalSelfTest",
+                          win32con.WS_OVERLAPPEDWINDOW, 140, 140, 380, 260, 0, 0,
+                          wc.hInstance, None)
+win32gui.ShowWindow(h, win32con.SW_SHOW)
+io.open(flag, "w").write(str(h))
+if mode == "modal":
+    user32.PostMessageW(h, win32con.WM_USER + 1, 0, 0)
+win32gui.PumpMessages()
+"""
+
+
+def t_modal_not_self_blocking():
+    """真机复现过的缺陷：目标 = 对话框【本身】时，modal_blocker 枚举到它自己 ⇒ 判「被挡」(rc=6)。
+
+    两条断言：
+      ① 目标进程有真模态   ⇒ 必须【被挡】  （安全护栏 —— 不许被这次修改放松）
+      ② 目标 = 对话框本身  ⇒ 必须【未被挡】（修前是 True，这就是那个假阳性）
+    ★ 自造夹具，不碰用户窗口、不用授权、不产生输入事件。夹具起不来就跳过并说明。
+    """
+    try:
+        import ctypes
+        import tempfile
+        import win32gui
+        import win32process
+    except Exception as e:
+        return ("skip", "缺 win32 依赖：%s" % e)
+    import subprocess
+    import time as _t
+
+    sys.path.insert(0, HERE)
+    user32 = ctypes.windll.user32
+    box = tempfile.mkdtemp(prefix="_st_modal_")
+    child = os.path.join(box, "child.py")
+    with open(child, "w", encoding="utf-8") as f:
+        f.write(_MODAL_CHILD)
+
+    flag = os.path.join(box, "flag.txt")
+    p = subprocess.Popen([PY, child, "modal", flag], cwd=box,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    hwnd = 0
+    t0 = _t.time()
+    while _t.time() - t0 < 8:
+        _t.sleep(0.1)
+        if os.path.exists(flag):
+            try:
+                hwnd = int(open(flag).read().strip())
+            except Exception:
+                hwnd = 0
+            if hwnd:
+                break
+    if not hwnd:
+        p.kill()
+        return ("skip", "自造夹具窗口没起来（环境不允许建窗，本次未验证）")
+    _t.sleep(0.7)
+
+    got = []
+
+    @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+    def cb(h, _l):
+        try:
+            if h == hwnd or not user32.IsWindowVisible(h):
+                return True
+            if (win32gui.GetClassName(h) or "") != "#32770":
+                return True
+            _t2, p2 = win32process.GetWindowThreadProcessId(h)
+            if p2 == p.pid:
+                got.append(h)
+        except Exception:
+            pass
+        return True
+
+    dlg = 0
+    for _ in range(25):
+        got.clear()
+        user32.EnumWindows(cb, 0)
+        if got:
+            dlg = got[0]
+            break
+        _t.sleep(0.2)
+    if not dlg:
+        p.kill()
+        return ("skip", "夹具的 MessageBox 没找到（本次未验证）")
+
+    import act
+    b_modal, _w = act.modal_blocker(hwnd)
+    b_self, _w2 = act.modal_blocker(dlg)
+    p.kill()
+
+    if not b_modal:
+        return "目标进程上有真模态，modal_blocker 却判【未被挡】—— 安全护栏失效"
+    if b_self:
+        return ("modal_blocker 把「目标=对话框本身」判成【被挡】（自己挡自己）"
+                "—— 这正是 2026-10-12 修掉的假阳性，现在回归了")
+    return True
+
+
 def main():
     quick = "--quick" in sys.argv
     tests = [("模块可导入", t_imports),
@@ -203,7 +323,8 @@ def main():
              ("act.py 无静默动作", t_no_silent_action),
              ("资源守卫可报数", t_mem_guard),
              ("闸门无证必拒", t_gate_denies_without_pass),
-             ("手册页脚=磁盘时间", t_manual_footer)]
+             ("手册页脚=磁盘时间", t_manual_footer),
+             ("modal 不自己挡自己", t_modal_not_self_blocking)]
     if not quick:
         tests += [("定位器返回契约", t_locator_contract),
                   ("定位确定性", t_locator_deterministic),
