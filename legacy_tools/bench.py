@@ -55,6 +55,11 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 PY = sys.executable
 # ★ 两者都能被环境变量指向【别的候选实现】—— 用来做对照实验：
 #   喂给它一个"永远说成功"的坏判定器，看 bench 抓不抓得到（抓不到就是死检查）。
+# ★ 被测的 agentctl 包位置。AGENTCTL_BENCH_SRC 可覆盖 —— 用来做对照实验：
+#   指向一份"被改坏"的包，看 bench 会不会红（不能红就说明这些检查是死的）。
+SRC_DIR = os.path.abspath(os.environ.get("AGENTCTL_BENCH_SRC")
+                          or os.path.join(HERE, "..", "src"))
+
 VERIFY = os.path.abspath(os.environ.get("AGENTCTL_VERIFY_PY")
                          or os.path.join(HERE, "..", "tools", "验动作.py"))
 LOOP = os.path.abspath(os.environ.get("AGENTCTL_LOOP_PY")
@@ -335,10 +340,9 @@ def b8_modal_not_self_blocking():
 # ══════════════════ B9–B10：主路（core.py::_act） ══════════════════
 def _core_ready():
     """能不能测主路：要有 agentctl 包 + 一张有效 B 级通行证。"""
-    src = os.path.abspath(os.path.join(HERE, "..", "src"))
-    if not os.path.isdir(os.path.join(src, "agentctl")):
-        return None, "找不到 agentctl 包（%s）" % src
-    sys.path.insert(0, src)
+    if not os.path.isdir(os.path.join(SRC_DIR, "agentctl")):
+        return None, "找不到 agentctl 包（%s）" % SRC_DIR
+    sys.path.insert(0, SRC_DIR)
     try:
         from agentctl import core, gate
     except Exception as e:
@@ -403,6 +407,110 @@ def b10_main_no_keys():
     return True
 
 
+# ══════════════════ B11：最小化窗口不许被误读（回执可信度规矩②）══════════════════
+_MIN_CHILD = """
+import sys, io, ctypes
+import win32gui, win32con
+user32 = ctypes.windll.user32
+flag = sys.argv[1]
+
+def wndproc(h, msg, w, l):
+    return user32.DefWindowProcW(h, msg, w, l)
+
+wc = win32gui.WNDCLASS()
+wc.lpfnWndProc = wndproc
+wc.lpszClassName = "AgentCtlBenchMin"
+wc.hInstance = win32gui.GetModuleHandle(None)
+try:
+    win32gui.RegisterClass(wc)
+except Exception:
+    pass
+h = win32gui.CreateWindow(wc.lpszClassName, "AgentCtlBenchMin",
+                          win32con.WS_OVERLAPPEDWINDOW, 240, 240, 360, 240, 0, 0,
+                          wc.hInstance, None)
+win32gui.ShowWindow(h, win32con.SW_SHOW)
+io.open(flag, "w").write(str(h))
+win32gui.ShowWindow(h, win32con.SW_MINIMIZE)
+win32gui.PumpMessages()
+"""
+
+
+def b11_minimized_window_not_misread():
+    """规矩②：最小化窗口的 UIA 树会塌 —— 必须被识别成「窗口不可读」，不许当成「元素不存在」。
+
+    A 最小化窗口 + 任意 eid ⇒ 必须回「不可读 / 先把窗口叫醒」
+    B 可见窗口  + 假 eid    ⇒ 必须回「元素…不存在」（对照：证明 A 的判据不是把一切都拒了）
+    ★ 两条拒绝都在 _act（闸门）之前，所以本项不需要通行证。
+    """
+    try:
+        import win32con          # noqa: F401
+        import win32gui          # noqa: F401
+    except Exception as e:
+        return ("skip", "缺 win32 依赖：%s" % e)
+    if not os.path.isdir(os.path.join(SRC_DIR, "agentctl")):
+        return ("skip", "找不到 agentctl 包（%s）" % SRC_DIR)
+    sys.path.insert(0, SRC_DIR)
+    sys.path.insert(0, HERE)
+    try:
+        from agentctl import core
+    except Exception as e:
+        return ("skip", "import agentctl 失败：%s" % e)
+
+    def spawn():
+        b = sandbox("b11")
+        child = os.path.join(b, "child.py")
+        io.open(child, "w", encoding="utf-8").write(_MIN_CHILD)
+        flag = os.path.join(b, "flag.txt")
+        pr = subprocess.Popen([PY, child, flag], cwd=b,
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        h = 0
+        t0 = time.time()
+        while time.time() - t0 < 8:
+            time.sleep(0.1)
+            if os.path.exists(flag):
+                try:
+                    h = int(io.open(flag).read().strip())
+                except Exception:
+                    h = 0
+                if h:
+                    break
+        time.sleep(0.9)          # 等最小化真正生效
+        return pr, h
+
+    pr, h = spawn()
+    if not h:
+        pr.kill()
+        return ("skip", "自造窗口没起来（环境不允许建窗，本次未验证）")
+    eA = core.t_click({"hwnd": h, "eid": "e1"})
+    pr.kill()
+    wA = eA.get("warning") or ""
+    if eA.get("ok") or not ("不可读" in wA or "叫醒" in wA):
+        return ("最小化窗口应被识别成「不可读 / 先叫醒」，实际 ok=%s code=%s warning=%r"
+                % (eA.get("ok"), eA.get("code"), wA[:90]))
+
+    pr2, h2 = spawn()
+    if not h2:
+        pr2.kill()
+        return "对照窗口没起来"
+    # 对照：把窗口恢复成可见，再用一个假 eid
+    try:
+        import win32gui as _g
+        import win32con as _c
+        _g.ShowWindow(h2, _c.SW_RESTORE)
+        time.sleep(0.6)
+    except Exception:
+        pass
+    eB = core.t_click({"hwnd": h2, "eid": "zzz_bench_不存在"})
+    pr2.kill()
+    wB = eB.get("warning") or ""
+    if "不可读" in wB or "叫醒" in wB:
+        return "可见窗口也被判成「不可读」⇒ 可读性判据过严，warning=%r" % wB[:90]
+    if ("不存在" not in wB) and ("重新" not in wB):
+        return ("可见窗口 + 假 eid 的响应出乎意料：ok=%s code=%s warning=%r"
+                % (eB.get("ok"), eB.get("code"), wB[:90]))
+    return True
+
+
 CASES = [
     ("B1  判定器正例（真变⇒0）", b1_verify_positive),
     ("B2  ★判定器负例（没变⇒3）", b2_verify_negative),
@@ -414,6 +522,7 @@ CASES = [
     ("B8  模态不自己挡自己", b8_modal_not_self_blocking),
     ("B9  ★主路 verify_expect 不满足", b9_main_negative),
     ("B10 主路不声明验证键不加字段", b10_main_no_keys),
+    ("B11 最小化窗口不许被误读", b11_minimized_window_not_misread),
 ]
 
 
