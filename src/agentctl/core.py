@@ -1253,27 +1253,24 @@ def _map_rc(rc: int, out: str, err: str) -> dict:
 # ────────────── T17 闭环：动作的独立验证（2026-10-12）──────────────
 # 为什么：GUI 动作**没有返回值**，「接口回执说成功」不等于「事情发生了」。
 # 本项目实测过：对 Chromium 窗口后台点击，接口返回成功、**控件零反应**。
-# 所以调用方可以**在动作【前】**声明一个机器可判的期望（谓词与 tools/验动作.py 同一套），
+# 所以调用方可以**在动作【前】**声明一个机器可判的期望（谓词与 legacy_tools/验动作.py 同一套），
 # 由 _act 在动作前后各拍一次快照、独立判定；判定不过就**不报 ok**。
 # ★ 只以子进程调脚本、**不 import**：验动作.py 模块级会在缺 psutil 时 sys.exit(3)，
 #   import 它会连累本进程一起退出。子进程也保持"判定逻辑唯一定义处"。
-VERIFY_REL = os.path.join("tools", "验动作.py")
-# ★ T17 A3-(a)（2026-10-12 用户拍板）：闭环三件现在随 legacy_tools 走（登记进
-#   gen_legacy.FILES），所以判定器会落在 legacy_tools\ 而不是 tools\。
-#   原来只找 ROOT/tools/ ⇒ 装出去的那份找不到判定器 ⇒ 声明 verify_expect 的动作会被
-#   fail-closed 硬拒绝（功能等于废掉）。两种布局都要能自洽。
-VERIFY_REL_LEGACY = os.path.join("legacy_tools", "验动作.py")
+# ★ C3（2026-10-12）：判定器**只可能在 legacy_tools\**。
+#   它的真源是 `dsh-viewer-plugin\tools\`，产物由 gen_legacy 落到 legacy_tools\。
+#   原来这里同时找 tools\ 和 legacy_tools\ 两处，是因为 tools\ 还留着第二份 tracked 副本；
+#   那份已按 C3 删除 —— 第二真源正是本项目反复出病的根，留着它迟早又会被改坏而没人回写真源。
+#   ⇒ 收口后只该有一边，故砍掉 tools\ 分支。gen_legacy 的「反平行副本检查」是配套的主防线。
+VERIFY_REL = os.path.join("legacy_tools", "验动作.py")
 
 
 def _verify_py():
     """定位判定器。AGENTCTL_VERIFY_PY 优先，其次仓库根 / _MEIPASS / src 上一级。"""
     for p in (os.environ.get("AGENTCTL_VERIFY_PY"),
               os.path.join(ROOT, VERIFY_REL),
-              os.path.join(ROOT, VERIFY_REL_LEGACY),
               os.path.join(getattr(sys, "_MEIPASS", ROOT), VERIFY_REL),
-              os.path.join(getattr(sys, "_MEIPASS", ROOT), VERIFY_REL_LEGACY),
-              os.path.join(BASE, VERIFY_REL),
-              os.path.join(BASE, VERIFY_REL_LEGACY)):
+              os.path.join(BASE, VERIFY_REL)):
         if p and os.path.exists(p):
             return p
     return None
@@ -1324,7 +1321,7 @@ def _act(action: str, args: dict, argv: list[str], scope: str = "B") -> dict:
         _vy = _verify_py()
         if not _vy:
             return env(code=gate.CODE_UNSTABLE,
-                       warning="声明了 verify_expect，但找不到判定器 tools/验动作.py —— "
+                       warning="声明了 verify_expect，但找不到判定器 legacy_tools/验动作.py —— "
                                "无法独立验证就不能算完成（fail-closed）。"
                                "可用环境变量 AGENTCTL_VERIFY_PY 指定路径，或去掉 verify_expect。")
         _tagbase = "cl_%d_%d" % (os.getpid(), time.time_ns())

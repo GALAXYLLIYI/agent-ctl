@@ -50,11 +50,10 @@ tools/*
 !tools/scan_legacy.py
 !tools/s5_build.py
 !tools/whitelist_template.json
-# 动作可信闭环：三值判定 + 只追加档位账本（2026-10-12 T16 P3 纳入）
-#   已去开发机绝对路径：账本目录默认脚本相对，可用 AGENTCTL_VERIFY_WORK 覆盖。
-!tools/验动作.py
-# 闭环入口：给任何动作套「期望→动作→独立验证→三值判定→只追加账本」（2026-10-12 T17）
-!tools/闭环.py
+# ★ C3（2026-10-12）：`tools\验动作.py` / `tools\闭环.py` 的白名单**已撤**。
+#   这两份的真源是 `dsh-viewer-plugin\tools\`，产物落在 `legacy_tools\`（由 gen_legacy 生成）。
+#   在 tools\ 再留一份 tracked 副本 = **第二真源**，而第二真源正是本项目反复出病的根。
+#   ⇒ 别再加回来。gen_legacy 现在有「反平行副本检查」兜底：tools\ 下出现 FILES 同名文件即报错退出。
 
 # ── 过程资产：留本机，不进仓 ──
 #   tests/          验收脚本，每个都写死了本机 agent-ctl 仓库的绝对路径

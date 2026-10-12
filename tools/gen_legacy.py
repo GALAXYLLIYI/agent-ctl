@@ -191,6 +191,35 @@ def fix_missing_imports(data):
     return ("\n".join(L) + ("\n" if src.endswith("\n") else "")).encode("utf-8"), sorted(set(added))
 
 
+def check_parallel_copies():
+    """反平行副本检查：`tools\\` 下若出现与 FILES 同名的文件，直接报错退出。
+
+    ★ C3（2026-10-12）。为什么这是**主防线**而不只是顺手清理：
+      1. `.gitignore` 里是 `tools/*` + 少量 `!` 白名单，所以白名单一撤，
+         gen_legacy 重建出来的文件会在 `git status` 里**隐形** —— 改动不再被人看见。
+      2. 历史上 `tools\\` 长期留着 `验动作.py` / `闭环.py` 两份 **tracked** 副本，
+         那就是**第二真源**，而第二真源正是这个项目反复出病的根。
+      3. 撤白名单只是拆引信；只要 tools\\ 下还能再出现 FILES 同名文件，
+         「顺手改一份、忘了回写真源」的老病就会复发。
+    ⇒ 所以生成前先扫一遍，发现就停下 —— 宁可不发包，也不要安静地生成第二份。
+    """
+    hits = []
+    for f in FILES:
+        p = os.path.join(ROOT, "tools", f)
+        if os.path.exists(p):
+            hits.append(p)
+    return hits
+
+
+def _report_parallel_copies(hits):
+    print()
+    print("[X] 反平行副本检查：tools\\ 下存在与 FILES 同名的文件 —— 拒绝生成。")
+    for p in hits:
+        print("      - %s" % p)
+    print("    这些名字的真源是 %s，产物应落在 legacy_tools\\（生成物，不进仓）。" % SRC)
+    print("    在 tools\\ 下再留一份 = 第二真源。请删掉这些文件后重跑。")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default=os.path.join(ROOT, "dist", "legacy_gen"))
@@ -201,6 +230,12 @@ def main():
     print("源（老线真源）: %s" % SRC)
     print("输出          : %s" % a.out)
     print()
+
+    # ★ C3：反平行副本检查（生成前第一道闸）
+    dup = check_parallel_copies()
+    if dup:
+        _report_parallel_copies(dup)
+        return 1
 
     ledger = ["# 源→包 md5 映射台账", "",
               "- 生成器：`tools\\gen_legacy.py`（老线真源 → 打包源，自动生成，勿手工改）",
@@ -282,6 +317,11 @@ def main_for_pack(out_dir):
     但**未命中规则一律当作失败** —— 净化规则失效还照发包，等于把本机路径发出去。
     """
     print("从老线真源生成 legacy 打包源：%s" % SRC)
+    # ★ C3：同一条检查，打包路径上也要有（pack_dist 走的是这个入口）
+    dup = check_parallel_copies()
+    if dup:
+        _report_parallel_copies(dup)
+        return 1
     os.makedirs(out_dir, exist_ok=True)
     ledger = ["# 源→包 md5 映射台账", "",
               "- 生成器：`tools\\gen_legacy.py`（老线真源 → 打包源，自动生成，勿手工改）",
