@@ -39,6 +39,10 @@ src/agentctl/panel_pos.json
 #   里面写死了开发机的绝对路径（如 F:\<用户名>\...），还夹着本机工作笔记。
 #   它们是**本地资产**，不是项目资产 —— 留在盘上，git 不收。
 tools/*
+# ↓ 这两个是 pack_dist.py 的运行期硬依赖（源码里 import gen_legacy / import lint_gate），
+#   漏进仓 = 干净克隆跑打包必然 ImportError，属于「静默缺件」变「必现报错」。
+!tools/gen_legacy.py
+!tools/lint_gate.py
 !tools/pack_dist.py
 !tools/verify_dist.py
 !tools/make_legacy_dir.py
