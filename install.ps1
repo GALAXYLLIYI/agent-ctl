@@ -61,7 +61,7 @@ $OutputEncoding = [Text.Encoding]::UTF8
 
 # ★ 仓库地址【单点定义】：换宿主 / 换 owner 只改这几行，脚本其它地方全部引用它们。
 #   现状 = Gitee（仓库真实所在，owner 单 L）。
-#   若将来迁到 GitHub，改这三行即可：
+#   ★ 长期宿主已定为 **Gitee**（2026-10-12 用户拍板）；如需换宿主，改这几行即可：
 #     $Owner='GALAXYLIYI'; $RepoHost='https://github.com'
 #     $DefaultZip="$RepoHost/$Owner/agent-ctl/releases/latest/download/agentctl.zip"
 #     $RepoZip="https://codeload.github.com/$Owner/agent-ctl/zip/refs/heads/main"

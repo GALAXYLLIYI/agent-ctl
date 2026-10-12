@@ -8,7 +8,34 @@
 
 ---
 
-## 0. 安装（一行命令）
+## 0. 安装
+
+**本仓库是私有的** —— 所以下面那两条匿名 `irm` 一行命令 **现在会拿到 403**。
+按你的情况走 A 或 B（C 是把仓库公开之后才能用的老办法）。
+
+### A. 凭据路（有 Gitee 账号、且有本库权限）
+
+```powershell
+git clone https://gitee.com/GALAXYLIYI/agent-ctl.git
+cd agent-ctl
+pwsh -File .\install.ps1
+```
+
+> 想让别人也能装、又不想把仓库公开：在 Gitee 把对方账号加成**只读成员**，对方即可 `git clone`。
+
+### B. 离线路（最稳，完全不依赖网络身份）
+
+```powershell
+# 在本机仓库根先生成 zip（约 0.5 MB）
+python -X utf8 tools\pack_dist.py          # → dist\agentctl.zip
+
+# 把 zip 拷到目标机器，然后：
+pwsh -File .\install.ps1 -Zip .\agentctl.zip
+```
+
+### C. 公开仓库之后：一行命令
+
+仓库转为公开后，下面两条才可用（现在粘会 403）：
 
 PowerShell 里粘这一行，回车：
 

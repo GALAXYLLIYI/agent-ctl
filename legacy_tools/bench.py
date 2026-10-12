@@ -60,10 +60,24 @@ PY = sys.executable
 SRC_DIR = os.path.abspath(os.environ.get("AGENTCTL_BENCH_SRC")
                           or os.path.join(HERE, "..", "src"))
 
-VERIFY = os.path.abspath(os.environ.get("AGENTCTL_VERIFY_PY")
-                         or os.path.join(HERE, "..", "tools", "验动作.py"))
-LOOP = os.path.abspath(os.environ.get("AGENTCTL_LOOP_PY")
-                       or os.path.join(HERE, "..", "tools", "闭环.py"))
+def _beside(*names):
+    """先找与本脚本【同目录】的，再找上级 tools 子目录的。
+
+    ★ T17 A3-(a)（2026-10-12 用户拍板）：闭环三件改成随 legacy_tools 走，
+      于是 bench.py 会被 gen_legacy 放进 legacy_tools 目录 —— 那时判定器就在它【旁边】，
+      上级 tools 子目录反而是空的。两种布局都要能自洽，所以按这个顺序找。
+    """
+    cands = [os.path.join(HERE, *names),
+             os.path.join(HERE, "..", "tools", *names)]
+    for cand in cands:
+        cand = os.path.abspath(cand)
+        if os.path.exists(cand):
+            return cand
+    return os.path.abspath(cands[-1])
+
+
+VERIFY = os.path.abspath(os.environ.get("AGENTCTL_VERIFY_PY") or _beside("验动作.py"))
+LOOP = os.path.abspath(os.environ.get("AGENTCTL_LOOP_PY") or _beside("闭环.py"))
 
 OK, FAIL, SKIP = [], [], []
 BOXES = []
