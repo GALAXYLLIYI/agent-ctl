@@ -50,6 +50,11 @@ tools/*
 !tools/scan_legacy.py
 !tools/s5_build.py
 !tools/whitelist_template.json
+# ★ D1（2026-10-12，G3 边界③）：双基线台账与干净克隆冒烟是发布链路硬件，必须进仓。
+#   台账不在仓 = 基线可被无声篡改（共谋）= 第一层防线形同虚设；
+#   smoke_clean_clone 是"每次发版必跑"的脚本，不在仓就永远只有本机跑得动。
+!tools/legacy_ledger.json
+!tools/smoke_clean_clone.py
 # ★ C3（2026-10-12）：`tools\验动作.py` / `tools\闭环.py` 的白名单**已撤**。
 #   这两份的真源是 `dsh-viewer-plugin\tools\`，产物落在 `legacy_tools\`（由 gen_legacy 生成）。
 #   在 tools\ 再留一份 tracked 副本 = **第二真源**，而第二真源正是本项目反复出病的根。

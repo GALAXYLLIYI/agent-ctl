@@ -294,8 +294,15 @@ if (-not $NoShortcut) {
 }
 
 $cmd = Join-Path $Dir 'agentctl.cmd'
-$cmdBody = '@echo off' + "`r`n" + 'REM AgentCtl 命令行入口。参数原样转给 agentctl_main.py' + "`r`n" + '"' + $py.Exe + '" -X utf8 "' + $entry + '" %*' + "`r`n"
-Set-Content -Path $cmd -Value $cmdBody -Encoding OEM
+# ★ 2026-10-12 D1 冒烟抓到的真 bug：原来写 `-Encoding OEM` —— 按**写时**代码页落盘，
+#   而 cmd.exe 按**运行时**代码页解析；安装路径含非 ASCII（中文用户名/中文目录）
+#   或运行环境代码页不同（如 65001）时，路径变乱码，入口直接废（冒烟实测复现）。
+#   修法：UTF-8 **不带 BOM** + 第二行 `chcp 65001`。
+#   ★ 为什么不能带 BOM（2026-10-12 实测）：GBK 控制台下 cmd 把 EF BB BF 解成"锘"缀在
+#     首行前面，`@echo off` 失效（回显全开）；不带 BOM 时前两行是纯 ASCII，任何代码页
+#     都安全，chcp 生效后含中文的路径按 UTF-8 解析 —— 与宿主控制台代码页彻底无关。
+$cmdBody = '@echo off' + "`r`n" + 'chcp 65001 >nul' + "`r`n" + 'REM AgentCtl 命令行入口。参数原样转给 agentctl_main.py' + "`r`n" + '"' + $py.Exe + '" -X utf8 "' + $entry + '" %*' + "`r`n"
+[System.IO.File]::WriteAllText($cmd, $cmdBody, (New-Object System.Text.UTF8Encoding($false)))
 Good "命令行入口：$cmd"
 
 # ─────────────────────────────────────────────────────────────

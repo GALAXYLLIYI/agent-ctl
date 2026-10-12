@@ -188,6 +188,25 @@ def main() -> int:
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
 
+    # ── D1 第三层：打包前校验（提示性，不拦打包）──────────────────────
+    #   拿仓内 legacy_tools 与双基线台账 A₀ 比，不一致 ⇒ 醒目警告。
+    #   ★ 为什么不拦：打包源是下面现场从真源生成的，仓内产物状态不影响包内容；
+    #     而「真源更新了、仓内产物没刷」是合法状态（G3），拦 = 误伤。
+    #     警告的作用是：手改过产物的人在这里被告知"你的改动不会进包"。
+    sys.path.insert(0, str(ROOT / "tools"))
+    import gen_legacy
+    _n, _det = gen_legacy.verify_working_tree()
+    if _n < 0:
+        print("[!][D1] 打包前校验无法执行：%s" % _det[0])
+    elif _n:
+        print("[!][D1] 打包前校验：仓内 legacy_tools 有 %d 个文件与台账不一致"
+              "（手改过，或真源更新后产物未刷）：" % _n)
+        for _d in _det[:10]:
+            print("      - %s" % _d)
+        print("      包内容不受影响（现场从真源生成）；但若这些改动是手改产物留下的，"
+              "它们**不会进包** —— 值得保留就搬回真源。")
+        print()
+
     # ── T14 阶段 2：现场生成 legacy 打包源 ──────────────────────────────
     if args.legacy_src:
         legacy_src = Path(args.legacy_src)
