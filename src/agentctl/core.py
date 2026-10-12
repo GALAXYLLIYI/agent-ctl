@@ -1226,19 +1226,49 @@ def _bind_capture(args: dict, hwnd: int) -> dict | None:
     return None
 
 
+def _modal_reason(txt: str) -> str:
+    """从老脚本 rc=6 的输出里拉出「到底被什么挡着」那一句。
+
+    act.py `require_no_modal` 打的那行长这样（act.py:810）：
+      ⛔ 拒绝点击：目标进程上有可见对话框：类名=#32770 标题=「保存」hwnd=12345（共 1 个）（模态对话框会吞掉动作，先关掉它）
+    真原因就在「⛔ 拒绝xx：」与尾巴那句固定叮嘱之间。改前它只埋在 data.raw 里，
+    agent 得自己刨——刨不出来就等于没告诉它为什么失败。
+    拉不出来时返回空串：调用方照常给话，`data.raw` 仍是完整现场。
+    """
+    for ln in (txt or "").splitlines():
+        ln = ln.strip()
+        if not ln.startswith("⛔") or "：" not in ln:
+            continue
+        body = ln.split("：", 1)[1].rsplit("（模态", 1)[0].strip()
+        if body:
+            return body
+    return ""
+
+
 def _map_rc(rc: int, out: str, err: str) -> dict:
     """把老脚本的返回码映射成契约错误码。
 
     ★ 2026-10-07 新增 rc=7：不是拒绝，是「这个窗口用户还没点头，去问一声」。
       用户指示「不整名单限制，每次都问」—— 静态 whitelist.json 废掉了，
       改成第一次碰某个窗口时弹窗问，同意后本次任务内放行。
+
+    ★ C4 缺口 A（2026-10-12）新增 rc=6：老脚本 act.py 的 `require_no_modal` 判定
+      「这个窗口上有模态对话框挡着」（act.py:811 是 rc=6 在整个仓里的**唯一**出处，
+      已逐句核对过）。改前它不在表里 ⇒ 掉进兜底变成 code=4「找不到控件」，
+      而《AGENT接口.md》§2.1 对 code=4 开的处方是「重新 ctl_windows + ctl_tree 看现状」
+      —— 对话框根本不在控件树里，agent 照着走只会绕圈。
+      ⇒ 落成 **code=5**（现有码；语义「坐标/前台/窗口不稳定 → 重新观测」，
+      与「目标窗口当前状态不稳定」对得上），**不新造错误码**。
+      改前改后都是 ok=False，零放行口径变化。
     """
     txt = (out + err).strip()
     if rc == 0:
         return env(ok=True, code=0, data={"rc": rc, "raw": out.strip()[:3000]})
     m = {3: gate.CODE_DENY_WHITELIST, 7: gate.CODE_NEEDS_ASK, 9: gate.CODE_UNAUTH,
          4: gate.CODE_NO_CTRL,
-         5: gate.CODE_UNSTABLE, 8: gate.CODE_NO_CHANGE, 127: gate.CODE_NO_CTRL}
+         # ← C4：rc=6 是 act.py 的「被模态对话框挡住」，落 code=5；不再兜底成「找不到控件」
+         5: gate.CODE_UNSTABLE, 6: gate.CODE_UNSTABLE,
+         8: gate.CODE_NO_CHANGE, 127: gate.CODE_NO_CTRL}
     code = m.get(rc, gate.CODE_NO_CTRL)
     warn = {8: "动作发出去了，但页面/画面没有变化 —— ⛔ **不许当成功**",
             9: "未获授权 —— 先 ctl_authorize 拿通行证",
@@ -1247,7 +1277,20 @@ def _map_rc(rc: int, out: str, err: str) -> dict:
             5: "坐标/前台/窗口稳定性拒绝"}.get(code, f"老脚本返回码 {rc}")
     if rc == 127:
         warn = f"找不到老脚本（LEGACY={LEGACY}）"
-    return env(code=code, data={"rc": rc, "raw": txt[:3000]}, warning=warn)
+    if rc == 6:
+        # ★ C4：上面那张表是**按 code 取**的，而 rc=5 与 rc=6 现在共用 CODE_UNSTABLE ——
+        #   不在这里按 rc 再覆盖一次，模态被挡就会显示成「坐标/前台/窗口稳定性拒绝」，
+        #   与改前的「老脚本返回码 6」一样等于什么都没说。
+        #   这一层只给**不依赖具体文本**的短版（_ask_then_retry 也走这里）；
+        #   主写路径 _act 会再用 act.py 的原文把「到底被什么挡着」补全。
+        warn = ("目标窗口被模态对话框挡住，动作**没有发出来**（老脚本 rc=6）"
+                " —— 先关掉那个对话框（模态框会吞掉一切点击/输入）再重试")
+    _data = {"rc": rc, "raw": txt[:3000]}
+    if rc == 6:
+        # blocked_by 让调用方能**机读地**区分「被模态挡住」与 code=5 的其它两种情形
+        # （坐标类 / 快照类）—— 它们共用 code=5，只有这个标记能把它们分开。
+        _data["blocked_by"] = "modal_dialog"
+    return env(code=code, data=_data, warning=warn)
 
 
 # ────────────── T17 闭环：动作的独立验证（2026-10-12）──────────────
@@ -1334,6 +1377,25 @@ def _act(action: str, args: dict, argv: list[str], scope: str = "B") -> dict:
 
     rc, out, e = _legacy("act.py", argv, timeout=int(args.get("timeout_sec") or ACT_TIMEOUT_SEC))
     r = _map_rc(rc, out, e)
+
+    # ★ C4 缺口 A（2026-10-12）：把 rc=6 的**真原因**提到台面上。
+    #   改前这条路径给的是 code=4「找不到控件」+ 一句「老脚本返回码 6」，
+    #   真原因埋在 data.raw 里没人看 ⇒ 动作确实被 act.py 挡住了，用户/agent 却拿到错误处方。
+    #   分工：_map_rc 负责「翻成哪个码」，这里负责「说清为什么、下一步做什么」。
+    #   ⚠ 这里**不加任何探测**：是不是有模态，判定权仍然只在 act.py 的 require_no_modal 一处
+    #     （本项目纪律：判定逻辑唯一定义处）。本段只翻译它已经给出的结论。
+    #   ⚠ 位置为什么在 _legacy **之后**：信号来自子进程的返回码，_bind_capture 与 _legacy
+    #     之间若再插一道检查，那就是第二道护栏 —— 明令禁止，且会与 act.py 判定打架。
+    if rc == 6:
+        _why = _modal_reason((out or "") + (e or ""))
+        r["warning"] = ("目标窗口被模态对话框挡住，动作**没有发出去**%s"
+                        "—— 先让用户关掉那个对话框（模态框会吞掉一切点击/输入），"
+                        "关掉后重新 ctl_shot 拿新的 capture_id 再动手。"
+                        "⛔ 这**不是**「找不到控件」，别去重扫控件树绕圈。"
+                        % (("：" + _why) if _why else ""))
+        if not isinstance(r.get("data"), dict):
+            r["data"] = {}
+        r["data"].setdefault("blocked_by", "modal_dialog")
 
     # ★ rc=7：老脚本说「这个窗口你没点头过」。那就**替你问** ——
     #   用户指示的是「每次都问」，不是「拒绝」，所以这一下必须真的弹窗，
