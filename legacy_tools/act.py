@@ -1528,6 +1528,12 @@ def do_keys(hwnd, vk=0x41, ctrl=False, times=1, dry=False, wait=0.06, scan_code=
     info, why = check_target(hwnd)
     if why:
         return _tell_next(3, why, hwnd, extra="（按键动作 vk=0x%X）" % vk)
+    # 模态对话框前置检查（2026-10-12 补，C6）：与 click/fill/scroll/type 同一道闸。
+    #   位置与它们一致：**在 gate.require 与任何输入合成之前** —— 被挡就返回 6，
+    #   不消耗证/额度，也绝不做出"看着成功其实无效"的按键。
+    _mb = require_no_modal(hwnd, "按键")
+    if _mb:
+        return _mb
     try:
         gate.require(gate.C, f"按键 vk=0x{vk:X} ctrl={ctrl} ×{times}")
     except gate.GateDenied as e:
@@ -2100,7 +2106,12 @@ def do_focus(hwnd, dry=False):
         time.sleep(0.5)
     now_fg = win_info(hwnd)["foreground"]
     log(f"{'（演练）' if dry else ''}🎯 切前台 [{info['title']}] → 现在前台={now_fg}")
-    return 0 if (dry or now_fg) else 6
+    # ★ 2026-10-12 补（C6）：此处**不许返回 6** —— rc=6 是模态闸的**专用码**，
+    #   只由 require_no_modal 产生（core.py 把它映射成 blocked_by=modal_dialog）。
+    #   原先这里对"没置到前台"返回 6 ⇒ core.py 误报成「被模态对话框挡住…先关掉那个
+    #   对话框再重试」，agent 便对着一个并不存在的对话框绕圈（C6 §5 查出来的撞车）。
+    #   置前台失败的语义是「前台/窗口不稳定」，与 CODE_UNSTABLE 的既有含义正对 ⇒ 返回 5。
+    return 0 if (dry or now_fg) else 5
 
 
 def _norm_nl(s):
@@ -2215,6 +2226,12 @@ def do_drag(hwnd, frm, to, dry=False):
     info, why = check_target(hwnd)
     if why:
         return _tell_next(3, why, hwnd, extra="（拖拽动作）")
+    # 模态对话框前置检查（2026-10-12 补，C6）：与 click/fill/scroll/type 同一道闸。
+    #   位置与它们一致：**在 gate.require / ensure_foreground / drag() 之前** ——
+    #   被挡就返回 6，不消耗证/额度，也不置前、不合成任何鼠标事件。
+    _mb = require_no_modal(hwnd, "拖拽")
+    if _mb:
+        return _mb
     try:
         gate.require(gate.D, f"拖拽 {frm}→{to}")
     except gate.GateDenied as e:
