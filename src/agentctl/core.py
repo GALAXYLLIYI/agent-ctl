@@ -1041,7 +1041,7 @@ def _mem_snapshot() -> dict:
 def t_record(args: dict) -> dict:
     """录制开关。★ 与 guardian 联动：可用物理 < 3500 MB 或提交使用率 > 65% → **自动停录**并留痕。"""
     import threading
-    from agentctl import recorder as _rec                 # noqa: F401（真用）
+    from agentctl import recorder as _rec                 # 副作用 import：让 recorder 对 PyInstaller 静态可达（见上方注释②），运行期不直接引用，勿删
 
     action = (args.get("action") or "status").lower()
     profile = args.get("profile") or "default"
@@ -1212,7 +1212,6 @@ def _bind_capture(args: dict, hwnd: int) -> dict | None:
     if args.get("verify_image"):
         try:
             import mss                                       # noqa: PLC0415
-            from PIL import Image                            # noqa: PLC0415
             import hashlib                                   # noqa: PLC0415
             r = rect
             with mss.mss() as sct:
@@ -1259,14 +1258,22 @@ def _map_rc(rc: int, out: str, err: str) -> dict:
 # ★ 只以子进程调脚本、**不 import**：验动作.py 模块级会在缺 psutil 时 sys.exit(3)，
 #   import 它会连累本进程一起退出。子进程也保持"判定逻辑唯一定义处"。
 VERIFY_REL = os.path.join("tools", "验动作.py")
+# ★ T17 A3-(a)（2026-10-12 用户拍板）：闭环三件现在随 legacy_tools 走（登记进
+#   gen_legacy.FILES），所以判定器会落在 legacy_tools\ 而不是 tools\。
+#   原来只找 ROOT/tools/ ⇒ 装出去的那份找不到判定器 ⇒ 声明 verify_expect 的动作会被
+#   fail-closed 硬拒绝（功能等于废掉）。两种布局都要能自洽。
+VERIFY_REL_LEGACY = os.path.join("legacy_tools", "验动作.py")
 
 
 def _verify_py():
     """定位判定器。AGENTCTL_VERIFY_PY 优先，其次仓库根 / _MEIPASS / src 上一级。"""
     for p in (os.environ.get("AGENTCTL_VERIFY_PY"),
               os.path.join(ROOT, VERIFY_REL),
+              os.path.join(ROOT, VERIFY_REL_LEGACY),
               os.path.join(getattr(sys, "_MEIPASS", ROOT), VERIFY_REL),
-              os.path.join(BASE, VERIFY_REL)):
+              os.path.join(getattr(sys, "_MEIPASS", ROOT), VERIFY_REL_LEGACY),
+              os.path.join(BASE, VERIFY_REL),
+              os.path.join(BASE, VERIFY_REL_LEGACY)):
         if p and os.path.exists(p):
             return p
     return None
