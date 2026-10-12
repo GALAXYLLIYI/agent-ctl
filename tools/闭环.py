@@ -47,7 +47,10 @@ import sys
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-VERIFY = os.path.join(HERE, "验动作.py")          # ★ 判定器本体，唯一定义处
+# ★ 判定器本体，唯一定义处。AGENTCTL_VERIFY_PY 可覆盖 —— 与 core.py::_verify_py() 同一个变量名，
+#   于是"指向某一份候选判定器"在主路 / 闭环入口 / bench 三处口径一致，做对照实验也方便。
+VERIFY = (os.environ.get("AGENTCTL_VERIFY_PY")
+          or os.path.join(HERE, "验动作.py"))
 PY = sys.executable
 
 EXIT_USAGE = 6
