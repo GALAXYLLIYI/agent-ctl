@@ -1599,9 +1599,24 @@ def t_click(args: dict) -> dict:
         want = args.get("expect")
         if want and str(want).strip() and str(want).strip() not in (hit["name"] or ""):
             return env(code=gate.CODE_NO_CTRL, warning="元素 %s 现在叫『%s』，不是你看到的『%s』—— 不点" % (eid, hit["name"], want))
-        if not hit.get("enabled", True):
+        # ★ S2b（2026-10-13）：三态守卫。
+        #   False ⇒ 真禁用，拒绝（与原来同，判据不变）
+        #   None  ⇒ UIA 读不到，**不拒绝**（否则认可点的控件大面积误伤），
+        #        但必须留痕：data.enabled_unverified + warning + blind_spots，
+        #        不许「读不到」静默等价于「启用」
+        #   True  ⇒ 正常
+        # 缺省也变成 None：**缺字段同样是「没验证过」**。
+        _en = hit.get("enabled", None)
+        if _en is False:
             return env(code=gate.CODE_NO_CTRL, warning="元素 %s（%s）是禁用状态，不点" % (eid, hit["name"]))
-        args = {**args, "xy": list(hit["center"]), "_eid_hit": {"eid": eid, "name": hit["name"], "type": hit["type"], "rect": hit["rect"]}}
+        _unknown_en = (_en is None)
+        args = {**args, "xy": list(hit["center"]),
+                # enabled 一起进 _eid_hit：回执的「点到」里能直接看到这次点的是什么状态。
+                # 未知时**显式为 null**（不让回显里看着像 true）。
+                # 不影响 capture 指纹：core.py:560 只取 type / name[:40] / rect。
+                "_eid_hit": {"eid": eid, "name": hit["name"], "type": hit["type"],
+                             "rect": hit["rect"], "enabled": _en},
+                **({"_enabled_unknown": True} if _unknown_en else {})}
 
         # ★ 2026-10-07 实机跑出来的 bug：eid 路径被要求另外交 from_capture，拿到 code=12。
         #   这自相矛盾 —— 上面刚重新走了一遍树，那就是一次**新鲜**的观测，
@@ -1635,6 +1650,22 @@ def t_click(args: dict) -> dict:
         r["data"] = {**(r.get("data") or {}), "frame_before": None, "frame_after": None,
                      "note": "按控件名/eid 点击不依赖观测；走坐标时已校验 capture_id",
                      "点到": args.get("_eid_hit")}
+        if args.get("_enabled_unknown"):
+            # ★ S2b：未知时**三个通道一起留痕**（DSH 放行 O-1：两个都挂）。
+            #   ① data.enabled_unverified —— 机读，给程序判断
+            #   ② blind_spots —— 项目口径「本次结论的盲区（不许隐藏）」（contract/tools.json:53），
+            #      给人和模型看（docs/AGENT接口.md:127「必须一并转述」）
+            #   ③ warning —— 最显眼处，提醒这次点击是在「不知道能不能点」下发出的
+            #   措辞照项目口径写：**不据此断言它可用**。
+            # 不动 ok / code：这是一次成功的动作，只是附带一条不确定提示
+            #   （先例：core.py:479 的 t_brake 就是在 ok=True 上挂 warning）。
+            _eid = (args.get("_eid_hit") or {}).get("eid")
+            r["data"]["enabled_unverified"] = True
+            r["blind_spots"] = list(r.get("blind_spots") or []) + [
+                "元素 %s 的启用性未验证（UIA 读 IsEnabled 失败）—— 不据此断言它可用" % _eid]
+            _w = ("元素 %s 的启用性未验证（UIA 读 IsEnabled 失败）⇒ 这次点击是在"
+                  "「不知道能不能点」的状态下发出的；点完请核对界面是否真的响应了" % _eid)
+            r["warning"] = _w if not r.get("warning") else (str(r["warning"]) + "；" + _w)
     return r
 
 

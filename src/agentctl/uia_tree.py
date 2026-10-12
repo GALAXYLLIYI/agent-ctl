@@ -267,10 +267,15 @@ def walk(handle, *, max_nodes=DEFAULT_MAX_NODES, max_depth=DEFAULT_MAX_DEPTH,
             keep = False
 
         if keep:
+            # ★ S2b（2026-10-13）：**读不到 ≠ 启用**。原来 except → True，等于把
+            #   「UIA 读不出 IsEnabled」静默当成「可以点」，「别点禁用控件」这道守卫
+            #   就自动失效了。但也**不能**默认 False：读不到的控件面积庞大（Canvas /
+            #   Electron / 没开无障碍），一律判禁用会变成「什么都点不了」，比原来更糟。
+            #   所以显式三态：True=启用 / False=禁用 / None=读不到（未知），未知由 core.t_click 暴露。
             try:
                 enabled = bool(ctrl.IsEnabled)
             except Exception:
-                enabled = True
+                enabled = None
             node = {
                 "eid": "e%d" % len(nodes),
                 "depth": depth,
@@ -278,8 +283,12 @@ def walk(handle, *, max_nodes=DEFAULT_MAX_NODES, max_depth=DEFAULT_MAX_DEPTH,
                 "name": txt[:120],
                 "rect": rect,
                 "center": _center(rect),
-                "enabled": enabled,
+                "enabled": enabled,          # True / False / None(未知)
             }
+            if enabled is None:
+                # 机读标记：让「未知」在**数据层**就露出来，不靠渲染文本（模型可能不看那行）。
+                # 约定：**只在未知时出现**；键不存在 = 验证过。
+                node["enabled_unverified"] = True
             if want_int and interactive:
                 node["role"] = "interactive"
             elif want_txt:
@@ -364,8 +373,13 @@ def render(nodes, truncated=False, *, width=64):
         line = "%-5s %-16s %-*s [%5d,%4d %4dx%-4d]" % (
             n["eid"], n["type"][:16], width,
             (n["name"] or "")[:width], r[0], r[1], r[2] - r[0], r[3] - r[1])
-        if not n.get("enabled", True):
+        # ★ S2b：缺省也改成 None —— **缺字段同样是「没验证过」**，不许默认 True。
+        #   三态在这里全部呈现：禁用→「(禁用)」，未知→「(启用性未知)」（不得当成启用）。
+        _en = n.get("enabled", None)
+        if _en is False:
             line += " (禁用)"
+        elif _en is None:
+            line += " (启用性未知)"
         out.append("  " * min(n["depth"] - base, 6) + line)
     if truncated:
         out.append("... 还有更多节点，被 max_nodes 截断了 —— 要全的自己调大")
@@ -393,6 +407,10 @@ def find(handle, query, *, max_nodes=FIND_MAX_NODES, max_depth=DEFAULT_MAX_DEPTH
     return {
         "命中": hits[:limit],
         "命中数": len(hits),
+        # ★ S2b：默认 detail=False 时「命中」数组**是空的**，光靠节点上的
+        #   enabled_unverified 等于没加 —— 所以在返回 dict 上留个计数，
+        #   让默认路径也有留痕。计的是**实际返回给模型的那批**（被 limit 截断的不算）。
+        "启用性未知": sum(1 for n in hits[:limit] if n.get("enabled") is None),
         "扫过节点": len(nodes),
         "截断": truncated,
         "耗时_ms": ms,
@@ -410,6 +428,8 @@ def tree(handle, *, max_nodes=DEFAULT_MAX_NODES, max_depth=DEFAULT_MAX_DEPTH,
         "句柄": int(handle),
         "节点数": len(nodes),
         "截断": truncated,
+        # ★ S2b：同理 —— detail=False 时「节点」是空列表，计数才是默认路径下的可机读余痕。
+        "启用性未知": sum(1 for n in nodes if n.get("enabled") is None),
         "耗时_ms": int((time.perf_counter() - t0) * 1000),
         "树": render(nodes, truncated),
         "节点": nodes if detail else [],
