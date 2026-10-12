@@ -4,7 +4,7 @@
 闸门由**用户在弹窗里输密钥**放行，一次授权有明确的时间、范围和动作额度，
 出事有三个独立的急停通道。
 
-版本 1.2.0 · 2026-10-07 · 许可证 GPL-3.0
+版本 1.2.0 · 最后更新 2026-10-12 · 许可证 GPL-3.0
 
 ---
 
@@ -13,16 +13,19 @@
 PowerShell 里粘这一行，回车：
 
 ```powershell
-irm https://raw.githubusercontent.com/GALAXYLLIYI/agent-ctl/main/install.ps1 | iex
+irm https://gitee.com/GALAXYLIYI/agent-ctl/raw/main/install.ps1 | iex
 ```
 
 **不想盲跑**（推荐第一次这么做，能先看清脚本再执行）：
 
 ```powershell
-irm https://raw.githubusercontent.com/GALAXYLLIYI/agent-ctl/main/install.ps1 -OutFile install.ps1
+irm https://gitee.com/GALAXYLIYI/agent-ctl/raw/main/install.ps1 -OutFile install.ps1
 notepad install.ps1      # 看一眼
 .\install.ps1
 ```
+
+> ⚠️ **本仓库当前为私有**：上面的命令需要 Gitee 凭据才能拉取。
+> 要让别人 `irm` 就能直接安装，需先把仓库设为公开。
 
 脚本做这六件事，全程可重复执行：
 

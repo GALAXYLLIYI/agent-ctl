@@ -36,10 +36,10 @@
 
 .EXAMPLE
     一行安装：
-      irm https://raw.githubusercontent.com/GALAXYLLIYI/agent-ctl/main/install.ps1 | iex
+      irm https://gitee.com/GALAXYLIYI/agent-ctl/raw/main/install.ps1 | iex
 
     两步安装（更稳，能先看一眼脚本再跑）：
-      irm https://raw.githubusercontent.com/GALAXYLLIYI/agent-ctl/main/install.ps1 -OutFile install.ps1
+      irm https://gitee.com/GALAXYLIYI/agent-ctl/raw/main/install.ps1 -OutFile install.ps1
       .\install.ps1
 #>
 
@@ -59,8 +59,16 @@ $ErrorActionPreference = 'Stop'
 try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch { }
 $OutputEncoding = [Text.Encoding]::UTF8
 
-$DefaultZip = 'https://github.com/GALAXYLLIYI/agent-ctl/releases/latest/download/agentctl.zip'
-$RepoZip = 'https://codeload.github.com/GALAXYLLIYI/agent-ctl/zip/refs/heads/main'
+# ★ 仓库地址【单点定义】：换宿主 / 换 owner 只改这几行，脚本其它地方全部引用它们。
+#   现状 = Gitee（仓库真实所在，owner 单 L）。
+#   若将来迁到 GitHub，改这三行即可：
+#     $Owner='GALAXYLIYI'; $RepoHost='https://github.com'
+#     $DefaultZip="$RepoHost/$Owner/agent-ctl/releases/latest/download/agentctl.zip"
+#     $RepoZip="https://codeload.github.com/$Owner/agent-ctl/zip/refs/heads/main"
+$Owner = 'GALAXYLIYI'
+$RepoHost = 'https://gitee.com'
+$DefaultZip = "$RepoHost/$Owner/agent-ctl/releases/latest/download/agentctl.zip"
+$RepoZip = "$RepoHost/$Owner/agent-ctl/repository/archive/main.zip"
 $MinPy = [Version]'3.10'
 $AppName = '电脑控制平台'
 
