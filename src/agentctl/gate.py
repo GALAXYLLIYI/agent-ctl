@@ -436,6 +436,14 @@ CODE_NO_CHANGE, CODE_UNAUTH, CODE_LEASE_HELD, CODE_BRAKE, CODE_STALE_CAPTURE = 8
 #      · 动作次数用尽走 CODE_UNAUTH(9)（本文件 check() 里唯一的次数闸）
 #   ⇒ 别改数值（历史事件已落库），改的是文案和这个名字。
 CODE_RESOURCE_LIMIT = 13
+# ★ S12（2026-10-14）：15 进表 —— **服务内部错误**。
+#   为什么要它：以前诸如 dispatch 兜底、读元素树/事件流/出片时抛异常，都落 code=4（找不到控件）
+#   ⇒ agent 照着 4 的处方去重扫窗口，白费力气、还把排查引向"控件不在"这个错方向。
+#   处方（与契约、接口文档一致）：**这不是你的操作问题** —— 别重试、别申请通行证、别重扫窗口；
+#   看 warning 里的异常类型与消息，连同它一起报告用户。
+#   ⚠️ 它与 13 不同类：13 是【事件级】内部码（只出现在 timeline 的 events[].code），
+#      15 是【信封码】（会作为本次调用的 code 返回）。
+CODE_INTERNAL = 15
 
 def short(scope: str) -> str:
     """把 'B' / 'B级 点击滚动' 两种写法都归一成 'B'。"""

@@ -265,7 +265,7 @@ def t_wait(args: dict) -> dict:
         try:
             rows = store().events(limit=200, kind=kind)
         except Exception as e:
-            return env(code=gate.CODE_NO_CTRL,
+            return env(code=gate.CODE_INTERNAL,
                        warning="等待失败（读事件流报错）：%s" % e)
         for r in rows:                      # rows 是倒序，第一条匹配的就是最新的
             if r.get("seq", 0) <= start_seq:
@@ -726,7 +726,7 @@ def _perceive_inproc(mode: str, hwnd, limit: int, why: str, look: bool = False):
         else:
             return None                     # tree 输出格式特殊，仍走子进程
     except Exception as e:
-        return env(code=gate.CODE_NO_CTRL, warning="进程内感知失败 %s: %s" % (type(e).__name__, e))
+        return env(code=gate.CODE_INTERNAL, warning="进程内感知失败 %s: %s" % (type(e).__name__, e))
     out = json.dumps(res, ensure_ascii=False, indent=1)
     d = {"rc": 0, "raw": out[:4000], "inproc": True, "gate": got}
     # ★ T12：截断**必须可见**。原先静默砍断，客户端拿到半截 JSON 却毫无信号 ——
@@ -875,10 +875,10 @@ def _uia_gate(args: dict, tool: str, fn):
                                     "换个窗口状态（叫醒/切前台）再试，或退回 ctl_shot"])
         res = fn(h)
     except uia_tree.UiaUnavailable as e:
-        return env(code=gate.CODE_NO_CTRL, warning=str(e),
+        return env(code=gate.CODE_INTERNAL, warning=str(e),
                    blind_spots=["UIA 不可用 ≠ 界面上没有；Canvas/游戏/Electron 本来就瞎"])
     except Exception as e:
-        return env(code=gate.CODE_NO_CTRL,
+        return env(code=gate.CODE_INTERNAL,
                    warning="读元素树失败 %s: %s" % (type(e).__name__, e))
     res["窗口状态"] = st
     d = {"结果": res}
@@ -945,7 +945,7 @@ def t_replay(args: dict) -> dict:
     try:
         res = _clip.build_clip(out_dir, items, fps=fps, title=args.get("title") or "clip")
     except Exception as e:
-        return env(code=gate.CODE_NO_CTRL, warning=f"出片失败 {type(e).__name__}: {e}")
+        return env(code=gate.CODE_INTERNAL, warning=f"出片失败 {type(e).__name__}: {e}")
     return env(ok=True, code=0, data={
         "clip": res["avi"]["path"], "clip_bytes": res["avi"]["bytes"],
         "sheet": res["sheet"]["path"], "manifest": res["manifest_path"],
@@ -1646,7 +1646,7 @@ def t_click(args: dict) -> dict:
         try:
             nodes, _ = uia_tree.walk(hwnd, roles=("all",))
         except Exception as e:
-            return env(code=gate.CODE_NO_CTRL, warning="重新解析 eid 失败 %s: %s" % (type(e).__name__, e))
+            return env(code=gate.CODE_INTERNAL, warning="重新解析 eid 失败 %s: %s" % (type(e).__name__, e))
         hit = None
         for n in nodes:
             if n["eid"] == str(eid):
@@ -1853,7 +1853,7 @@ def dispatch(tool: str, args: dict, *, actor: str = "") -> dict:
         except gate.GateDenied as e:
             r = env(code=e.code, warning=e.why)
         except Exception as e:
-            r = env(code=gate.CODE_NO_CTRL, warning=f"内部错误 {type(e).__name__}: {e}")
+            r = env(code=gate.CODE_INTERNAL, warning=f"内部错误 {type(e).__name__}: {e}")
     r["elapsed_ms"] = int((time.perf_counter() - t0) * 1000)
     # ★ 通知搭载（2026-10-07）：每次调用都带上"用户那边发生了什么"。
     #   零额外调用 —— 用户在面板上点了授权，下次我调任何工具就带回来。
