@@ -1,5 +1,5 @@
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "_关于": "AgentCtl 的机器可读接口契约（草案 v1）。给 agent 直接读取用的——不是给人看的清单。人看的那份是 agent-manual 里的 agent_tools.json（老清单，保持不动）。",
   "_来源": "docs/详细设计_v1.md 第 6 章（接口契约），本仓库内相对路径",
   "_状态": "设计稿：字段名可能微调；实现前以本文件为冻结基线，改动必须升 schema_version",

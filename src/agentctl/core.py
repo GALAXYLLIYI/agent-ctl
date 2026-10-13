@@ -100,6 +100,12 @@ def env(**head) -> dict:
     #   判据：没传 code ⇒ data["uncategorized"] is True；
     #         传了 code ⇒ 这个**键不存在**（不是 False、不是 None）。
     #   数据侧：data 用新 dict 拼，绝不就地改调用方传进来的那一个（_act 等处会复用）。
+    #   ★ 2026-10-14 裁决（有人问「现在有 15 了，默认值要不要改成 15」）：**不改，仍是 4**。
+    #     理由三条：① 改默认值 = 改【放行口径】，S8 放行明写「不改任何 code 数值」；
+    #     ② 「忘了归码」既不等于「找不到控件」、也不等于「服务内部错」—— 拿 15 当默认只是
+    #        换一个同样不准确的断言；真要治就得**再开一个「未分类」码**，那是另一张单；
+    #     ③ 这一类的可观测性已经由上面的 `uncategorized` 标记提供了（别指望默认值自己说话）。
+    #     实测面：全 src 目前【零处】「ok=False 但没传 code」⇒ 改了也看不见效果（只影响将来）。
     if not d["ok"] and "code" not in head:
         _why = ("（⚠️ 本次失败**未归码**：调用处没传 code，落默认 4 CODE_NO_CTRL"
                 " —— 别把它读成「真的找不到控件」）")
@@ -1124,6 +1130,10 @@ def t_record(args: dict) -> dict:
                         #      正确归属（内部错误）在 gate.py 的码表里**没有** ⇒ 不在本单职权内改，
                         #      也不拿 CODE_RESOURCE_LIMIT(13) 硬套（那是「资源保护停录」，语义不同）。
                         #      要改得同时动 gate.py 码表 + tools.json + docs ⇒ 超出本单边界。
+                        #   ★ 2026-10-14 后记：**现在有了** —— `CODE_INTERNAL = 15` 已进码表，
+                        #      gate.py / contract\tools.json / docs\AGENT接口.md / 本文件四处同步。
+                        #      本行仍是【事件行】（不是信封），所以它照旧用 9；但上面那句
+                        #      「码表里没有」已经过时，别再照它推理。
                         store().append("recorder_autostop", actor="recorder", tool="ctl_record",
                                        payload=_REC["autostop"], ok=False, code=gate.CODE_UNAUTH)
                     except Exception:
@@ -1688,7 +1698,9 @@ def t_click(args: dict) -> dict:
         # ★ T15：元素命中 ⇒ 走元素指纹版
         tok = _issue_capture_from_tree(hwnd, {"命中": [hit]})
         if not tok:
-            return env(code=gate.CODE_NO_CTRL,
+            # ★ 2026-10-14：这是**服务自己签不出凭据**，不是「界面上没那个控件」
+            #   ⇒ 归 15（CODE_INTERNAL），别让 agent 去重扫窗口（那是 4 的处方，治不了这个）。
+            return env(code=gate.CODE_INTERNAL,
                        warning="eid 解析到了，但观测凭据签发失败 —— 宁可不点，也不点一个绑不住的动作")
         args = {**args, "from_capture": tok}
         args["_eid_hit"] = {**args["_eid_hit"], "capture_id": tok}
