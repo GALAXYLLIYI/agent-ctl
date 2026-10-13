@@ -227,7 +227,7 @@ except Exception:
 #   modal_blocker 的枚举回调里 `not IsWindowVisible(h)` 就直接跳过 ⇒ 不 Show 等于把判据废掉。
 #   ⇒ 挪到 (-32000,-32000)：窗口**仍然可见**（IsWindowVisible 为真），但落在任何显示器之外，
 #     用户看不见；MessageBox 以它为属主，也跟着跑到屏外。
-h = win32gui.CreateWindow(wc.lpszClassName, "AgentCtlModalSelfTest",
+h = win32gui.CreateWindowEx(0x00000080, wc.lpszClassName, "AgentCtlModalSelfTest",  # WS_EX_TOOLWINDOW：不进任务栏
                           win32con.WS_OVERLAPPEDWINDOW, -32000, -32000, 380, 260, 0, 0,
                           wc.hInstance, None)
 win32gui.ShowWindow(h, win32con.SW_SHOW)

@@ -288,7 +288,7 @@ except Exception:
 #   ⇒ 挪到 (-32000,-32000)：窗口**仍然可见**（IsWindowVisible 为真），但落在任何显示器之外，
 #     用户看不见；MessageBox 以它为属主，也跟着跑到屏外。
 #   （与 selftest.py:218-227 同一条处置，照抄体例。）
-h = win32gui.CreateWindow(wc.lpszClassName, "AgentCtlBenchModal",
+h = win32gui.CreateWindowEx(0x00000080, wc.lpszClassName, "AgentCtlBenchModal",   # WS_EX_TOOLWINDOW：不进任务栏
                           win32con.WS_OVERLAPPEDWINDOW, -32000, -32000, 380, 260, 0, 0,
                           wc.hInstance, None)
 win32gui.ShowWindow(h, win32con.SW_SHOW)
@@ -456,7 +456,7 @@ try:
     win32gui.RegisterClass(wc)
 except Exception:
     pass
-h = win32gui.CreateWindow(wc.lpszClassName, "AgentCtlBenchMin",
+h = win32gui.CreateWindowEx(0x00000080, wc.lpszClassName, "AgentCtlBenchMin",     # WS_EX_TOOLWINDOW：不进任务栏
                           win32con.WS_OVERLAPPEDWINDOW, 240, 240, 360, 240, 0, 0,
                           wc.hInstance, None)
 win32gui.ShowWindow(h, win32con.SW_SHOW)

@@ -14,7 +14,7 @@
 | `cdp.py` | `37429adc8f95632e4cd8500fc4afb61e` | 17129 | `1ecc4f43d99b5adce7240fad7b75e39a` | 17208 | 浏览器 profile：不写死本机路径=命中；净化引入的 os/subprocess 用法：就地补 import os=已补 |
 | `coord.py` | `72d921b3fd29dc9cc747153433b6b3cd` | 5365 | `6ad092da4f6012571b9df0c605a98eaf` | 5365 | 自插老线路径：包内要指向自己=命中 |
 | `option_locator.py` | `886a43f9aefefb8b52c45a1c791d3178` | 9002 | `45836bc8ea66a337682a761b2cde1b3c` | 9010 | 选图目录：同上=命中 |
-| `selftest.py` | `fe1484876123da70b411bc5ebc44b23f` | 15113 | `edea41a9025bb982940a31b3febd70dd` | 15519 | 自测读截图目录：同上=命中；手册目录（铁律 10 的页脚自测）：不写死本机路径；打包后没有手册就整段跳过=命中 |
+| `selftest.py` | `011ed3684dce42932df1792500926efe` | 15165 | `08729a9d0e26311e511a43fa94057c84` | 15571 | 自测读截图目录：同上=命中；手册目录（铁律 10 的页脚自测）：不写死本机路径；打包后没有手册就整段跳过=命中 |
 | `guardian.py` | `d265e1e96e9c0d8b2a09cba995e64285` | 16737 | `d265e1e96e9c0d8b2a09cba995e64285` | 16737 | 无规则 |
 | `whitelist.json` | `816b3b1a073889a3472df479beb2b8d2` | 2121 | `816b3b1a073889a3472df479beb2b8d2` | 2121 | 无规则 |
 | `click_option.py` | `f887323bbe25e896b68916a0dfb72010` | 4136 | `f887323bbe25e896b68916a0dfb72010` | 4136 | 无规则 |
@@ -39,4 +39,4 @@
 | `probe6.py` | `3f6986f1049983f8c40135a0c0aa80b9` | 558 | `3f6986f1049983f8c40135a0c0aa80b9` | 558 | 无规则 |
 | `验动作.py` | `fd630f7468fbeca0c70a7e90d7d5c66b` | 39777 | `fd630f7468fbeca0c70a7e90d7d5c66b` | 39777 | 无规则 |
 | `闭环.py` | `8ef0bb265aea906676f2ed3300c1a06d` | 8071 | `8ef0bb265aea906676f2ed3300c1a06d` | 8071 | 无规则 |
-| `bench.py` | `2f4357caaa58c0152e3a49a3ff606da0` | 32300 | `2f4357caaa58c0152e3a49a3ff606da0` | 32300 | 无规则 |
+| `bench.py` | `54015becd309e6f30cf72306f04c4de6` | 32408 | `54015becd309e6f30cf72306f04c4de6` | 32408 | 无规则 |
