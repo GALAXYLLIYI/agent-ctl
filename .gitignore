@@ -1,7 +1,12 @@
 # ── 不进仓：构建产物 ──
 # dist 269 MB / build 50 MB。构建出来的，不该在仓库里再存一份。
 dist/
-build/
+# ★ 必须是 build/*（内容），不能是 build/（目录）——2026-10-14 DSH 修。
+#   原因：git 的硬规矩是「**父目录被排除时，无法再排除其中的文件**」，
+#   所以写成 build/ 时，下面那句 !build/*.spec **是一句死条文**（check-ignore 实测被 :4 挡掉）。
+#   ⇒ 改成排除「内容」，负向规则才生效。**别改回 build/**。
+#   这原本就是"静默缺件"：干净克隆后 build/AgentCtl.spec 不在仓 ⇒ 打不出 exe。
+build/*
 *.spec
 !build/*.spec
 
