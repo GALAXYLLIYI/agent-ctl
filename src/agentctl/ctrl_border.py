@@ -22,7 +22,7 @@
 独立运行（本模块是新增原型，尚未接入 core/gate；接入点清单见
 `agent-ctl\\work\\_派单W4_边框原型与接入点.md`）：
 
-    cd <工作区>\\Documents\\agent-ctl\\src
+    cd <仓库根>\\src
     python -X utf8 -m agentctl.ctrl_border --tier C            # 橙
     python -X utf8 -m agentctl.ctrl_border --tier A --duration 5
     python -X utf8 -m agentctl.ctrl_border --brake             # 红
@@ -34,7 +34,6 @@ import argparse
 import ctypes
 import ctypes.wintypes as wt
 import sys
-import time
 
 if sys.stdout and hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")

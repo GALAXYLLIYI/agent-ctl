@@ -20,7 +20,7 @@
 
 .PARAMETER Zip
     本地 zip 路径或 URL。不给就走 Release 包。
-    给了本地路径 = 完全离线安装（内网 / GitHub 连不上时用）。
+    给了本地路径 = 完全离线安装（内网 / Gitee 连不上时用）。
 
 .PARAMETER Dir
     安装根目录。默认 %LOCALAPPDATA%\AgentCtl。
@@ -192,7 +192,7 @@ function Get-Package {
 
 try { Get-Package } catch {
     Bad "取包失败：$($_.Exception.Message)"
-    Bad '如果这台机器连不上 GitHub，把 zip 下下来再跑：.\install.ps1 -Zip .\agentctl.zip'
+    Bad '如果这台机器连不上 Gitee，把 zip 下下来再跑：.\install.ps1 -Zip .\agentctl.zip'
     exit 4
 }
 

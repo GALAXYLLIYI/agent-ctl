@@ -2,7 +2,7 @@
  "_note": "gen_legacy 双基线台账：dirs[产物目录(相对仓库根)].files[文件] = {A0: 上次写产物时的规范化md5(去BOM/换行统一), T0: 生成时真源的规范化md5}。★必须进 git（G3 边界③）；手改 A0 等于共谋 —— 防线会失效，改台账唯一合法途径是跑一次生成。键与 src 用相对路径：本文件进仓，不得携带本机绝对路径（R2 (c) 类）。",
  "dirs": {
   "legacy_tools": {
-   "updated": "2026-10-13 22:18:41",
+   "updated": "2026-10-13 22:41:24",
    "src": "../dsh-viewer-plugin/tools",
    "files": {
     "gate.py": {
@@ -176,9 +176,9 @@
      "bytes_out": 8071
     },
     "bench.py": {
-     "A0": "ad0b281ca7584ee465c0da8336027063",
-     "T0": "ad0b281ca7584ee465c0da8336027063",
-     "bytes_out": 22797
+     "A0": "11bba4d8f7ed4fe1be781f487f9163a9",
+     "T0": "11bba4d8f7ed4fe1be781f487f9163a9",
+     "bytes_out": 22816
     }
    }
   }

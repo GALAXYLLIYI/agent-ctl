@@ -175,7 +175,7 @@
         "properties": {
           "verify_expect": {
            "type": "string",
-           "description": "★可选，闭环验证。动作【前】声明期望谓词（分号分隔，与 tools/验动作.py 同一套：file-exists: / file-created: / file-changed: / file-contains:路径|子串 / dir-count-up: / proc-exists: / proc-gone: / window-exists: / window-gone: / any-change / no-change）。给了它，动作前后各拍一次快照并由**独立进程**判定；返回包会带 verdict（satisfied/unsatisfied/unknown/snapshots-incomparable）。★verdict 不是 satisfied 时**不会报 ok** —— 「动作发出去了」不等于「事情发生了」。★必须在动作前声明，事后补不算（否则无法归因）。"
+           "description": "★可选，闭环验证。动作【前】声明期望谓词（分号分隔，与 legacy_tools/验动作.py 同一套：file-exists: / file-created: / file-changed: / file-contains:路径|子串 / dir-count-up: / proc-exists: / proc-gone: / window-exists: / window-gone: / any-change / no-change）。给了它，动作前后各拍一次快照并由**独立进程**判定；返回包会带 verdict（satisfied/unsatisfied/unknown/snapshots-incomparable）。★verdict 不是 satisfied 时**不会报 ok** —— 「动作发出去了」不等于「事情发生了」。★必须在动作前声明，事后补不算（否则无法归因）。"
           },
           "verify_watch": {
            "type": "string",
@@ -429,7 +429,7 @@
         "properties": {
           "verify_expect": {
            "type": "string",
-           "description": "★可选，闭环验证。动作【前】声明期望谓词（分号分隔，与 tools/验动作.py 同一套：file-exists: / file-created: / file-changed: / file-contains:路径|子串 / dir-count-up: / proc-exists: / proc-gone: / window-exists: / window-gone: / any-change / no-change）。给了它，动作前后各拍一次快照并由**独立进程**判定；返回包会带 verdict（satisfied/unsatisfied/unknown/snapshots-incomparable）。★verdict 不是 satisfied 时**不会报 ok** —— 「动作发出去了」不等于「事情发生了」。★必须在动作前声明，事后补不算（否则无法归因）。"
+           "description": "★可选，闭环验证。动作【前】声明期望谓词（分号分隔，与 legacy_tools/验动作.py 同一套：file-exists: / file-created: / file-changed: / file-contains:路径|子串 / dir-count-up: / proc-exists: / proc-gone: / window-exists: / window-gone: / any-change / no-change）。给了它，动作前后各拍一次快照并由**独立进程**判定；返回包会带 verdict（satisfied/unsatisfied/unknown/snapshots-incomparable）。★verdict 不是 satisfied 时**不会报 ok** —— 「动作发出去了」不等于「事情发生了」。★必须在动作前声明，事后补不算（否则无法归因）。"
           },
           "verify_watch": {
            "type": "string",
@@ -505,7 +505,7 @@
         "properties": {
           "verify_expect": {
            "type": "string",
-           "description": "★可选，闭环验证。动作【前】声明期望谓词（分号分隔，与 tools/验动作.py 同一套：file-exists: / file-created: / file-changed: / file-contains:路径|子串 / dir-count-up: / proc-exists: / proc-gone: / window-exists: / window-gone: / any-change / no-change）。给了它，动作前后各拍一次快照并由**独立进程**判定；返回包会带 verdict（satisfied/unsatisfied/unknown/snapshots-incomparable）。★verdict 不是 satisfied 时**不会报 ok** —— 「动作发出去了」不等于「事情发生了」。★必须在动作前声明，事后补不算（否则无法归因）。"
+           "description": "★可选，闭环验证。动作【前】声明期望谓词（分号分隔，与 legacy_tools/验动作.py 同一套：file-exists: / file-created: / file-changed: / file-contains:路径|子串 / dir-count-up: / proc-exists: / proc-gone: / window-exists: / window-gone: / any-change / no-change）。给了它，动作前后各拍一次快照并由**独立进程**判定；返回包会带 verdict（satisfied/unsatisfied/unknown/snapshots-incomparable）。★verdict 不是 satisfied 时**不会报 ok** —— 「动作发出去了」不等于「事情发生了」。★必须在动作前声明，事后补不算（否则无法归因）。"
           },
           "verify_watch": {
            "type": "string",
@@ -555,7 +555,7 @@
         "properties": {
           "verify_expect": {
            "type": "string",
-           "description": "★可选，闭环验证。动作【前】声明期望谓词（分号分隔，与 tools/验动作.py 同一套：file-exists: / file-created: / file-changed: / file-contains:路径|子串 / dir-count-up: / proc-exists: / proc-gone: / window-exists: / window-gone: / any-change / no-change）。给了它，动作前后各拍一次快照并由**独立进程**判定；返回包会带 verdict（satisfied/unsatisfied/unknown/snapshots-incomparable）。★verdict 不是 satisfied 时**不会报 ok** —— 「动作发出去了」不等于「事情发生了」。★必须在动作前声明，事后补不算（否则无法归因）。"
+           "description": "★可选，闭环验证。动作【前】声明期望谓词（分号分隔，与 legacy_tools/验动作.py 同一套：file-exists: / file-created: / file-changed: / file-contains:路径|子串 / dir-count-up: / proc-exists: / proc-gone: / window-exists: / window-gone: / any-change / no-change）。给了它，动作前后各拍一次快照并由**独立进程**判定；返回包会带 verdict（satisfied/unsatisfied/unknown/snapshots-incomparable）。★verdict 不是 satisfied 时**不会报 ok** —— 「动作发出去了」不等于「事情发生了」。★必须在动作前声明，事后补不算（否则无法归因）。"
           },
           "verify_watch": {
            "type": "string",

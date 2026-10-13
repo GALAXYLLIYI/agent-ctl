@@ -200,7 +200,7 @@ def b4_verify_mismatch():
     return True
 
 
-# ══════════════════ B5–B7：闭环入口（tools/闭环.py） ══════════════════
+# ══════════════════ B5–B7：闭环入口（与本文件同目录的 闭环.py） ══════════════════
 def b5_loop_positive():
     box = sandbox("b5")
     f = _mk(box)

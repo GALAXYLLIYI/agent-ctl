@@ -305,38 +305,6 @@ def do_authorize(scope, minutes, acts):
     return False, r.get('warning') or '授权未通过'
 
 
-def _run_tool(cmd, timeout):
-    """跑老脚本并把输出读回来。
-
-    ⚠ 老脚本用中文 Windows 控制台（GBK/936）输出，直接按 utf-8 解会满屏「��ͣ」乱码
-       （实测：终止按钮第一次跑就这毛病）。所以**逐个编码试**，谁解得出来用谁，
-       解不出来才退回 replace。
-    """
-    import subprocess
-    try:
-        p = subprocess.run(cmd, capture_output=True, timeout=timeout)
-    except Exception as e:
-        return False, '调 %s 失败：%s' % (os.path.basename(cmd[-1]), e)
-    best = ''
-    for enc in ('utf-8', 'gbk', 'mbcs'):
-        try:
-            s = (p.stdout or b'').decode(enc)
-        except Exception:
-            continue
-        if '�' not in s:
-            best = s
-            break
-        best = best or s
-    for enc in ('utf-8', 'gbk'):
-        try:
-            e = (p.stderr or b'').decode(enc)
-        except Exception:
-            continue
-        if e.strip():
-            return False, e.strip()
-    return (p.returncode == 0), best.strip() or '（无输出）'
-
-
 def selftest_widget():
     """M1 自检：确保这个只读挂件不会变成绕过闸门的后门。
 
