@@ -54,6 +54,22 @@ def _run_pyflakes(paths):
     return (r.stdout or "") + (r.stderr or "")
 
 
+def _pyflakes_available():
+    """这个解释器到底能不能 import pyflakes —— 返回 (能不能, 探针原文)。
+
+    ★ 为什么不看 lint_gate 自己的 returncode：pyflakes「真报了问题」与
+      「模块根本不在」都是 rc=1（缺模块时 python -m 找不到模块，退出 1），
+      光看 rc 分不开这两件完全相反的事。
+    ★ 为什么不扫 stderr 里有没有 "No module named"：那是拿**报错文案**当判据，
+      文案随 Python 版本与本地化变，判据不稳。这里跑一条最短的 import 探针，
+      问的是事实；探针用的是**同一个 sys.executable**，与下面真跑的那条同源。
+    """
+    cmd = [sys.executable, "-X", "utf8", "-c", "import pyflakes"]
+    r = subprocess.run(cmd, capture_output=True, text=True,
+                       encoding="utf-8", errors="replace")
+    return (r.returncode == 0), ((r.stderr or r.stdout or "").strip()[:300])
+
+
 def _collect(target):
     """展开成 .py 文件列表；也接受 .zip（扫包内文件）。"""
     out = []
@@ -93,6 +109,23 @@ def main(argv):
     if not files:
         print("  没有可扫的文件")
         return 0
+
+    # ★ S3-B1（2026-10-13）：能力探针。
+    #   「工具没跑起来」≠「没有致命项」—— 缺 pyflakes 时 python 把
+    #   "No module named pyflakes" 打进 stderr，_run_pyflakes 把它并进 txt，
+    #   它既不含致命词也不含提醒词 ⇒ 落 other 桶 ⇒ fatal 为空
+    #   ⇒ 老代码照样打印「✔ 致命项为零 —— 门槛通过」并 return 0。
+    #   任何缺 pyflakes 的机器发包（pack_dist.py 无条件 import 本模块）都会
+    #   靠这道假绿灯过去 —— 所以在这里先证明工具真的跑过，再谈判定。
+    #   放在 if list_only: return 0 之前 ⇒ --list-only 同样不许假装通过。
+    ok_tool, why = _pyflakes_available()
+    if not ok_tool:
+        print("  X 门槛**未生效**：当前解释器 %s 导不进 pyflakes" % sys.executable)
+        print("      ⇒ 本次判定**不成立**，绝不能当成「致命项为零」")
+        print("      （那正是本条要修的假通过；探针跑的是 import 成败，不是报错文案）。")
+        print("      探针原文：%s" % (why or "(无输出)"))
+        print("      修法：python -m pip install pyflakes")
+        return 2
 
     txt = _run_pyflakes(files)
     lines = [l for l in txt.splitlines() if l.strip()]

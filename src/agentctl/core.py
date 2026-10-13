@@ -1260,6 +1260,14 @@ def _map_rc(rc: int, out: str, err: str) -> dict:
       ⇒ 落成 **code=5**（现有码；语义「坐标/前台/窗口不稳定 → 重新观测」，
       与「目标窗口当前状态不稳定」对得上），**不新造错误码**。
       改前改后都是 ok=False，零放行口径变化。
+
+    ★ S3-B2（2026-10-13）新增：**表里没有的 rc 不许静默兜底**。
+      改前是 `m.get(rc, CODE_NO_CTRL)`，rc=2 / rc=99 这类「老脚本出了没约定的码」
+      会被说成 code=4「找不到控件」，而《AGENT接口.md》给 code=4 的处方是
+      「重新 ctl_windows + ctl_tree 看现状」—— agent 照着只会绕圈。
+      现在早退成独立一支：ok=False、落现有码 5、warning 明说「未知返回码」，
+      data.unknown_rc 给机读判据（与 C4 的 blocked_by 同一套路）。
+      **不新造错误码** —— 码表在 gate.py:427-430，改它越界。
     """
     txt = (out + err).strip()
     if rc == 0:
@@ -1269,7 +1277,19 @@ def _map_rc(rc: int, out: str, err: str) -> dict:
          # ← C4：rc=6 是 act.py 的「被模态对话框挡住」，落 code=5；不再兜底成「找不到控件」
          5: gate.CODE_UNSTABLE, 6: gate.CODE_UNSTABLE,
          8: gate.CODE_NO_CHANGE, 127: gate.CODE_NO_CTRL}
-    code = m.get(rc, gate.CODE_NO_CTRL)
+    # ★ S3-B2：未知 rc 单独早退，**必须放在下面那张 warn 表之前** ——
+    #   那张表是按 code 取的，未知 rc 落 code=5 会命中「坐标/前台/窗口稳定性拒绝」，
+    #   与真实原因（老脚本出了 act.py 没约定的码）完全不对。
+    #   ok 保持 False（env() 默认），绝不算成功。
+    if rc not in m:
+        return env(code=gate.CODE_UNSTABLE,
+                   data={"rc": rc, "raw": txt[:3000], "unknown_rc": True},
+                   warning=("老脚本返回**未知返回码 %d** —— act.py 没约定这个码，"
+                            "不许当成功、也不许当成「找不到控件」。先看 data.raw "
+                            "里的原文再判断（老脚本：%s）" % (rc, LEGACY)))
+    code = m[rc]          # ★ 由 m.get(rc, ...) 改成 m[rc]：第二道保险 ——
+                         #   以后谁往 m 里加了键又忘了同步上面的早退分支，当场 KeyError，
+                         #   总比又悄悄兜底成「找不到控件」强。
     warn = {8: "动作发出去了，但页面/画面没有变化 —— ⛔ **不许当成功**",
             9: "未获授权 —— 先 ctl_authorize 拿通行证",
             3: "白名单/敏感窗口拒绝",
