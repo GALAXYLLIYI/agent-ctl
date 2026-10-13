@@ -428,6 +428,14 @@ CODE_OK, CODE_DENY_WHITELIST, CODE_NO_CTRL, CODE_UNSTABLE = 0, 3, 4, 5
 # 2026-10-07：静态白名单废掉，改「每次问」—— 这是「要去问用户」，不是「拒绝」。
 CODE_NEEDS_ASK = 7
 CODE_NO_CHANGE, CODE_UNAUTH, CODE_LEASE_HELD, CODE_BRAKE, CODE_STALE_CAPTURE = 8, 9, 10, 11, 12
+# ★ S6（2026-10-13）：13 进表。⚠️ **它不是「超出配额」，是资源保护停录。**
+#   唯一产生点：core.py t_record 的自动停录线程 —— 可用物理内存 < 3500 MB
+#   或提交使用率 > 65%（阈值硬编码在 core.py:1056/1076）⇒ 线程自己 break。
+#   ⚠️ 契约原先写「超出限额（录制/留存/动作次数）」，三样都不是这个：
+#      · 留存超限的实现是 recorder.prune() **删最旧的帧**（不拒绝，retention_purge 回 ok=True）
+#      · 动作次数用尽走 CODE_UNAUTH(9)（本文件 check() 里唯一的次数闸）
+#   ⇒ 别改数值（历史事件已落库），改的是文案和这个名字。
+CODE_RESOURCE_LIMIT = 13
 
 def short(scope: str) -> str:
     """把 'B' / 'B级 点击滚动' 两种写法都归一成 'B'。"""

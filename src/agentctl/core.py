@@ -1077,7 +1077,8 @@ def t_record(args: dict) -> dict:
                     _REC["autostop"] = f"资源保护：可用物理 {m['avail_phys_mb']} MB / 提交 {m['commit_pct']}%"
                     try:
                         store().append("recorder_autostop", actor="recorder", tool="ctl_record",
-                                       payload=_REC["autostop"], ok=False, code=13)
+                                       payload=_REC["autostop"], ok=False,
+                                       code=gate.CODE_RESOURCE_LIMIT)
                     except Exception:
                         pass
                     break
