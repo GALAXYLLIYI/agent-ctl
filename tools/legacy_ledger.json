@@ -2,7 +2,7 @@
  "_note": "gen_legacy 双基线台账：dirs[产物目录(相对仓库根)].files[文件] = {A0: 上次写产物时的规范化md5(去BOM/换行统一), T0: 生成时真源的规范化md5}。★必须进 git（G3 边界③）；手改 A0 等于共谋 —— 防线会失效，改台账唯一合法途径是跑一次生成。键与 src 用相对路径：本文件进仓，不得携带本机绝对路径（R2 (c) 类）。",
  "dirs": {
   "legacy_tools": {
-   "updated": "2026-10-13 22:41:24",
+   "updated": "2026-10-14 02:17:00",
    "src": "../dsh-viewer-plugin/tools",
    "files": {
     "gate.py": {
@@ -51,9 +51,9 @@
      "bytes_out": 9010
     },
     "selftest.py": {
-     "A0": "c9b5a6a9db1aa62cad6016e71a722e3c",
-     "T0": "cef9044a0335b5b3ce99164549aa802f",
-     "bytes_out": 14818
+     "A0": "edea41a9025bb982940a31b3febd70dd",
+     "T0": "fe1484876123da70b411bc5ebc44b23f",
+     "bytes_out": 15519
     },
     "guardian.py": {
      "A0": "d265e1e96e9c0d8b2a09cba995e64285",
@@ -176,9 +176,9 @@
      "bytes_out": 8071
     },
     "bench.py": {
-     "A0": "11bba4d8f7ed4fe1be781f487f9163a9",
-     "T0": "11bba4d8f7ed4fe1be781f487f9163a9",
-     "bytes_out": 22816
+     "A0": "2f4357caaa58c0152e3a49a3ff606da0",
+     "T0": "2f4357caaa58c0152e3a49a3ff606da0",
+     "bytes_out": 32300
     }
    }
   }

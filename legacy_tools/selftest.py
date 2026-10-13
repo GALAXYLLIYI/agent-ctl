@@ -220,8 +220,15 @@ try:
     win32gui.RegisterClass(wc)
 except Exception:
     pass
+# ★ 2026-10-14：窗口挪到【屏幕外】建 —— 以前是 (140,140)，于是每跑一次自测
+#   就在用户桌面闪一个 "AgentCtlModalSelfTest" 窗 + 一个标题/正文都是 selftest 的
+#   MessageBox（用户已两次被它打扰）。
+#   为什么不是"藏起来/不 ShowWindow"：本条测试要验的正是「**可见的**模态框能否被认出」——
+#   modal_blocker 的枚举回调里 `not IsWindowVisible(h)` 就直接跳过 ⇒ 不 Show 等于把判据废掉。
+#   ⇒ 挪到 (-32000,-32000)：窗口**仍然可见**（IsWindowVisible 为真），但落在任何显示器之外，
+#     用户看不见；MessageBox 以它为属主，也跟着跑到屏外。
 h = win32gui.CreateWindow(wc.lpszClassName, "AgentCtlModalSelfTest",
-                          win32con.WS_OVERLAPPEDWINDOW, 140, 140, 380, 260, 0, 0,
+                          win32con.WS_OVERLAPPEDWINDOW, -32000, -32000, 380, 260, 0, 0,
                           wc.hInstance, None)
 win32gui.ShowWindow(h, win32con.SW_SHOW)
 io.open(flag, "w").write(str(h))

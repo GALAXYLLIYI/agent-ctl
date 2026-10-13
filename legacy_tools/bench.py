@@ -17,7 +17,7 @@ r"""bench.py —— 固定回归集（小 Bench）：改完代码跑这一条，
     ② **每个"该败"的用例都真的要求它败**（该成/该败成对出现，互相当对方的反例）
     ③ **每个用例都打印它实际用的产物路径**（防止验错了对象）
 
-用例（10 项，其中 B9/B10 需要有效通行证，没有就跳过并说明）
+用例（13 项，其中 B9/B10 需要有效通行证，没有就跳过并说明）
 --------------------------------------------------------------------------------
   B1  判定器正例：文件真的变了        ⇒ satisfied(0)
   B2  判定器负例★：声称要变、其实没变  ⇒ unsatisfied(3)      ← 绝不许 0
@@ -29,6 +29,9 @@ r"""bench.py —— 固定回归集（小 Bench）：改完代码跑这一条，
   B8  模态：目标=对话框本身不许被挡    ⇒ 未被挡；且目标进程有真模态时仍必须被挡
   B9  主路★：verify_expect 不满足      ⇒ 信封 ok=False（需通行证）
   B10 主路：不声明验证键               ⇒ 信封里不出现 verdict/verify（需通行证）
+
+  B12 ★_map_rc 表外 rc 不许静默兜底     ⇒ code=5 + unknown_rc（不需通行证）
+  B13 ★lint_gate 缺 pyflakes 不许假通过  ⇒ rc=2（不需通行证）
 
 用法
 --------------------------------------------------------------------------------
@@ -78,6 +81,12 @@ def _beside(*names):
 
 VERIFY = os.path.abspath(os.environ.get("AGENTCTL_VERIFY_PY") or _beside("验动作.py"))
 LOOP = os.path.abspath(os.environ.get("AGENTCTL_LOOP_PY") or _beside("闭环.py"))
+
+# ★ B13 的被测对象：构建门槛 lint_gate.py（pack_dist.py:242 靠它的 rc 决定发不发包）。
+#   路径用 _beside()：真源 tools\ 下没有它；从 legacy_tools 跑时命中 仓根\tools\lint_gate.py。
+#   环境变量出口照 VERIFY / LOOP 的既有先例 —— 它是**对照实验**入口：
+#   把「改前的 lint_gate」喂进来，B13 必须变红；红不了就说明这条用例是死的。
+LINT_GATE = os.path.abspath(os.environ.get("AGENTCTL_LINT_GATE") or _beside("lint_gate.py"))
 
 OK, FAIL, SKIP = [], [], []
 BOXES = []
@@ -271,8 +280,16 @@ try:
     win32gui.RegisterClass(wc)
 except Exception:
     pass
+# ★ 2026-10-14：窗口挪到【屏幕外】建 —— 以前是 (160,160)，于是每跑一次 bench
+#   就在用户桌面闪一个 "AgentCtlBenchModal" 窗 + 一个标题/正文都是 bench 的
+#   MessageBox（用户已为此被打扰多次）。
+#   为什么不是"藏起来/不 ShowWindow"：本条测试要验的正是「**可见的**模态框能否被认出」——
+#   modal_blocker 的枚举回调里 `not IsWindowVisible(h)` 就直接跳过 ⇒ 不 Show 等于把判据废掉。
+#   ⇒ 挪到 (-32000,-32000)：窗口**仍然可见**（IsWindowVisible 为真），但落在任何显示器之外，
+#     用户看不见；MessageBox 以它为属主，也跟着跑到屏外。
+#   （与 selftest.py:218-227 同一条处置，照抄体例。）
 h = win32gui.CreateWindow(wc.lpszClassName, "AgentCtlBenchModal",
-                          win32con.WS_OVERLAPPEDWINDOW, 160, 160, 380, 260, 0, 0,
+                          win32con.WS_OVERLAPPEDWINDOW, -32000, -32000, 380, 260, 0, 0,
                           wc.hInstance, None)
 win32gui.ShowWindow(h, win32con.SW_SHOW)
 io.open(flag, "w").write(str(h))
@@ -525,6 +542,153 @@ def b11_minimized_window_not_misread():
     return True
 
 
+
+# ══════════════════ B12：契约码表（core.py::_map_rc）══════════════════
+# ★ 被测的是**契约码表**，不是 GUI 行为 —— 不需要通行证，所以不会被跳过。
+#   表内 rc 的期望值（0 是早退支；其余取自 core.py:1323-1327 的 m）。
+_MAP_RC_TABLE = {0: (True, 0), 3: (False, 3), 4: (False, 4), 5: (False, 5),
+                 6: (False, 5), 7: (False, 7), 8: (False, 8), 9: (False, 9),
+                 127: (False, 4)}
+
+
+def b12_map_rc_unknown_rc():
+    """★S3-B2 的回归：表外 rc 不许静默兜底成 code=4「找不到控件」。
+
+    A 表外 rc（含 13/15 —— 它们是**信封码**，但不是老脚本 act.py 的 rc）
+      ⇒ ok=False + code=5 + data.unknown_rc=True，且**绝不 code=4**
+    B 对照：表内 9 个 rc 的结论一个都不许变，且都不许被标 unknown_rc
+    C 全表扫描：被判 unknown_rc 的 rc 集合 ==【恰好】不在表内的 rc 集合
+      —— 有人往 m 里加键却忘同步早退分支时，这条**当场变红**（core.py 的「第二道保险」）
+    """
+    if not os.path.isdir(os.path.join(SRC_DIR, "agentctl")):
+        return ("skip", "找不到 agentctl 包（%s）" % SRC_DIR)
+    sys.path.insert(0, SRC_DIR)
+    try:
+        from agentctl import core
+    except Exception as e:
+        return ("skip", "import agentctl 失败：%s" % e)
+    print("     · [B12] 被测包 = %s" % core.__file__)      # 规矩③：印实际用的产物路径
+
+    # ── A 表外 rc
+    outside = [1, 2, 99, -1, 124, 125, 255, 999, 13, 15]
+    for rc in outside:
+        env = core._map_rc(rc, "out", "err")
+        if env.get("ok") is not False:
+            return "rc=%d 应 ok=False，实际 ok=%r ⇒ 表外 rc 被放行" % (rc, env.get("ok"))
+        if env.get("code") == 4:
+            return "★ rc=%d 被兜底成 code=4「找不到控件」—— 这正是 S3-B2 修掉的病" % rc
+        if env.get("code") != core.gate.CODE_UNSTABLE:
+            return "rc=%d 应 code=5，实际 code=%r" % (rc, env.get("code"))
+        data = env.get("data") or {}
+        if data.get("unknown_rc") is not True:
+            return "rc=%d 应带 data.unknown_rc=True，实际 %r" % (rc, data.get("unknown_rc"))
+        if data.get("rc") != rc:
+            return "rc=%d 的 data.rc 应原样保留，实际 %r" % (rc, data.get("rc"))
+        if not (data.get("raw") or "").strip():
+            return "rc=%d 的 data.raw 为空（现场丢了）" % rc
+        w = env.get("warning") or ""
+        if ("未知返回码" not in w) or (str(rc) not in w):
+            return "rc=%d 的 warning 应说明「未知返回码 %d」，实际 %r" % (rc, rc, w[:110])
+
+    # ── B 对照：表内一条都不许变
+    for rc, (exp_ok, exp_code) in _MAP_RC_TABLE.items():
+        env = core._map_rc(rc, "out", "err")
+        if env.get("ok") is not exp_ok:
+            return "对照 rc=%d：ok 应 %r，实际 %r" % (rc, exp_ok, env.get("ok"))
+        if env.get("code") != exp_code:
+            return "对照 rc=%d：code 应 %d，实际 %r" % (rc, exp_code, env.get("code"))
+        if (env.get("data") or {}).get("unknown_rc"):
+            return "对照 rc=%d 被误标 unknown_rc（表内 rc 不许当未知）" % rc
+    d6 = core._map_rc(6, "out", "err").get("data") or {}
+    if d6.get("blocked_by") != "modal_dialog":
+        return "rc=6 的 blocked_by=modal_dialog（C4 的成果）丢了：%r" % d6.get("blocked_by")
+
+    # ── C 全表扫描：unknown 集合必须恰好等于表外集合
+    scan = list(range(-3, 141)) + [255, 999]
+    want = {rc for rc in scan if rc not in _MAP_RC_TABLE}
+    got = {rc for rc in scan if (core._map_rc(rc, "out", "err").get("data") or {}).get("unknown_rc")}
+    if got != want:
+        return ("★ 全表扫描失配：应判未知却漏 %s；不该判未知却判 %s"
+                " ⇒ 有人改了 m 却没同步早退分支"
+                % (sorted(want - got)[:8], sorted(got - want)[:8]))
+    return True
+
+
+# ══════════════════ B13：构建门槛（tools/lint_gate.py）══════════════════
+# ★ 被测对象是**构建门槛**（pack_dist.py 无条件 import 它，rc≠0 就不发包），
+#   同样不需要通行证。
+def _has_pyflakes(py):
+    """与 lint_gate 自己的探针同源：问 import 成败，不看报错文案。"""
+    r = subprocess.run([py, "-X", "utf8", "-c", "import pyflakes"],
+                       capture_output=True, text=True, encoding="utf-8", errors="replace")
+    return r.returncode == 0
+
+
+def _poison_pyflakes(box):
+    """造一个「import pyflakes 必失败」的**临时**环境（只经 env 传给子进程）。"""
+    d = os.path.join(box, "poison")
+    os.makedirs(d, exist_ok=True)
+    io.open(os.path.join(d, "pyflakes.py"), "w", encoding="utf-8").write(
+        'raise ImportError("bench B13: 故意让 pyflakes 不可用（仅临时环境，不动本机）")\n')
+    return d
+
+
+def _lint_run(target, poison=None, extra=()):
+    env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
+    if poison:
+        env["PYTHONPATH"] = poison + os.pathsep + env.get("PYTHONPATH", "")
+    return run([PY, "-X", "utf8", LINT_GATE] + list(extra) + [target], env=env)
+
+
+def b13_lint_gate_no_fake_pass():
+    """★S3-B1 的回归：缺 pyflakes 时不许打印「致命项为零 —— 门槛通过」。
+
+    L1 对照（证明门槛既不是一律放行、也不是一律拒绝）
+    L2 毒丸★：import pyflakes 必失败 ⇒ 必须 rc=2，且明说「未生效 / 不成立」
+    L3 毒丸 + --list-only★：同样不许假装通过（lint_gate.py:120 的承诺）
+    """
+    if not os.path.exists(LINT_GATE):
+        return ("skip", "找不到被测门槛 %s（从 legacy_tools 跑时应命中 仓根\\tools\\lint_gate.py）"
+                % LINT_GATE)
+    box = sandbox("b13")
+    ok_py = _mk(box, "ok.py", "x = 1\nprint(x)\n")
+    bad_py = _mk(box, "bad.py", "def f():\n    return bench_undefined_name\n")
+    print("     · [B13] 被测门槛 = %s｜解释器 = %s｜夹具 = %s" % (LINT_GATE, PY, box))
+
+    have = _has_pyflakes(PY)
+    # ── L1 对照
+    if have:
+        rc, out = _lint_run(ok_py)
+        if rc != 0:
+            return "L1 干净夹具应 rc=0，实际 %d\n%s" % (rc, out[-400:])
+        if "✔ 致命项为零" not in out:
+            return "L1 干净夹具没有「致命项为零」的结论\n%s" % out[-400:]
+        rc2, out2 = _lint_run(bad_py)
+        if rc2 != 1:
+            return "L1 致命夹具应 rc=1，实际 %d\n%s" % (rc2, out2[-400:])
+        if ("致命" not in out2) or ("undefined name" not in out2):
+            return "L1 致命夹具没报出「致命」/「undefined name」\n%s" % out2[-400:]
+    else:
+        print("     · [B13] L1 跳过：解释器 %s 没装 pyflakes"
+              "（装法：python -m pip install pyflakes）" % PY)
+
+    # ── L2 毒丸 ★
+    poison = _poison_pyflakes(box)
+    rc, out = _lint_run(ok_py, poison=poison)
+    if rc != 2:
+        return ("★ L2 毒丸下应 rc=2（门槛未生效），实际 %d —— 缺 pyflakes 却敢下结论\n%s"
+                % (rc, out[-400:]))
+    if ("未生效" not in out) or ("不成立" not in out):
+        return "L2 毒丸下 rc=2 了，但没说清「未生效 / 本次判定不成立」\n%s" % out[-400:]
+    if "✔ 致命项为零" in out:
+        return "★ L2 毒丸下仍印出「致命项为零/门槛通过」—— 假通过复发\n%s" % out[-400:]
+
+    # ── L3 毒丸 + --list-only ★
+    rc, out = _lint_run(ok_py, poison=poison, extra=("--list-only",))
+    if rc != 2:
+        return ("★ L3 毒丸 + --list-only 应 rc=2（lint_gate.py:120 承诺它同样不许假装通过），"
+                "实际 %d\n%s" % (rc, out[-400:]))
+    return True
 CASES = [
     ("B1  判定器正例（真变⇒0）", b1_verify_positive),
     ("B2  ★判定器负例（没变⇒3）", b2_verify_negative),
@@ -537,6 +701,8 @@ CASES = [
     ("B9  ★主路 verify_expect 不满足", b9_main_negative),
     ("B10 主路不声明验证键不加字段", b10_main_no_keys),
     ("B11 最小化窗口不许被误读", b11_minimized_window_not_misread),
+    ("B12 ★_map_rc 表外 rc 不许静默兜底", b12_map_rc_unknown_rc),
+    ("B13 ★lint_gate 缺 pyflakes 不许假通过", b13_lint_gate_no_fake_pass),
 ]
 
 
