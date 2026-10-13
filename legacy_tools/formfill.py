@@ -165,7 +165,7 @@ def link_hidden(page_kw, src_name, dst_name, pick_text=None, form_sel="#gzform")
       ⇒ 手动补写这个字段，是绕过页面 JS 的**正当做法**（不是作弊）。
 
     用法：
-        formfill.link_hidden("fjmgongzixinjin", "nameform", "personId", pick_text="马歇尔[0001]")
+        formfill.link_hidden("fjmgongzixinjin", "nameform", "personId", pick_text="张*[0001]")
     返回 {"src": src值, "dst": dst值} 的 JSON 字符串。
     """
     c = _conn(page_kw)

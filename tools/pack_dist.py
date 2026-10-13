@@ -59,7 +59,10 @@ ALWAYS_EXCLUDE_DIRS = {
 ALWAYS_EXCLUDE_EXT = {".pyc", ".pyo", ".pyd", ".log"}
 
 # ★ T14 阶段 2：以 _ 开头但**必须随包发**的文件（显式白名单，不靠通配）
-KEEP_NAMES = {"_md5台账.md"}
+# ★ S3-A（2026-10-13）：加 `_session.py` —— padd2.py:50 在 conn() 里 `import _session as S`，
+#   它是 gen_legacy.FILES 里的产品依赖。不显式放行的话，下面 guard() 的
+#   「`_` 开头 = 一次性脚本」会把它丢掉 ⇒ 登记进 FILES 也等于没登记（两处必须成对）。
+KEEP_NAMES = {"_md5台账.md", "_session.py"}
 
 # 隐私扫描（与 tools/make_legacy_dir.py 同一套判据）——
 # 打包是**最后一道闸**，不假设上游一定干净。
@@ -221,7 +224,10 @@ def main() -> int:
         print("打包源：从老线真源现场生成 → %s" % legacy_src)
         rc = gen_legacy.main_for_pack(legacy_src)
         if rc != 0:
-            raise SystemExit("[X] legacy 源生成失败（净化规则有未命中项），不发包")
+            # rc≠0 有两种来由：净化规则未命中，或个人信息形态检测命中（gen_legacy 已打印详情）。
+            # 别把后一种说成前一种 —— 会让人去查错的方向。
+            raise SystemExit("[X] legacy 源生成失败（净化规则未命中，或个人信息形态检测命中；"
+                             "详情见上面 gen_legacy 的输出），不发包")
         print()
 
     # ── pyflakes 常驻门槛（T14 阶段 3 落地，此前从 T13 起一直挂着）────

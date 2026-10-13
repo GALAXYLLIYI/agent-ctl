@@ -65,6 +65,18 @@ GUI 层的动作**没有返回值**（点一下只是把一条消息塞进队列
     退出码：0 satisfied / 3 unsatisfied / 4 unknown / **5 快照不可比（判定无效）**
     放宽开关：--allow-path-mismatch（显式用了才放宽，且会打醒目警告、账本留 note）
 
+★ 采集健康度（2026-10-13 新增，A-2 / D2）
+--------------------------------------------------------------------------------
+    快照里多一个 `scanHealth`：{procs/windows/files: "ok" 或失败原因}。
+      以前窗口枚举整体失败被 `except: pass` 吞掉、快照留空，
+      而 no-change 判的是 total==0 ⇒ 「枚举炸了」被说成「什么都没变」= **假成功**。
+    现在：「枚举失败」与「确实没变」在**返回值**上分开 ——
+      · snap 阶段任一路失败 ⇒ 退出码 4（unknown），不报成功；
+      · check 阶段按**谓词实际依赖的通道**打闸 ⇒ 那一路坏着，相关谓词判 unknown；
+      · 老快照没有 scanHealth 键 ⇒ 按「不可知」处理（fail-closed），提示重拍。
+    文件通道（files）不打闸：snap_files 对每条路径都有 except 兜到
+      "absent"/"unreadable"，失败**已经被显式记成状态**，不是空快照。
+
 ★ 只读承诺：snapshot 只读系统状态，**不写任何被观测的东西**，也不改剪贴板。
 """
 import argparse
@@ -192,7 +204,17 @@ def do_ledger(args):
 def snap_procs():
     """进程快照。★ 排除【自己这一支】（验动作.py / pwsh / cmd）——
     否则每次快照都会看到"自己新增、自己消失"，纯噪声。
-    （2026-10-02 实测：第一次对比就报"进程 新增1 消失1"，全是我自己。）"""
+    （2026-10-02 实测：第一次对比就报"进程 新增1 消失1"，全是我自己。）
+
+    ★ D2（2026-10-13）：**返回 (out, err)**，与 snap_windows 同一形状。
+      原来 :212-213 是逐条 `except Exception: pass` —— 单个进程读不到就静默消失，
+      而 proc-gone 判的是「before 有、after 没有」⇒ 读失败被当成进程没了
+      ⇒ **假成功**（同一类病，比 no-change 更隐蔽）。
+      ★ 但**不能一律当故障**：psutil 的 NoSuchProcess/ZombieProcess 是
+        「枚举途中那个进程真的退出了」—— 这正是 proc-gone 要测的现象，不是扫描故障。
+        把它们也算成故障，会让 proc-gone 永远判不了（比原来的假成功更糟）。
+        ⇒ 真的退出的跳过并计数，其余异常才算「扫描不可信」。
+    """
     # ★2026-10-08 修（ZCode，P1 前置自检两轮发现）：
     #   原来按【自己这一支 + 祖先链的 PID】排除进程 —— 但终端由资源管理器拉起时，
     #   explorer.exe 就在祖先链里，于是每张快照都缺 explorer（实测 298/299 进程、
@@ -203,19 +225,36 @@ def snap_procs():
     #   备份：work\_bak归档\tools_验动作.py.bak_修snap排除祖先名_20261008_171604
     noisy = {"powershell.exe", "pwsh.exe", "cmd.exe", "conhost.exe", "python.exe"}
     out = {}
-    for p in psutil.process_iter(["pid", "name"]):
+    gone, bad = 0, []
+    try:
+        procs = list(psutil.process_iter(["pid", "name"]))
+    except Exception as ex:
+        return out, "进程枚举失败：%s: %s" % (type(ex).__name__, ex)
+    for p in procs:
         try:
             pid, name = p.info["pid"], p.info["name"] or ""
             if name.lower() in noisy:
                 continue
             out[f"{name}#{pid}"] = name
-        except Exception:
-            pass
-    return out
+        except (psutil.NoSuchProcess, psutil.ZombieProcess):
+            gone += 1          # 枚举途中真退出了 —— 不是扫描故障，跳过
+        except Exception as ex:
+            bad.append("%s: %s" % (type(ex).__name__, str(ex)[:60]))
+    if bad:
+        return out, "进程信息读失败 %d 个（另有 %d 个已退出）：%s" % (len(bad), gone, bad[0])
+    return out, None
 
 
 def snap_windows():
-    """纯 ctypes 枚举顶层窗口（零依赖）。"""
+    """纯 ctypes 枚举顶层窗口（零依赖）。**返回 (out, err)**。
+
+    ★ A-2（2026-10-13）：err 非 None = 本次枚举整体失败。
+      原来这里是 `except Exception: pass`，失败被吞、out 留空，而调用方分不出
+      「这台机器一个顶层窗口都没有」和「枚举炸了」—— 于是 no-change 判 total==0
+      ⇒ 判「没变」⇒ **假成功**。失败必须能一路传到退出码上，不能只打日志。
+      ★ 为什么用返回值而不是塞进 out：out 的键会被 diff() 当成窗口逐个比，
+        塞一个伪键进去，它自己就会变成一条 win_added/win_gone 假差异。
+    """
     user32 = ctypes.windll.user32
     out = {}
 
@@ -251,9 +290,9 @@ def snap_windows():
 
     try:
         user32.EnumWindows(cb, None)
-    except Exception:
-        pass
-    return out
+        return out, None
+    except Exception as ex:
+        return out, "EnumWindows 失败：%s: %s" % (type(ex).__name__, ex)
 
 
 def snap_files(paths):
@@ -295,13 +334,19 @@ def snap_files(paths):
 def do_snap(args):
     os.makedirs(WORK, exist_ok=True)
     paths = [x for x in (args.paths or "").split(";") if x.strip()]
+    _p, _perr = snap_procs()
+    _w, _werr = snap_windows()
     data = {
         "tag": args.tag,
         "time": time.time(),
         "timeStr": time.strftime("%Y-%m-%d %H:%M:%S"),
         "expect": args.expect or "",
-        "procs": snap_procs(),
-        "windows": snap_windows(),
+        "procs": _p,
+        "windows": _w,
+        # ★ A-2/D2（2026-10-13）：扫描健康度随快照一起落盘。
+        #   「这一路采集成功了吗」必须**跟着数据走**，否则出了快照就再也分不出
+        #   「真的没变」和「这一路瞎了」。老快照没有这个键 ⇒ 按不可知处理（fail-closed）。
+        "scanHealth": {"procs": _perr or "ok", "windows": _werr or "ok", "files": "ok"},
         "files": snap_files(paths),
         "paths": paths,
     }
@@ -311,9 +356,16 @@ def do_snap(args):
     print(f"  ✅ 快照 [{args.tag}] → {dst}")
     print(f"     时间 {data['timeStr']}｜进程 {len(data['procs'])}｜窗口 {len(data['windows'])}"
           f"｜文件项 {len(data['files'])}")
+    # ★ D1（2026-10-13）：拍快照时哪一路失败了还 return 0，本身就是同一个谎 ——
+    #   调用方（core.py:1428 判 `snap rc≠0 ⇒ unknown`）会拿它当一份好快照。
+    for _c in ("procs", "windows"):
+        _e = data["scanHealth"][_c]
+        if _e != "ok":
+            print(f"     ⛔ {_c} 采集失败：{_e}")
+            print("     本快照在这一路上不可信；依赖它的 check 谓词会判 unknown。")
     if args.expect:
         print(f"     期望: {args.expect}")
-    return 0
+    return EXIT_UNKNOWN if any(v != "ok" for v in data["scanHealth"].values()) else 0
 
 
 # ────────────────────────── 对比 ──────────────────────────
@@ -342,6 +394,27 @@ def eval_pred(pred, before, after, d):
         kind, arg = pred, ""
     kind = kind.strip().lower()
     arg = arg.strip()
+
+    # ★ A-2/D2（2026-10-13）：采集通道坏了 ⇒ 该通道上的谓词一律判不了。
+    #   为什么 no-change / any-change 也要打闸：它们的 total 是 procs+windows+files
+    #   三路相加，其中一路空快照 = 静默少算，而它们却还拿 total 下结论。
+    #   ★ 为什么打在这里而不是只打在 snap：snap 阶段看不见「before 是好快照、
+    #     after 才坏」这种时序 —— 只在拍快照时打闸会漏掉它。
+    #   ★ 核心不变量：d["total"] 的三个来源只要有一个在快照时是坏的，
+    #     聚合谓词就【没有资格】下结论。这与 compare_snapshots 的
+    #     「路径集不可比 ⇒ 拒绝判定」是同一种思路（同一个文件里的既有先例）。
+    _CHAN = {"window-exists": "windows", "window-gone": "windows",
+             "window-restored": "windows", "window-moved": "windows",
+             "proc-exists": "procs", "proc-gone": "procs",
+             "any-change": "*", "no-change": "*"}      # "*" = 依赖全部三路
+    _need = _CHAN.get(kind)
+    if _need:
+        for _c in (("procs", "windows", "files") if _need == "*" else (_need,)):
+            _hb = (before.get("scanHealth") or {}).get(_c, "缺键(老快照)")
+            _ha = (after.get("scanHealth") or {}).get(_c, "缺键(老快照)")
+            if _hb != "ok" or _ha != "ok":
+                return None, ("【判不了】%s 扫描不可信：before=%s｜after=%s"
+                              " —— 采集失败 ≠ %s 成立，不能拿它下结论" % (_c, _hb, _ha, kind))
 
     if kind == "file-exists":
         # ★ 存在性【直接问文件系统】，不用快照 —— 快照只保证"被我盯到的路径"，
@@ -514,6 +587,15 @@ def do_check(args):
         return 2
     before = json.load(open(bp, encoding="utf-8"))
     after = json.load(open(ap, encoding="utf-8"))
+
+    # ★ A-2（2026-10-13）：把两侧的健康度先摆出来。判定本身在 eval_pred 里
+    #   按通道打闸，这里只负责让人在滚屏里第一眼看到「哪一路瞎了」。
+    for _c in ("procs", "windows", "files"):
+        _h = ((before.get("scanHealth") or {}).get(_c, "缺键(老快照)"),
+              (after.get("scanHealth") or {}).get(_c, "缺键(老快照)"))
+        if _h != ("ok", "ok"):
+            print(f"  ⛔ {_c} 扫描不可信：before={_h[0]}｜after={_h[1]}")
+            print("     依赖它的谓词会判 unknown（不是「没变」，也不是「变了」）")
 
     # ★2026-10-10 新增（T9-R A4 第一步 b）：先校验「两张快照可比吗」。
     #   不可比 ⇒ 显式报错 + 退出码 5 + 不记账，**不许静默降级成 unknown**。

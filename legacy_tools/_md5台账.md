@@ -18,8 +18,8 @@
 | `guardian.py` | `d265e1e96e9c0d8b2a09cba995e64285` | 16737 | `d265e1e96e9c0d8b2a09cba995e64285` | 16737 | 无规则 |
 | `whitelist.json` | `816b3b1a073889a3472df479beb2b8d2` | 2121 | `816b3b1a073889a3472df479beb2b8d2` | 2121 | 无规则 |
 | `click_option.py` | `f887323bbe25e896b68916a0dfb72010` | 4136 | `f887323bbe25e896b68916a0dfb72010` | 4136 | 无规则 |
-| `formfill.py` | `a074272e99b0ff3ffc4810fe4b40a883` | 8795 | `a074272e99b0ff3ffc4810fe4b40a883` | 8795 | 无规则 |
-| `padd2.py` | `b17514bbe061a569d934250a67e7daec` | 8117 | `b17514bbe061a569d934250a67e7daec` | 8117 | 无规则 |
+| `formfill.py` | `289aa9bf0ab361317f404581d31d411a` | 8790 | `289aa9bf0ab361317f404581d31d411a` | 8790 | 无规则 |
+| `padd2.py` | `9b39846fa5bf4ee446788748916e2f56` | 8117 | `9b39846fa5bf4ee446788748916e2f56` | 8117 | 无规则 |
 | `preflight.py` | `65b3bd80d26080183ce58d45f3a946d6` | 8518 | `65b3bd80d26080183ce58d45f3a946d6` | 8518 | 无规则 |
 | `next_question.py` | `887deacb2b414be8b74a6a3e93008392` | 5938 | `887deacb2b414be8b74a6a3e93008392` | 5938 | 无规则 |
 | `minidump_probe.py` | `7d41a5c92cc84f880b4031236bdb197e` | 5303 | `7d41a5c92cc84f880b4031236bdb197e` | 5303 | 无规则 |
@@ -29,12 +29,14 @@
 | `win_list.py` | `1e18dd1dfef3318fa39268add83b0870` | 3164 | `1e18dd1dfef3318fa39268add83b0870` | 3164 | 无规则 |
 | `zoomgrid.py` | `b779a436dda7d03eb219d95484c91074` | 4780 | `b779a436dda7d03eb219d95484c91074` | 4780 | 无规则 |
 | `post_compat.json` | `e430115c280facf853b154b17875656d` | 13225 | `e430115c280facf853b154b17875656d` | 13225 | 无规则 |
+| `guardian_policy.json` | `5fef60b439a1d6f3b82d1c4da4515b84` | 5062 | `5fef60b439a1d6f3b82d1c4da4515b84` | 5062 | 无规则 |
+| `_session.py` | `b9657603c6db1b308f1889341c62ad8f` | 6339 | `b9657603c6db1b308f1889341c62ad8f` | 6339 | 无规则 |
 | `probe.py` | `853265fb82558057f7cc28ff52118b77` | 676 | `853265fb82558057f7cc28ff52118b77` | 676 | 无规则 |
 | `probe2.py` | `d4e2829074fe52ca776d95b65c4819c8` | 830 | `d4e2829074fe52ca776d95b65c4819c8` | 830 | 无规则 |
 | `probe3.py` | `add665ac8cd4f7f7bcc5d6fee5fde4a5` | 993 | `add665ac8cd4f7f7bcc5d6fee5fde4a5` | 993 | 无规则 |
 | `probe4.py` | `3f973c424617d4335efa92dc6661d7ae` | 614 | `3f973c424617d4335efa92dc6661d7ae` | 614 | 无规则 |
 | `probe5.py` | `da1ff03918eccbcb70b1d5ab32a0da91` | 365 | `da1ff03918eccbcb70b1d5ab32a0da91` | 365 | 无规则 |
 | `probe6.py` | `3f6986f1049983f8c40135a0c0aa80b9` | 558 | `3f6986f1049983f8c40135a0c0aa80b9` | 558 | 无规则 |
-| `验动作.py` | `a3ab0bb4a239d72ae07157763f7390f9` | 33679 | `a3ab0bb4a239d72ae07157763f7390f9` | 33679 | 无规则 |
+| `验动作.py` | `fd630f7468fbeca0c70a7e90d7d5c66b` | 39777 | `fd630f7468fbeca0c70a7e90d7d5c66b` | 39777 | 无规则 |
 | `闭环.py` | `8ef0bb265aea906676f2ed3300c1a06d` | 8071 | `8ef0bb265aea906676f2ed3300c1a06d` | 8071 | 无规则 |
 | `bench.py` | `ad0b281ca7584ee465c0da8336027063` | 22797 | `ad0b281ca7584ee465c0da8336027063` | 22797 | 无规则 |

@@ -6,7 +6,7 @@
 
 用法：
   python padd2.py --case 案例5_分类所得偶然所得          # 录该案例全部人员
-  python padd2.py --case 案例5_分类所得偶然所得 --only 汤晴
+  python padd2.py --case 案例5_分类所得偶然所得 --only 某某
   python padd2.py --case 案例5_分类所得偶然所得 --dry     # 只填不提交
 
 要点（都是踩出来的）：

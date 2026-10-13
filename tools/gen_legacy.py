@@ -12,6 +12,9 @@ T14 阶段 2。设计要点：
    第二套放行账本、auth_popup 文案差异）**不得搬进来**，那等于把老线的
    fail-closed 拆掉。以老线为准天然就不会有，无需额外排除。
 4. 落一份**源→包 md5 映射台账**，随包留档。
+5. ★ S3-A（2026-10-13）：生成前还有**第二道闸** —— 个人信息形态检测
+   （18 位身份证校验位 / 手机号号段 / 姓名清单与槽位形态），命中即报错退出，
+   与「反平行副本检查」同一形状。详见 `scan_personal_info()`。
 
 用法：
     python -X utf8 gen_legacy.py --out <目录> --verify <现有 legacy_tools 目录>
@@ -21,9 +24,11 @@ T14 阶段 2。设计要点：
 ★ D1（2026-10-12，按 G3 追加节）：覆盖前**双基线**防误改 —— 详见「防误改」一节注释。
 """
 import argparse
+import datetime
 import hashlib
 import json
 import os
+import re
 import shutil
 import stat
 import sys
@@ -40,7 +45,9 @@ LEDGER_DEFAULT = os.path.join(ROOT, "tools", "legacy_ledger.json")
 # 要搬的文件（与 pack_dist.py 的过滤口径对齐）
 # ★ D18：`gate_lock.py` 必须在这里登记 —— 它是 gate.py / auth_popup.py 的**伴生模块**
 #   （跨进程锁的唯一定义处），不登记的话包内缺件 ⇒ 两个脚本 import 失败。
-#   注意**不能**加前导下划线：pack_dist.guard 会把 `_` 开头的当临时脚本丢掉。
+#   注意**一般不能**加前导下划线：pack_dist.guard 会把 `_` 开头的当临时脚本丢掉。
+#   确需随包发的（如 S3-A 的 `_session.py`）必须在 pack_dist.KEEP_NAMES 里显式放行，
+#   且在下面注明「为什么非它不可」—— 两处缺一，登记等于没登记。
 FILES = ["gate.py", "gate_lock.py", "act.py", "perceive.py", "auth_popup.py", "brake.py",
          "cdp.py", "coord.py", "option_locator.py", "selftest.py", "guardian.py",
          "whitelist.json", "click_option.py", "formfill.py", "padd2.py",
@@ -50,6 +57,18 @@ FILES = ["gate.py", "gate_lock.py", "act.py", "perceive.py", "auth_popup.py", "b
          # ↓ 老线 act.py 的 load_post_compat() 要读它，打包缺了就是断链。
          #   旧 legacy_tools 里**没有**这个文件 —— T14 阶段 2 顺手补上。
          "post_compat.json",
+         # ↓ S3-A（2026-10-13）：三个「产品文件强依赖、但没登记」的依赖补两个。
+         #   · guardian.py:263/:278 在**函数体内** `json.load(open(POLICY))`
+         #     ⇒ 装出去的包里一调 guardian 就 FileNotFoundError（不在 import 时崩）。
+         #   · padd2.py:50 `import _session as S`（在 conn() 里）⇒ 同理，调用时才崩。
+         #   ★ `_session.py` 带前导下划线：光登记进这里不够，pack_dist.guard 会把
+         #     `_` 开头的当一次性脚本丢掉 —— 配套要在 pack_dist.KEEP_NAMES 里显式放行
+         #     （同 `_md5台账.md` 的既有先例）。两处缺一，这条等于没修。
+         "guardian_policy.json", "_session.py",
+         # ★ `case_data.json` **故意不登记**：它装的是用户用纳税操作题留下的**真人员数据**，
+         #   用户裁「数据留着（GUI 层操作的现成靶子）」但「包里的名字不许留」。
+         #   它不进包 ⇒ 要在包里跑 padd2，得自备一份脱敏样例。
+         #   兜底是 `scan_personal_info()`：真名/身份证/手机号形态进包即报错退出。
          "probe.py", "probe2.py", "probe3.py", "probe4.py", "probe5.py", "probe6.py",
            # ↓ T17 A3-(a)（2026-10-12 用户拍板）：动作可信闭环三件。
            #   它们是【新线】工具，但用户选了"随 gen_legacy 走"这条单一机制 ——
@@ -227,6 +246,137 @@ def _report_parallel_copies(hits, src_dir=SRC):
         print("      - %s" % p)
     print("    这些名字的真源是 %s，产物应落在 legacy_tools\\（生成物，不进仓）。" % src_dir)
     print("    在 tools\\ 再留一份 = 第二真源。请删掉这些文件后重跑。")
+
+
+# ───────────────── 个人信息形态检测（S3-A，2026-10-13）─────────────────
+# ★ 为什么要有这一类闸：打包侧 pack_dist 已经有隐私扫描，但它**只扫最终那一份字节**；
+#   而 gen_legacy 是「老线真源 → 打包源」的唯一搬运口。真源里的真名/证件号一旦被
+#   净化规则搬进来，包里就有；等 pack_dist 拦，用户看到的是「打包失败」而不是
+#   「哪一行有真名」。⇒ 在**搬运口**就报错退出，定位到 文件:行。
+# ★ 形状与 check_parallel_copies 一致：命中即拒绝生成、非零退出，没有「警告后照发」。
+
+# 18 位身份证：GB 11643-1999 校验位（权重 7 9 10 5 8 4 2 1 6 3 7 9 10 5 8 4 2）
+_ID_WEIGHTS = (7, 9, 10, 5, 8, 4, 2, 1, 6, 3, 7, 9, 10, 5, 8, 4, 2)
+_ID_CHECK = "10X98765432"
+# 大陆手机号号段：第二位 3-9（130-199 是已放号的段），与 pack_dist.PAT_MOBILE 同一口径。
+PAT_MOBILE_SHAPE = re.compile(r"(?<!\d)1[3-9]\d{9}(?!\d)")
+PAT_IDCARD_SHAPE = re.compile(r"(?<!\d)\d{17}[\dXx](?!\d)")
+
+# 显式姓名清单：本单实测命中的两个真名（它们会随发布包发出去，用户裁「换占位」）。
+# 形态检测抓的是**槽位**，清单抓的是**任何位置** —— 两者互补，别只留一个。
+PERSON_NAMES = ["马歇尔", "汤晴"]
+
+# 高信号「个人信息槽位」：命令行实参、调用实参、JSON 字段、标签行。
+# 只在这些位置取候选，再用姓氏形态筛 —— 不对全文做 2-3 字中文扫描（实测噪音上千）。
+NAME_SLOTS = [
+    ("--only", re.compile(r"--only\s+([^\s\n]+)")),
+    ("--person", re.compile(r"--person\s+([^\s\n]+)")),
+    ("pick_text=", re.compile(r"pick_text\s*=\s*[\"']([^\"']+)")),
+    ("name字段", re.compile(r"[\"']name[\"']\s*:\s*[\"']([^\"']+)")),
+    ("姓名", re.compile(r"姓名\s*[:：]?\s*([^\s\n\"']+)")),
+]
+# 常见姓氏：百家姓（康熙本）去重成单字集合。
+# ★ 为什么用全量而不是「前 120」：第一版只收了前 ~120，实测当场漏掉「汤」——
+#   padd2.py:9 的 `--only 汤晴` 只被「显式清单」那条判据抓到，槽位形态那条漏了。
+#   姓氏表不完整 = 判据有洞，而洞的方向正好是「漏检真名」。
+SURNAMES = set(
+    "赵钱孙李周吴郑王冯陈褚卫蒋沈韩杨朱秦尤许何吕施张孔曹严华金魏陶姜戚谢邹喻"
+    "柏水窦章云苏潘葛奚范彭郎鲁韦昌马苗凤花方俞任袁柳酆鲍史唐费廉岑薛雷贺倪汤"
+    "滕殷罗毕郝邬安常乐于时傅皮卞齐康伍余元卜顾孟平黄和穆萧尹姚邵湛汪祁毛禹狄"
+    "米贝明臧计伏成戴谈宋茅庞熊纪舒屈项祝董梁杜阮蓝闵席季麻强贾路娄危江童颜郭"
+    "梅盛林刁钟徐邱骆高夏蔡田樊胡凌霍虞万支柯昝管卢莫经房裘缪干解应宗丁宣贲邓"
+    "郁单杭洪包诸左石崔吉钮龚程嵇邢滑裴陆荣翁荀羊惠甄家封芮羿储靳汲邴糜松井段"
+    "富巫乌焦巴弓牧隗山谷车侯宓蓬全郗班仰秋仲伊宫宁仇栾暴甘钭厉戎祖武符刘景詹"
+    "束龙叶幸司韶郜黎蓟薄印宿白怀蒲邰从鄂索咸籍赖卓蔺屠蒙池乔阴胥能苍双闻莘党"
+    "翟谭贡劳逄姬申扶堵冉宰郦雍郤璩桑桂濮牛寿通边扈燕冀郏浦尚农温别庄晏柴瞿阎"
+    "充慕连茹习宦艾鱼容向古易慎戈廖庾终暨居衡步都耿满弘匡国文寇广禄阙东欧殳沃"
+    "利蔚越夔隆师巩厍聂晁勾敖融冷訾辛阚那简饶空曾毋沙乜养鞠须丰巢关蒯相查后"
+    "荆红游竺权逯盖益桓公"
+)
+
+
+def _mask(s):
+    """报告里不回显原值：只留够定位的形状。日志本身不能成为新的泄漏点。"""
+    s = str(s)
+    return "%s*%s" % (s[:1], s[-2:]) if len(s) >= 3 else "*"
+
+
+def _idcard_reason(tok):
+    """返回 None = 是真身份证；否则返回「为什么不算」的短理由。"""
+    try:
+        datetime.date(int(tok[6:10]), int(tok[10:12]), int(tok[12:14]))
+    except ValueError:
+        return "出生日期段不是合法日期"
+    tot = sum(int(tok[i]) * _ID_WEIGHTS[i] for i in range(17))
+    if _ID_CHECK[tot % 11] != tok[17].upper():
+        return "校验位不符（GB 11643）"
+    return None
+
+
+def scan_personal_info(src_dir=SRC, files=None):
+    """扫 FILES 各文件的**真源字节**，返回命中列表（空 = 干净）。
+
+    只扫源字节、不扫净化后的字节：净化只替换绝对路径，不会引入个人信息；
+    而真源里的真名本来就该清掉（包是它的下游），源头干净才是治本。
+    文件不存在 ⇒ 跳过（缺失由 main() 的 problems 单独报，不在这里重复）。
+    """
+    hits = []
+    for f in (files if files is not None else FILES):
+        p = os.path.join(src_dir, f)
+        if not os.path.exists(p):
+            continue
+        try:
+            txt = open(p, encoding="utf-8").read()
+        except (UnicodeDecodeError, OSError):
+            continue        # 非 utf-8 读不了的不猜（判据只对文本成立）
+        for i, line in enumerate(txt.splitlines(), 1):
+            for m in PAT_IDCARD_SHAPE.finditer(line):
+                why = _idcard_reason(m.group())
+                hits.append({"file": f, "line": i, "kind": "身份证号形态",
+                             "mask": _mask(m.group()),
+                             "why": "" if why is None else why + "（按形态拦，不放行）"})
+            for m in PAT_MOBILE_SHAPE.finditer(line):
+                hits.append({"file": f, "line": i, "kind": "手机号号段 1[3-9]xxxxxxxxx",
+                             "mask": _mask(m.group()), "why": ""})
+            for nm in PERSON_NAMES:
+                if nm in line:
+                    hits.append({"file": f, "line": i, "kind": "姓名（显式清单）",
+                                 "mask": _mask(nm), "why": ""})
+            for label, rx in NAME_SLOTS:
+                for m in rx.finditer(line):
+                    v = m.group(1).strip()
+                    if _name_shape(v):
+                        hits.append({"file": f, "line": i,
+                                     "kind": "姓名（%s 槽位形态）" % label,
+                                     "mask": _mask(v), "why": ""})
+    return hits
+
+
+# ★ 槽位值可能带「同名消歧后缀」：`pick_text="马歇尔[0001]"` 的真正姓名是前半段。
+#   漏掉这一步的话，formfill 那种写法只能靠显式清单抓到（清单不可能穷举）。
+_SUFFIX = re.compile(r"\[[^\]]*\]$")
+
+
+def _name_shape(v):
+    """槽位值去掉消歧后缀后，是否是「姓 + 1-3 个汉字」的姓名形态。"""
+    v = _SUFFIX.sub("", v.strip())
+    # 长度放到 4：复姓（欧阳/司马/上官…）+ 双名 = 4 个字，第一版只收 2-3
+    # ⇒ 「欧阳明日」这种漏检（实测判据脚本当场抓到）。
+    return (2 <= len(v) <= 4 and v[0] in SURNAMES
+            and all("\u4e00" <= c <= "\u9fa5" for c in v[1:]))
+
+
+def _report_personal_info(hits, src_dir=SRC):
+    print()
+    print("[X] 个人信息形态检测：%d 处 —— 拒绝生成。" % len(hits))
+    for h in hits:
+        print("      - %s:%d  %s  %s%s"
+              % (h["file"], h["line"], h["kind"], h["mask"],
+                 ("（%s）" % h["why"]) if h["why"] else ""))
+    print("    命中的是真源 %s 里的**源**字节 —— 净化规则不会删它们，照发就是发出去。" % src_dir)
+    print("    处置：把真名/证件号/手机号换成占位（如 张*[0001] / 某某 / 138****0001），")
+    print("          或把该文件移出 FILES（不进包的东西不该在清单里）。")
+    print("    ★ 数据本身可以留在真源里当地基（GUI 练习靶子），但**包里不许带真名**。")
 
 
 # ───────────────────────── 防误改（D1，G3 追加节 2026-10-12） ─────────────────────────
@@ -425,6 +575,12 @@ def main():
         _report_parallel_copies(dup, src_dir)
         return 1
 
+    # ★ S3-A：个人信息形态检测（第二道闸，与上面同一形状：命中即停、非零退出）
+    pi = scan_personal_info(src_dir)
+    if pi:
+        _report_personal_info(pi, src_dir)
+        return 1
+
     ledger_md = ["# 源→包 md5 映射台账", "",
                  "- 生成器：`tools\\gen_legacy.py`（老线真源 → 打包源，自动生成，勿手工改）",
                  "- 净化只做一件事：绝对路径 → 环境变量可注入", "",
@@ -577,6 +733,12 @@ def main_for_pack(out_dir):
     dup = check_parallel_copies()
     if dup:
         _report_parallel_copies(dup)
+        return 1
+    # ★ S3-A：同一条个人信息形态检测，打包路径上也必须有 ——
+    #   pack_dist 自己那道隐私闸只扫最终字节，这里能把「哪一行」指出来。
+    pi = scan_personal_info(SRC)
+    if pi:
+        _report_personal_info(pi, SRC)
         return 1
     os.makedirs(out_dir, exist_ok=True)
     ledger = ["# 源→包 md5 映射台账", "",
