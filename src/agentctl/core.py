@@ -90,6 +90,22 @@ def env(**head) -> dict:
         "blind_spots": [], "warning": None,
     }
     d.update(head)
+    # ★ S8-改动1：把「忘了归码」这件事**变显性**（治本；不新造码、不改默认值、不动放行口径）。
+    #   根因就在上面那行默认值：code 默认 CODE_NO_CTRL(=4)，于是**凡是忘了显式传 code 的
+    #   失败分支，都会静悄悄落成 4** —— 事后没人分得清「这条压根没归码」和
+    #   「归过码、就是真的找不到控件」，排查时会被 code 领到错误方向。
+    #   所以这里刻意**不改 code 数值**，只在「失败且调用处没传 code」时：
+    #     · data 里加机读标记 uncategorized=True
+    #     · warning 末尾补一句短说明
+    #   判据：没传 code ⇒ data["uncategorized"] is True；
+    #         传了 code ⇒ 这个**键不存在**（不是 False、不是 None）。
+    #   数据侧：data 用新 dict 拼，绝不就地改调用方传进来的那一个（_act 等处会复用）。
+    if not d["ok"] and "code" not in head:
+        _why = ("（⚠️ 本次失败**未归码**：调用处没传 code，落默认 4 CODE_NO_CTRL"
+                " —— 别把它读成「真的找不到控件」）")
+        _d = d["data"]
+        d["data"] = {**(_d if isinstance(_d, dict) else {}), "uncategorized": True}
+        d["warning"] = (d["warning"] + _why) if d["warning"] else _why
     return d
 
 
@@ -960,7 +976,19 @@ def t_authorize(args: dict) -> dict:
     try:
         keys = gate.parse_scopes(str(raw))
     except ValueError as e:
-        return env(code=gate.CODE_UNAUTH, warning="范围解析失败：%s" % e)
+        # ★ S8-改动2：**只改措辞，不改 code 数值**（9 仍是 9，改数值越界）。
+        #   为什么措辞要紧：这是一个**信封**，agent 拿到 code=9 会照
+        #   docs/AGENT接口.md 的处方去「停下、向用户申请通行证」——
+        #   而这里 parse_scopes 抛 ValueError 是**范围/参数本身解析失败**，
+        #   ⛔ **根本不是通行证问题、别去申请授权**：此刻一张通行证都还没申请过，
+        #   去 ctl_authorize 只是把同一个写错的 scopes 串原样再送一遍，转不出来。
+        #   该做的是核对 scopes 字符串本身（合法短代号只有 A/B/C/D，"ABCD" 会被展开）。
+        return env(code=gate.CODE_UNAUTH,
+                   warning=("范围/参数解析失败：parse_scopes 拒绝了这个 scopes 串：%s —— "
+                            "⚠️ 这**不是通行证问题、别去申请授权**（此刻还没申请过通行证，"
+                            "ctl_authorize 只会把同一个写错的 scopes 再送一遍）。"
+                            "该做的是核对 scopes 本身：只能是 A/B/C/D 短代号。"
+                            % e))
     scopes = keys
     full = [gate.SCOPES[k] for k in keys]
     # ⚠️ 必须用**半角逗号**拼接：auth_popup.py 是按 "," 切分范围的（见其 line 152）。
@@ -1087,6 +1115,15 @@ def t_record(args: dict) -> dict:
                 except Exception as e:
                     _REC["autostop"] = f"{type(e).__name__}: {str(e)[:80]}"
                     try:
+                        # ★ S8-改动3：**只加注释**。
+                        #   ⚠️ 下面这行是 **事件行**（store().append），**不是 env() 信封** ——
+                        #      所以它没有 warning 字段，也拿不到改动1的 uncategorized 标记。
+                        #      上面的 payload（类型名 + 消息前 80 字）是**诚实的**，不改。
+                        #   ⚠️ code=9 在这里的含义是**语义错位**：真相是「录制线程 tick() 抛异常」，
+                        #      不是「未获授权」；9 在这一列仅供 timeline 检索用。
+                        #      正确归属（内部错误）在 gate.py 的码表里**没有** ⇒ 不在本单职权内改，
+                        #      也不拿 CODE_RESOURCE_LIMIT(13) 硬套（那是「资源保护停录」，语义不同）。
+                        #      要改得同时动 gate.py 码表 + tools.json + docs ⇒ 超出本单边界。
                         store().append("recorder_autostop", actor="recorder", tool="ctl_record",
                                        payload=_REC["autostop"], ok=False, code=gate.CODE_UNAUTH)
                     except Exception:
