@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "_关于": "AgentCtl 的机器可读接口契约（草案 v1）。给 agent 直接读取用的——不是给人看的清单。人看的那份是 agent-manual 里的 agent_tools.json（老清单，保持不动）。",
   "_来源": "docs/详细设计_v1.md 第 6 章（接口契约），本仓库内相对路径",
   "_状态": "设计稿：字段名可能微调；实现前以本文件为冻结基线，改动必须升 schema_version",
@@ -41,7 +41,7 @@
   "envelope": {
     "_说明": "所有入口（MCP / HTTP / CLI）返回同一个信封",
     "ok": "boolean",
-    "code": "integer，见 error_codes",
+    "code": "integer，本次调用的信封码，见 error_codes。⚠️ 别拿它当万能码表：ctl_timeline 的 data.events[].code 不是信封码 —— 它是「信封码的镜像 ∪ 事件级内部码」，事件级内部码见顶层 event_codes，靠 kind 区分。",
     "data": "object，工具各自的结构化结果",
     "event_id": "integer|null，本次调用在时间线上的事件号（★ 写动作必有）",
     "frame_before": "integer|null，动作前帧号",
@@ -64,9 +64,11 @@
     "9": "未获授权（没有有效通行证）",
     "10": "租约被别的 actor 持有（单写者冲突）",
     "11": "刹车已拉下（急停中）",
-    "12": "capture_id 已过期或画面已变（要求重新观测）",
-    "13": "超出限额（录制/留存/动作次数）",
-    "14": "服务未运行或版本不匹配"
+    "12": "capture_id 已过期或画面已变（要求重新观测）"
+  },
+  "event_codes": {
+    "_说明": "★ 事件级内部码：只出现在 ctl_timeline 的 data.events[].code，永远不会作为信封的 code 返回。同一列里其余事件的 code 是 dispatch() 把信封码原样镜像进去的值（那部分查 error_codes）。两个命名空间共用一列，靠 kind 区分。",
+    "13": "录制自保护停录：可用物理内存 < 3500 MB 或提交使用率 > 65%，录制线程已自动停止并留痕（kind=recorder_autostop，代码常量 gate.CODE_RESOURCE_LIMIT）。处置：释放内存后 ctl_record --action resume 续录，续不上就停手报告用户。⚠️ 与「录制/留存/动作次数配额」无关 —— 留存超限是 recorder.prune() 删最旧的帧（回 ok=true、code=0）；动作次数用尽是 9（CODE_UNAUTH）。"
   },
   "conventions": {
     "naming": "ctl_* 前缀 + snake_case",
