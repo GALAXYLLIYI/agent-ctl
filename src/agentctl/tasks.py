@@ -90,9 +90,19 @@ def verify(store, task_id, *, actor="", note=""):
 
 def fail(store, task_id, *, why="", actor=""):
     """登记失败。**失败不发完成提示音**（框架 V9）。
-    声音只用来叫人，不用来播报状态。"""
+    声音只用来叫人，不用来播报状态。
+
+    ★ 为什么这里的 code 是 0 而不是 1（2026-10-14 S11 记）★
+      「调用成功」和「任务失败」是**两层**：这次登记**调用本身**成功了 —— 写这行的
+      同一次调用（tasks_dispatch 的 fail 分支）返回的信封也是 code=0；失败的是**任务**，
+      由 kind=task_failed 承载。状态推导只读 kind（本文件 current() 里那句
+      `if "task_failed" in kinds`，它连 code 列都没查）。同模块其余 5 个写入口一律 code=0，
+      本行原来是唯一异类。**该列此处仅为时间线检索用。**
+      ⚠️ **别把任务状态编码进 code**：那会让读 ctl_timeline 的人把它当成信封码，去 error_codes
+      里查 —— 两张码表都没有它。DSH 已裁定：不收进 event_codes（13 是资源阈值，1 是任务状态，不同维）。
+    """
     return store.append("task_failed", actor=actor, tool="ctl_task", ok=False,
-                        code=1, payload={"task_id": task_id, "why": why})
+                        code=0, payload={"task_id": task_id, "why": why})
 
 
 # ───────────── 读（纯只读，降级不崩）─────────────
