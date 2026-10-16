@@ -72,6 +72,142 @@ _STORE: Store | None = None
 _CLOCK = Clock()
 
 
+# ── T1 窗2（D1 治本）：eid ↔ 观测绑定用的旁表 ─────────────────────────
+# 病根：eid 是**遍历当场编的序号**（uia_tree.py:280  "e%d" % len(nodes)），
+#   只有那一次遍历的口径下才有意义。而本文件里三条出口的口径本来就不同：
+#     ctl_tree  roles=("interactive","text")  max_nodes=600   ← 签发侧
+#     ctl_find  roles=("all",)                max_nodes=3000  ← 签发侧
+#     t_click   roles=("all",)                max_nodes=600   ← 改前重解析侧
+#   同一个 e34 在两张表里必然指不同节点 —— **窗口完全静止也一样错**（确定性错位，不是抖动）。
+# 治法**不是**加 tree_sha256：签发侧只算命中那几十条、校验侧走全树，指纹永远不等
+#   ⇒ 永远 code=12 ⇒ 等于造一个「怎么点都点不了」的新坑。
+# 治法是**旁表 + 身份复核**：签发时把「那批节点的 eid → 元素特征」记在 capture_id 名下，
+#   点击时按**当初那批**取回坐标，再用「类型 + 名字 + 矩形」复核它还在不在原位。
+def _eid_db_path():
+    """旁表落盘位置。跟 capture.json 同目录（同一把锁、同一套原子写、同一个 15 秒寿命）。
+
+    AGENTCTL_EID_SESSIONS 是给验收脚本/沙箱用的重定向口（口径同 AGENTCTL_SHOTS_DIR）——
+    旁表**不是契约入参**（ctl_click.additionalProperties=false），所以逃生阀只能是环境变量。
+    """
+    p = os.environ.get("AGENTCTL_EID_SESSIONS")
+    if p:
+        return p
+    return os.path.join(gate.AUTHDIR, "eid_sessions.json") if gate.AUTHDIR else None
+
+
+def _eid_strict() -> bool:
+    """严格模式默认**开**。AGENTCTL_EID_STRICT=0 恢复改前行为（重走一遍按编号取坐标）。
+
+    ⚠ 回退开关，默认值 1（严格）。拔除条件：T1 全线验收通过、且 §三 全部判据转绿之后，
+      由 DSH 决定是否连同本函数一起删（删前须先确认没有依赖旧行为的脚本）。
+    之所以**读调用时**而不是 import 时：闸门状态目录在 import 之后才由环境定下来，
+      读一次会把它冻在模块加载那一刻。
+    """
+    return os.environ.get("AGENTCTL_EID_STRICT", "1") != "0"
+
+
+def _eid_load(path, default):
+    """读旁表。读不到就当空 —— 与 gate._load 同一口径。
+
+    ⚠ 注意这**不是** fail-open 于「点错」：没有记录时 t_click 会**拒**（code=12），
+      不是「查不到就照旧点」。fail-open 的只有「表里没有这个号」这一种事实陈述。
+    """
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return default
+
+
+def _eid_save(path, obj):
+    """原子写。**与 gate._save 逐行同款**（临时文件 + os.replace），
+
+    只是不复用它的 `_` 私有名 —— DSH 只授权在 gate.py 加一行公开别名（exclusive_lock）。
+    """
+    d = os.path.dirname(path)
+    if d:
+        os.makedirs(d, exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(obj, f, ensure_ascii=False, indent=1)
+    os.replace(tmp, path)
+
+
+def _eid_sessions_put(tok: str, hwnd: int, nodes: list, walk: dict | None,
+                      无明细: bool = False) -> bool:
+    """把「这一批节点的 eid → 元素特征」写进旁表。**键就是 capture_id**。
+
+    只在**真的返回了节点明细**时写：ctl_tree 默认 detail=False 时「节点」是空列表
+    （uia_tree.py:435），旁表就**没有内容** —— 这时 agent 拿树文本里的 eid 来点，
+    会拿到一句人话（见 t_click 里的处方），而不是默默点歪。
+
+    walk 记下签发那次的遍历口径，点击时**按同一口径重走**做身份复核 ——
+    口径不同就等于拿不同的坐标系比坐标，复核会假失败。
+    """
+    p = _eid_db_path()
+    if not p or not tok:
+        return False
+    now = time.time()
+    eids = {}
+    for n in nodes:
+        e = n.get("eid")
+        if e is None:
+            continue
+        eids[str(e)] = {"type": n.get("type"), "name": n.get("name"),
+                        "rect": list(n.get("rect") or ()),
+                        "center": list(n.get("center") or ()),
+                        "enabled": n.get("enabled", None)}
+    if not eids and not 无明细:
+        return False
+    try:
+        with gate.exclusive_lock():          # ← 公开别名（gate.py 唯一新增的那一行）
+            S = _eid_load(p, {})
+            S = {k: v for k, v in S.items() if float((v or {}).get("expires_at", 0)) > now}
+            S[str(tok)] = {"hwnd": int(hwnd), "issued_at": now,
+                           "expires_at": now + float(gate.CAPTURE_TTL),
+                           "walk": walk or {}, "eids": eids,
+                           "节点明细": bool(eids)}
+            _eid_save(p, S)
+        return True
+    except Exception:
+        # 旁表写不进去**不许**降级成「照样点」—— 点错比点不了坏得多。
+        return False
+
+
+def _eid_lookup(tok, eid):
+    """按 capture_id 取回「当初那批」里这个 eid 的元素特征。
+
+    返回 (feat, entry, how)：
+      feat  找到了才有；entry 是那条观测记录；how ∈ {"精确", "旁查", "缺失"}。
+    「旁查」= 没给 capture_id，但旁表里**别的**观测签发过这个号 ——
+      这种必须要求把 from_capture 一起带回来（eid 跨观测不能单独用）。
+    """
+    p = _eid_db_path()
+    if not p:
+        return None, None, "缺失"
+    try:
+        S = _eid_load(p, {})
+    except Exception:
+        return None, None, "缺失"
+    now = time.time()
+    if tok:
+        entry = S.get(str(tok))
+        if not entry or float((entry or {}).get("expires_at", 0)) <= now:
+            return None, None, "缺失"
+        feat = (entry.get("eids") or {}).get(str(eid))
+        if feat is not None:
+            return feat, entry, "精确"
+        # 这条观测**存在**，但它没有元素明细（ctl_tree 默认轻量模式）⇒
+        #   返回「空快照」而不是「缺失」，好让 t_click 给出对症的处方。
+        return None, entry, ("空快照" if not entry.get("节点明细", True) else "缺失")
+    for entry in S.values():
+        if float((entry or {}).get("expires_at", 0)) <= now:
+            continue
+        if str(eid) in (entry.get("eids") or {}):
+            return None, entry, "旁查"
+    return None, None, "缺失"
+
+
 def store() -> Store:
     global _STORE
     if _STORE is None:
@@ -444,6 +580,17 @@ def t_status(args: dict) -> dict:
                      "integrity": _my_integrity()}      # ★ 见该函数注释
     st["recorder"] = {"recording": False, "profile": "not_implemented"}
     st["timeline"] = {"head_event_id": store().head[0], "head_hash": store().head[1][:16]}
+    # ★ T1 窗2 · W2-D：**只有一行指针 + 最小三步命令**。
+    #   ⛔ 不在这里写第二份完整 SOP —— 完整 SOP 的唯一定义处是 contract + docs\AGENT接口.md
+    #   （WorkBuddy U9「第二真源」：同一段话写两遍，迟早各改各的漂了）。
+    #   这里存在的理由只有一个：agent 接到 code=12 时不必去翻文档就知道下一步敲什么。
+    st["写动作三步"] = (
+        "1) ctl_lease --actor <你> --action acquire --scopes BC"
+        "  2) ctl_find --hwnd <hwnd> --query <要找的字>  → 拿 capture_id（%g 秒内有效）"
+        "  3) ctl_click --actor <你> --hwnd <hwnd> --xy <center 原样> --from_capture <capture_id>"
+        "  ⛔ xy 是屏幕物理像素，与 ctl_find 的 center 同口径，**原样传，不要减窗口原点**；"
+        "eid 是**那次快照的取件钥匙**，用它必须带 --from_capture。"
+        "  完整口径见 docs/AGENT接口.md（本字段只是指针，不是第二份 SOP）" % gate.CAPTURE_TTL)
     return env(ok=True, code=0, data=st)
 
 
@@ -551,7 +698,8 @@ def t_witness(args: dict) -> dict:
 
 
 # ── 屏控类：包壳调用老脚本（老脚本自己会过闸门）──
-def _issue_capture_from_tree(hwnd: int, raw_out: str) -> str | None:
+def _issue_capture_from_tree(hwnd: int, raw_out: str,
+                             walk: dict | None = None) -> str | None:
     """从元素树签发 capture_id（2026-10-07 新增）。
 
     元素树**就是一次观测**，不比截图差 —— 而且指纹更准：
@@ -577,17 +725,29 @@ def _issue_capture_from_tree(hwnd: int, raw_out: str) -> str | None:
             rect0 = _win_rect(hwnd)
             if rect0 is None:
                 return None
-            return gate.issue_capture(hwnd, rect0, "",
+            tok0 = gate.issue_capture(hwnd, rect0, "",
                                       bool(_is_foreground(hwnd)))
+            # ★ T1 窗2：旁表**只在有节点明细时**才有内容，但这张「空记录」也要写 ——
+            #   否则 agent 拿 ctl_tree（默认轻量模式）文本里的 eid 来点时，
+            #   会拿到一句「这个号不存在」，而真因是「这次观测压根没交出节点明细」。
+            #   空记录让 t_click 能分辨这两者，给出对症的处方（见 _eid_refuse_missing）。
+            _eid_sessions_put(tok0, hwnd, [], walk, 无明细=True)
+            return tok0
         sig = [(n.get("type"), (n.get("name") or "")[:40], tuple(n.get("rect") or ()))
                for n in nodes]
         blob = json.dumps(sig, ensure_ascii=False, sort_keys=True).encode("utf-8")
         tree_sha = _hl2.sha256(blob).hexdigest()
-        return gate.issue_capture(hwnd,
+        tok = gate.issue_capture(hwnd,
                                   rect=_win_rect(hwnd) or [0, 0, 0, 0],
                                   image_sha256="",
                                   foreground=bool(_is_foreground(hwnd)),
                                   tree_sha256=tree_sha)
+        # ★ T1 窗2（D1）：把「这批节点的 eid → 元素特征」记在这次 capture_id 名下。
+        #   这是 D1 的治本处 —— 改前点击侧是**重新编号**（roles/max_nodes 口径都不同），
+        #   现在点击侧按当初那批取回坐标，编号不再被第二次遍历重新定义。
+        #   写不进去**不降级**：_eid_sessions_put 返回 False 时，t_click 会拒（见那里）。
+        _eid_sessions_put(tok, hwnd, nodes, walk)
+        return tok
     except Exception:
         return None
 
@@ -643,7 +803,12 @@ def _issue_capture_from_shot(hwnd: int, raw_out: str) -> str | None:
 #
 # ★ 同时把 perceive.gate 换成 agentctl.gate（注入，不改别人的文件）
 #   perceive.py import 的是 <另一项目>/tools/gate.py（另一个项目的独立副本，只有 6.8 KB），
-#   它给「只读感知」也在扣 acts 计数器，把 ACT_LIMIT[A]=200 那个设计彻底废它。
+#   它给「只读感知」也在扣 acts 计数器；换成我们的 gate 之后 A 级走 skip_count 早退、
+#   不再计数 —— 也就是 A 级从此**没有次数上限**。
+#   ★ 2026-10-15（窗D·P5）第二次订正：这里注入的闸门发证时按**已授予档位里最紧的一档**
+#     取 acts_limit（gate.effective_act_limit），**不再**按 scopes[0] 的排列巧合取。
+#     改前 `ACT_LIMIT.get(short(scopes[0]), 20)` 会让「A 打头」的证盖上 200，
+#     于是那张证上 B/C/D 的上限实际是 200。完整口径与理由见 gate.py 的 ACT_LIMIT 注释。
 #   在这里注入我们的 gate，就能用「单一真相源」的方式修好，不动 dsh 项目。
 _perceive_mod = {"m": None, "tried": False}
 
@@ -891,7 +1056,15 @@ def _uia_gate(args: dict, tool: str, fn):
     # 元素树也是一次观测 —— 而且是比截图**更严**的观测。签发凭据，
     # 这样走坐标的点击照样受「必须绑定最近一次观测」这条规矩管。
     # ★ T15：res 是 **dict**（uia_tree.tree/find 的返回值）⇒ 走元素指纹版
-    tok = _issue_capture_from_tree(h, res)
+    # ★ T1 窗2：把**签发那次的遍历口径**一起记进去。点击侧要按同一口径重走做身份复核 ——
+    #   口径必须来自签发侧（core.py 里 t_tree/t_find 各自的默认值），不能现场重算一遍。
+    _walk = {"roles": list(args.get("roles") or (("interactive", "text")
+                                                  if tool == "ctl_tree" else ("all",))),
+             "max_nodes": int(args.get("max_nodes") or
+                              (uia_tree.DEFAULT_MAX_NODES if tool == "ctl_tree"
+                               else uia_tree.FIND_MAX_NODES)),
+             "max_depth": int(args.get("max_depth") or uia_tree.DEFAULT_MAX_DEPTH)}
+    tok = _issue_capture_from_tree(h, res, _walk)
     if tok:
         d["capture_id"] = tok
         d["capture_ttl_sec"] = gate.CAPTURE_TTL
@@ -1002,7 +1175,24 @@ def t_authorize(args: dict) -> dict:
     #    证是真的、期是真的，但任何检查都报"范围不符"，表现就是**用户点了授权也没用**。
     scope_str = ",".join(full)
     minutes = int(args.get("minutes") or 10)
-    acts = int(args.get("acts") or gate.ACT_LIMIT.get(gate.short(scopes[0]), 20))
+    # ★ 2026-10-15（窗D·P5，用户裁定）：默认次数上限取「已授予档位里最紧的那一档」。
+    #   改前是 `gate.ACT_LIMIT.get(gate.short(scopes[0]), 20)` —— scopes[0] 只是**输入顺序**，
+    #   不是授权强度；于是「A 打头」的证一律盖上 200，而闸门放行时读的就是证上这个数
+    #   ⇒ 该证上 B/C/D 的上限实际是 200（实测证据：work\_2h_wB_回执.md §3.1）。
+    #   现在统一走 gate.effective_act_limit（单源），A 不参与取最小（A 本就不计数）。
+    #   ⚠️ 发证能拿到的只有「申请到的 scopes」—— auth_popup.py 不做减法，用户点同意就是
+    #      全给（legacy_tools\auth_popup.py:248-252 原样落盘），所以「申请到的」==「授予的」，
+    #      这里不存在「按申请算、实际授得更多」的缺口。
+    acts = int(args.get("acts") or gate.effective_act_limit(scopes, 20))
+    # ⚠️ 上下界钳制（2026-10-15 GLM/ZCode 复检点出"无钳制"；与 acquire_lease 的 ttl `max(1,min(,600))` 同思路）。
+    #   下界 1、上界 **10000**。两点如实说明：
+    #   ① **显式 acts=0 会被上面的 `or` 吞掉**、回退成默认值 —— 这是**改前既有语义，本次不改**：
+    #      0 按"未指定"处理更安全（真想要"零动作"就别申请，而不是靠发证侧截断）；
+    #   ② 上界取 10000 而不是 600：任何档位上限都 ≤200，长会话顶多几百 ⇒ 10000 只为挡**手滑**
+    #      （例如误传 1e9），不打算限制正常工作流；
+    #   ③ 这不构成放宽：闸门仍按**证上写的** acts_limit 卡（gate.py:794-796 + 同处双轨注释），
+    #      本处只把要写进证里的数字收进合理区间。
+    acts = max(1, min(acts, 10000))
     reason = args.get("reason") or ""
     timeout = int(args.get("timeout_sec") or 180)
 
@@ -1274,6 +1464,36 @@ def _bind_capture(args: dict, hwnd: int) -> dict | None:
     return None
 
 
+def _act_precheck(args: dict, scope: str = "B") -> dict | None:
+    """写动作前置①②：**通行证（非消耗）→ 租约 → hwnd 齐了没**。成功返回 None。
+
+    ★ 为什么从 _act 里抽出来、且**唯一定义处就这里一处** ★
+      t_click 在**定位元素之前**就必须先过这两道闸。原因有二：
+      ① 项目纪律（_act 的注释）：「先报要通行证再报要租约」——
+         顺序反过来，agent 会先被叫去申请租约、拿到租约后才发现没通行证，白跑两趟。
+         而 eid/name 新线要读元素树、还要发一次 walk；不先过闸，
+         「没通行证」就会被「读元素树失败」盖住 ⇒ s3_accept_gapfix 的
+         G2（断言 code=9）与 G3（断言 code=10）当场红。
+      ② 闸门判定**只能有一处**。这里抽出来给 _act 和 t_click 共用，
+         就是为了让「同一套判据」真的只有一份，而不是在 t_click 里抄一遍。
+    ★ 非消耗：gate.check 不扣次数，_require_write 只校验不发放，
+      所以 _act 里再跑一遍是安全的（两遍结论必然一致）。
+    """
+    try:
+        ok, why, code = gate.check(scope)
+        if not ok:
+            return env(code=code,
+                       warning=f"{why} —— 写动作需要「{scope}」级通行证，先 ctl_authorize")
+    except gate.GateDenied as e:
+        return env(code=e.code, warning=e.why)
+    err = _require_write(args.get("actor", ""))
+    if err:
+        return err
+    if not int(args.get("hwnd") or 0):
+        return env(code=gate.CODE_NO_CTRL, warning="缺 hwnd")
+    return None
+
+
 def _modal_reason(txt: str) -> str:
     """从老脚本 rc=6 的输出里拉出「到底被什么挡着」那一句。
 
@@ -1402,19 +1622,10 @@ def _act(action: str, args: dict, argv: list[str], scope: str = "B") -> dict:
       反过来的话，agent 会先被叫去申请租约、拿到租约后再被告知"没通行证"—— 白跑两趟。
       通行证是用户签的、更根本，所以先验它。（旧的 act.py 仍然会在执行时再验一次，双保险。）
     """
-    actor = args.get("actor", "")
-    try:
-        ok, why, code = gate.check(scope)
-        if not ok:
-            return env(code=code, warning=f"{why} —— 写动作需要「{scope}」级通行证，先 ctl_authorize")
-    except gate.GateDenied as e:
-        return env(code=e.code, warning=e.why)
-    err = _require_write(actor)
+    err = _act_precheck(args, scope)
     if err:
         return err
     hwnd = int(args.get("hwnd") or 0)
-    if not hwnd:
-        return env(code=gate.CODE_NO_CTRL, warning="缺 hwnd")
     err = _bind_capture(args, hwnd)
     if err:
         return err
@@ -1639,76 +1850,345 @@ def _xy(xy):
     return [int(parts[0]), int(parts[1])]
 
 
+def _eid_recheck(hwnd: int, feat: dict, walk: dict):
+    """身份复核：按**签发那次的遍历口径**重走一遍，看这个元素还在不在原位。
+
+    返回 (当前节点, 补充说明)；找不到 ⇒ (None, 原因)。
+
+    ★ 复核用「类型 + 名字 + 矩形」三重全等，**不用编号**：
+      编号正是 D1 的病根，拿它复核等于「用错的尺子量错的布」。
+    ★ 口径取自旁表里记的那次签发（roles/max_depth 一致）；
+      max_nodes 只往上放宽 —— 放宽会多扫出节点，但**不会**让匹配失败
+      （匹配靠特征不靠序号），而不放宽就有「签发时它在第 800 位、复核预算只有 600
+      ⇒ 假失败」的风险（那正是被否决的方案①挖的坑）。
+    """
+    roles = tuple((walk or {}).get("roles") or ("all",))
+    mdep = int((walk or {}).get("max_depth") or uia_tree.DEFAULT_MAX_DEPTH)
+    mnod = max(int((walk or {}).get("max_nodes") or 0), uia_tree.FIND_MAX_NODES)
+    try:
+        nodes, trunc = uia_tree.walk(hwnd, roles=roles, max_nodes=mnod, max_depth=mdep)
+    except Exception as e:
+        return None, "重走元素树失败 %s: %s" % (type(e).__name__, e)
+    want_rect = [int(x) for x in (feat.get("rect") or ())]
+    hits = [n for n in nodes
+            if n.get("type") == feat.get("type")
+            and (n.get("name") or "") == (feat.get("name") or "")
+            and [int(x) for x in (n.get("rect") or ())] == want_rect]
+    note = ("（复核时元素树被 max_nodes 截断了 —— 扫到 %d 个就停了，判据在边界上）"
+            % len(nodes)) if trunc else ""
+    if not hits:
+        return None, ("现在扫到 %d 个节点，没有『类型 %s / 名字 %s / 矩形 %s』"
+                      "同时对得上的那个%s"
+                      % (len(nodes), feat.get("type"), feat.get("name"), want_rect, note))
+    return hits[0], note
+
+
+def _eid_refuse_missing(eid, how, entry) -> dict:
+    """旁表查无此号的**统一处方**。
+
+    措辞里必须带「不存在」和「重新」两个词 ——
+      bench.py::b11_minimized_window_not_misread 第二段（可见窗口 + 假 eid）
+      断言的正是这两个词；改成「必须带 from_capture」会把那条覆盖面顶掉。
+    """
+    if how == "旁查":
+        return env(code=gate.CODE_STALE_CAPTURE,
+                   warning=("元素 %s 确实存在，但它是在**另一次**观测里签发的，"
+                            "eid 不能跨观测单独用 —— 把那次 ctl_find/ctl_tree 返回的 "
+                            "capture_id 用 --from_capture 一起传回来。"
+                            "想重新定位就重新 ctl_find 一次，拿新的 capture_id。" % eid))
+    if how == "空快照":
+        return env(code=gate.CODE_STALE_CAPTURE,
+                   warning=("这次观测**没有元素明细**，所以里面根本没有 eid 可用 — "
+                            "ctl_tree 默认是轻量模式，只给文本树、不把节点明细交出来，"
+                            "拿树文本里的 e1 来点是拿不到钥匙的（⚠️ 别怪号不存在）。"
+                            "两条出路："
+                            "① 改用 ctl_find --hwnd <hwnd> --query <要找的字>（默认就带命中明细）；"
+                            "② 或者 ctl_tree 同一窗口再来一次，带 --detail，"
+                            "然后用它的 capture_id + eid + --from_capture。"
+                            "（顺便一说：坐标路径不受影响 —— ctl_find 给的 center 原样发 --xy 就行。）"))
+    if not _eid_db_path():
+        return env(code=gate.CODE_INTERNAL,
+                   warning=("元素 %s 查不到：eid 旁表没有落盘位置（闸门状态目录定位失败）"
+                            "—— 这不是你操作的问题，别重试，先报告用户" % eid))
+    return env(code=gate.CODE_STALE_CAPTURE,
+               warning=("元素 %s 不存在 —— 它不是任何一次观测签发出来的号，"
+                        "或者那次观测已经超过 %g 秒了。"
+                        "⚠️ eid 是**那次快照的取件钥匙**，不是元素本身："
+                        "重新 ctl_find --query <要找的字> 拿新的 capture_id 和 eid，"
+                        "再带着 --from_capture 一起点。"
+                        % (eid, float(gate.CAPTURE_TTL))))
+
+
+def _click_eid_legacy(hwnd: int, eid, args: dict):
+    """★ 回退开关 AGENTCTL_EID_STRICT=0 专用：**逐字复刻改前的旧行为**。
+
+    这条路径**带着 D1 的病**（重走一遍、按新编号取坐标），只为了 T1 全线验收期间
+    不让依赖旧流程的脚本全线报废。默认**不启用**；拔除条件见 _eid_strict() 的注释。
+    """
+    try:
+        st = uia_tree.window_state(hwnd)
+    except Exception:
+        st = {}
+    if st.get("最小化") or not st.get("根矩形宽"):
+        return env(code=gate.CODE_NO_CTRL,
+                   warning="点 eid 之前窗口不可读（%s），先把窗口叫醒"
+                           % st.get("说明", "未知"))
+    try:
+        nodes, _ = uia_tree.walk(hwnd, roles=("all",))
+    except Exception as e:
+        return env(code=gate.CODE_INTERNAL,
+                   warning="重新解析 eid 失败 %s: %s" % (type(e).__name__, e))
+    hit = None
+    for n in nodes:
+        if n["eid"] == str(eid):
+            hit = n
+            break
+    if hit is None:
+        return env(code=gate.CODE_NO_CTRL,
+                   warning="元素 %s 现在不存在了（扫到 %d 个节点）。界面变了，重新 ctl_find 再点。"
+                           % (eid, len(nodes)))
+    want = args.get("expect")
+    if want and str(want).strip() and str(want).strip() not in (hit["name"] or ""):
+        return env(code=gate.CODE_NO_CTRL,
+                   warning="元素 %s 现在叫『%s』，不是你看到的『%s』—— 不点"
+                           % (eid, hit["name"], want))
+    _en = hit.get("enabled", None)
+    if _en is False:
+        return env(code=gate.CODE_NO_CTRL,
+                   warning="元素 %s（%s）是禁用状态，不点" % (eid, hit["name"]))
+    walk = {"roles": ["all"], "max_nodes": uia_tree.FIND_MAX_NODES,
+            "max_depth": uia_tree.DEFAULT_MAX_DEPTH}
+    tok = _issue_capture_from_tree(hwnd, {"命中": [hit]}, walk)
+    if not tok:
+        return env(code=gate.CODE_INTERNAL,
+                   warning="eid 解析到了，但观测凭据签发失败 —— 宁可不点，也不点一个绑不住的动作")
+    return {**args, "xy": list(hit["center"]), "from_capture": tok,
+            "__resolved__": True,
+            "_eid_hit": {"eid": eid, "name": hit["name"], "type": hit["type"],
+                         "rect": hit["rect"], "enabled": _en, "capture_id": tok,
+                         "来源": "★ 旧行为（AGENTCTL_EID_STRICT=0）：重新编号取坐标，带 D1 缺陷"},
+            **({"_enabled_unknown": True} if _en is None else {})}
+
+def _click_by_name(hwnd: int, name: str, args: dict):
+    """--name 走新线（uia_tree.find），并与 eid **共用同一套护栏**。
+
+    改前 --name 原样透传给 act.py 的老扫描（find_control，max_depth=10），
+    而 Chromium 页面内容普遍深于 10 层、外壳很浅 ⇒ 只可能命中外壳
+    （D2 的真因是**深度不够**，不是「看不见页面」）。
+
+    ⚠ 回退开关 AGENTCTL_CLICK_NAME_LEGACY=1 ⇒ 照旧透传给 act.py（返回 None）。
+      老线的 name 路径**优先 UIA.Invoke**（不发鼠标事件、不依赖坐标），
+      对某些控件比坐标更稳，一刀切砍掉是功能倒退；
+      但**默认不再走**（网页场景下它只会给出误导性的「找不到」）。
+    """
+    if os.environ.get("AGENTCTL_CLICK_NAME_LEGACY", "0") == "1":
+        return None, None
+    try:
+        res = uia_tree.find(hwnd, name, max_nodes=uia_tree.FIND_MAX_NODES,
+                            limit=40, detail=False)
+    except Exception as e:
+        # ★ 新线**跑不起来**（UIA 不可用 / 窗口读不到 / COM 抽风）时**退回老线**，
+        #   而不是硬报 15。理由：这是基础设施故障，不是「找不到这个控件」；
+        #   退回老线 = 退回改前行为（不倒退），硬报 15 则会让一条本来能点的控件点不了。
+        #   ⚠️ 但必须**如实说**：老线在网页场景本来就只看得见外壳（D2），别让调用方误以为它更全。
+        return None, ("⚠️ 新元素线读不了这个窗口（%s: %s），本次 --name 已**退回老线**"
+                      "（act.py 的 find_control，深度上限 10）—— "
+                      "老线在网页上只看得见浏览器外壳；页面元素请改用 "
+                      "ctl_find --hwnd %s --query <要找的字> 再按 center 发 --xy。"
+                      % (type(e).__name__, e, hwnd))
+    hits = res.get("命中") or []
+    if not hits:
+        return (env(code=gate.CODE_NO_CTRL,
+                   data={"扫过节点": res.get("扫过节点")},
+                   warning=("在新元素树里找不到叫『%s』的元素（扫过 %s 个节点）。"
+                            "三件事分清楚："
+                            "① 窗口是不是最小化/不可读 —— 看 ctl_windows 的 rect 与 ctl_status；"
+                            "② 名字是不是真这么写 —— ctl_find --hwnd %s --detail "
+                            "看真实名字与类型；"
+                            "③ 换更短的词再找一次（UIA 名字常带快捷键后缀）。"
+                            "⛔ 别退回老线：老线深度上限只有 10，页面元素它本来就看不见。"
+                            % (name, res.get("扫过节点"), hwnd)),
+                   blind_spots=["找不到元素**不能**据此说界面上没有这个东西 —— "
+                                "UIA 看不见的一律瞎：Canvas 自绘、游戏画面、"
+                                "没开无障碍的 Electron"]), None)
+    if len(hits) > 1:
+        lines = []
+        cands = []
+        for i, h in enumerate(hits[:10]):
+            en = h.get("enabled")
+            st = "可点" if en else ("禁用" if en is False else "启用性未知")
+            lines.append("  %d. %s | %s | rect=%s | %s"
+                         % (i + 1, (h.get("name") or "")[:40], h.get("type"),
+                            h.get("rect"), st))
+            cands.append({"名字": h.get("name"), "类型": h.get("type"),
+                          "rect": h.get("rect"), "启用": en})
+        return (env(code=gate.CODE_NO_CTRL,
+                   data={"命中数": len(hits), "候选": cands},
+                   warning=("名字『%s』有 **%d 个命中**，不猜、不替你挑 —— 请二选一：\n%s\n"
+                            "① 缩小范围：ctl_find --hwnd %s --query <更长的词>\n"
+                            "② 或者直接按上面某一条的 center 发 --xy"
+                            "（原样传，屏幕物理像素，不要减窗口原点）"
+                            % (name, len(hits), "\n".join(lines), hwnd))), None)
+    hit = hits[0]
+    en = hit.get("enabled", None)
+    if en is False:
+        return (env(code=gate.CODE_NO_CTRL,
+                   warning="元素『%s』（%s）是禁用状态，不点"
+                           % (hit.get("name"), hit.get("type"))), None)
+    # name 路径的这次 find **本身就是一次新鲜观测** —— 就地签发并记旁表，
+    # 于是它和 eid 路径共用「观测 → 绑定 → 点」同一套护栏（不是绕过它）。
+    walk = {"roles": ["all"], "max_nodes": uia_tree.FIND_MAX_NODES,
+            "max_depth": uia_tree.DEFAULT_MAX_DEPTH}
+    tok = _issue_capture_from_tree(hwnd, {"命中": [hit]}, walk)
+    if not tok:
+        return (env(code=gate.CODE_INTERNAL,
+                   warning="按名字定位到了，但观测凭据签发失败 —— 宁可不点，也不点一个绑不住的动作"), None)
+    return ({**args, "xy": list(hit["center"]), "from_capture": tok,
+             "__resolved__": True,
+             "_eid_hit": {"eid": None, "name": hit.get("name"), "type": hit.get("type"),
+                          "rect": hit.get("rect"), "enabled": en, "capture_id": tok,
+                          "来源": "ctl_find 唯一命中（新线）"},
+            **({"_enabled_unknown": True} if en is None else {})}, None)
+
+
 def t_click(args: dict) -> dict:
     hwnd = int(args.get("hwnd") or 0)
 
-    # ★ 2026-10-07 加 eid：**不把 eid 当缓存坐标用**，点之前重新走一遍树解析，
-    #   还要核对名字 —— 界面变了就拒绝，而不是照着旧坐标戳下去。
-    #   本机头号事故「拿旧截图点新画面」在这里同理有复发机会，就堵在这。
+    # ★★ T1 窗2 · D1 治本（2026-10-14）。这一段整块重写，理由逐条：
+    #   改前是「拿 eid 重新走一遍树、按**新编号**取坐标」——
+    #     而三条出口的遍历口径本来就不同（ctl_tree = interactive/text + 600、
+    #     ctl_find = all + 3000、t_click = all + 600）⇒ **同一个 eid 必然指不同节点**。
+    #     这不是抖动，是确定性错位：窗口完全静止也照样点错。
+    #   改后是「eid 只当**取件钥匙**：按当初那张快照的元素特征取回坐标，
+    #     再按同一口径重走一遍，复核它还在不在原位」。
+    #   ⛔ 不引入 tree_sha256：签发侧只算命中那几十条、校验侧走全树 ⇒ 指纹永远不等
+    #     ⇒ 永远 code=12 ⇒ 等于造一个「怎么点都点不了」的新坑。
     eid = args.get("eid")
-    if eid:
+    user_xy = args.get("xy")
+    name = args.get("name")
+    _given = {"eid": eid, "name": name, "xy": user_xy}
+    _locators = [k for k in ("eid", "name", "xy") if _given[k]]
+
+    # Q3 裁定：--eid 与 --xy 同时给 ⇒ **拒绝**。
+    #   改前 eid 分支静默覆盖 xy —— 那是一条「以为点 A、实际点 B」的暗门：
+    #   调用方以为自己传了坐标兜底，其实坐标被扔了。
+    #   code=5（契约：「坐标/前台/窗口稳定性拒绝」）：本次拒绝的正是**坐标路径**；
+    #   4 的契约含义是「找不到控件」，在这里是假的（控件找得到，是参数打架）。
+    if eid and user_xy:
+        return env(code=gate.CODE_UNSTABLE,
+                   warning=("--eid 与 --xy 只能二选一：eid 说的是「上次看到的那批里的第几个」，"
+                            "xy 说的是「屏幕上的这个点」，两个都传时没法判断你真正想点哪个，"
+                            "所以这次**一个都没点**。"
+                            "① 要点元素：只留 --eid + --from_capture；"
+                            "② 要点坐标：只留 --xy + --from_capture。"
+                            "（另：--xy 是**屏幕物理像素**，与 ctl_find 的 center 同口径，"
+                            "原样传，不要减窗口原点。）"))
+    if name and (eid or user_xy):
+        return env(code=gate.CODE_UNSTABLE,
+                   warning=("--name / --eid / --xy 三者只能选一个来定位，"
+                            "这次同时收到了 %s ⇒ 一个都没点。"
+                            % "、".join(_locators)))
+
+    if eid and _eid_strict():
+        # ── ①窗口可读性。**顺序不许动** —— 放最前面是 b11-A 的覆盖面
+        #   （最小化窗口必须先报「不可读/叫醒」，而不是先报租约或 eid 不存在）。
+        #   注意 window_state 是**取事实**、不是闸门：它不消耗、不改状态，
+        #   且「窗口最小化」这个事实比「你有没有租约」更值得先说 —— 叫醒窗口是
+        #   所有后续动作的前提，先说它 agent 才知道下一步干什么。
         try:
             st = uia_tree.window_state(hwnd)
         except Exception:
             st = {}
         if st.get("最小化") or not st.get("根矩形宽"):
-            return env(code=gate.CODE_NO_CTRL, warning="点 eid 之前窗口不可读（%s），先把窗口叫醒" % st.get("说明", "未知"))
-        try:
-            nodes, _ = uia_tree.walk(hwnd, roles=("all",))
-        except Exception as e:
-            return env(code=gate.CODE_INTERNAL, warning="重新解析 eid 失败 %s: %s" % (type(e).__name__, e))
-        hit = None
-        for n in nodes:
-            if n["eid"] == str(eid):
-                hit = n
-                break
-        if hit is None:
-            return env(code=gate.CODE_NO_CTRL, warning="元素 %s 现在不存在了（扫到 %d 个节点）。界面变了，重新 ctl_find 再点。" % (eid, len(nodes)))
-        want = args.get("expect")
-        if want and str(want).strip() and str(want).strip() not in (hit["name"] or ""):
-            return env(code=gate.CODE_NO_CTRL, warning="元素 %s 现在叫『%s』，不是你看到的『%s』—— 不点" % (eid, hit["name"], want))
-        # ★ S2b（2026-10-13）：三态守卫。
-        #   False ⇒ 真禁用，拒绝（与原来同，判据不变）
-        #   None  ⇒ UIA 读不到，**不拒绝**（否则认可点的控件大面积误伤），
-        #        但必须留痕：data.enabled_unverified + warning + blind_spots，
-        #        不许「读不到」静默等价于「启用」
-        #   True  ⇒ 正常
-        # 缺省也变成 None：**缺字段同样是「没验证过」**。
-        _en = hit.get("enabled", None)
-        if _en is False:
-            return env(code=gate.CODE_NO_CTRL, warning="元素 %s（%s）是禁用状态，不点" % (eid, hit["name"]))
-        _unknown_en = (_en is None)
-        args = {**args, "xy": list(hit["center"]),
-                # enabled 一起进 _eid_hit：回执的「点到」里能直接看到这次点的是什么状态。
-                # 未知时**显式为 null**（不让回显里看着像 true）。
-                # 不影响 capture 指纹：core.py:560 只取 type / name[:40] / rect。
-                "_eid_hit": {"eid": eid, "name": hit["name"], "type": hit["type"],
-                             "rect": hit["rect"], "enabled": _en},
-                **({"_enabled_unknown": True} if _unknown_en else {})}
+            return env(code=gate.CODE_NO_CTRL,
+                       warning="点 eid 之前窗口不可读（%s），先把窗口叫醒"
+                               % st.get("说明", "未知"))
 
-        # ★ 2026-10-07 实机跑出来的 bug：eid 路径被要求另外交 from_capture，拿到 code=12。
-        #   这自相矛盾 —— 上面刚重新走了一遍树，那就是一次**新鲜**的观测，
-        #   再要一个 capture 等于把同一件事要两遍。
-        #
-        #   而且让 agent 交「上一次」ctl_find 的 capture_id 反而**更弱**：
-        #   那是窗口还没变时的旧观测，而我们手里这个是点之前那一刻的。
-        #
-        #   所以：eid 解析即观测绑定，这里就地签一份替 agent 补上。
-        #   「先看再动」这条规矩没被削弱 —— 被绑的是更近的那一次。
-        # ★ T15：元素命中 ⇒ 走元素指纹版
-        tok = _issue_capture_from_tree(hwnd, {"命中": [hit]})
-        if not tok:
-            # ★ 2026-10-14：这是**服务自己签不出凭据**，不是「界面上没那个控件」
-            #   ⇒ 归 15（CODE_INTERNAL），别让 agent 去重扫窗口（那是 4 的处方，治不了这个）。
-            return env(code=gate.CODE_INTERNAL,
-                       warning="eid 解析到了，但观测凭据签发失败 —— 宁可不点，也不点一个绑不住的动作")
-        args = {**args, "from_capture": tok}
-        args["_eid_hit"] = {**args["_eid_hit"], "capture_id": tok}
+    if eid and _eid_strict():
+        # ── ②按 capture_id 从旁表取回「当初那批」里这个 eid 的元素特征。
+        #   这一步**只读一个本地 json**，是纯事实查询，不消耗、不改状态 ——
+        #   所以它排在闸门**前面**：bench b11-B 断言的正是「可见窗口 + 假 eid」
+        #   要报「不存在/重新」，而那次调用根本没带 actor。若把租约闸放到它前面，
+        #   b11-B 会被一条「没带 actor」顶掉（实测踩过，已回退到现在的顺序）。
+        tok = args.get("from_capture") or args.get("capture_id")
+        feat, entry, how = _eid_lookup(tok, eid)
+        if feat is None:
+            return _eid_refuse_missing(eid, how, entry)
+
+    # ── ③通行证 + 租约。到这里为止只做过「取事实」（窗口状态、本地 json 查询），
+    #   下面才是**会因基础设施故障而误报**的活：check_capture、重走元素树、uia_tree.find。
+    #   不先过闸，「你没通行证」就会被「读元素树失败」盖住 ⇒ agent 白跑两趟
+    #   （tests 目录下的 s3_accept_gapfix.py，其 G2/G3 断言的就是这个顺序：
+    #     9 先于 10 先于别的）。
+    err = _act_precheck(args, "B")
+    if err:
+        return err
+
+    if eid and _eid_strict():
+        # ── ④capture 四重基础校验（窗口 / 位置 / 前台 / TTL）。
+        #   ⛔ **不传 tree_sha256**：那正是被否决的方案①（签发算命中、校验走全树，
+        #     指纹永远不等 ⇒ 永远 code=12）。
+        #   与 _bind_capture 同一口径（hwnd + rect + foreground），图像比对本就不参与。
+        if tok:
+            try:
+                gate.check_capture(tok, hwnd=hwnd, rect=_win_rect(hwnd),
+                                   foreground=_is_foreground(hwnd))
+            except gate.GateDenied as e:
+                return env(code=e.code,
+                           warning="%s —— 重新 ctl_find 拿新的 capture_id 再点" % e.why)
+
+        # ── ⑤身份复核（按签发口径重走一遍，特征三重全等，**不看编号**）。
+        cur, why = _eid_recheck(hwnd, feat, (entry or {}).get("walk"))
+        if cur is None:
+            return env(code=gate.CODE_STALE_CAPTURE,
+                       warning=("元素 %s『%s』已经不在原位了 —— %s。"
+                                "重新 ctl_find --query <要找的字> 拿新的 capture_id 重新定位，"
+                                "不要拿旧号硬点。" % (eid, feat.get("name"), why)))
+
+        want = args.get("expect")
+        if want and str(want).strip() and str(want).strip() not in (cur.get("name") or ""):
+            return env(code=gate.CODE_NO_CTRL,
+                       warning="元素 %s 现在叫『%s』，不是你看到的『%s』—— 不点"
+                               % (eid, cur.get("name"), want))
+
+        # ── ⑥S2b 三态守卫（False 拒 / None 放行但三通道留痕 / True 正常）。
+        _en = cur.get("enabled", None)
+        if _en is False:
+            return env(code=gate.CODE_NO_CTRL,
+                       warning="元素 %s（%s）是禁用状态，不点" % (eid, cur.get("name")))
+        args = {**args, "xy": list(cur["center"]),
+                "_eid_hit": {"eid": eid, "name": cur.get("name"), "type": cur.get("type"),
+                             "rect": cur.get("rect"), "enabled": _en, "capture_id": tok,
+                             "来源": "capture 旁表 + 身份复核"},
+                **({"_enabled_unknown": True} if _en is None else {})}
+    elif eid:
+        got = _click_eid_legacy(hwnd, eid, args)
+        if not got.get("__resolved__"):
+            return got
+        args = got
+    elif name:
+        got, name_warn = _click_by_name(hwnd, str(name), args)
+        if got is None:
+            # 显式老线兜底（回退开关 / 新线跑不起来）：argv 里才带 --name。
+            # ⚠️ 退回**一定**带 warning —— 不许让调用方以为「名字在新线上找到了」。
+            if name_warn:
+                args = {**args, "_name_fallback_warn": name_warn}
+        elif not got.get("__resolved__"):
+            return got                   # _click_by_name 直接给了错误信封
+        else:
+            args = got
 
     argv = ["click", "--hwnd", str(hwnd)]
-    if args.get("name"):
+    if args.get("name") and not args.get("_eid_hit"):
+        # 只有**老线兜底**才会走到这里：新线 name 路径的 argv 里不再有 --name，
+        # 只有 --xy + --coord —— 它已经用同一套护栏解析出坐标了。
         argv += ["--name", str(args["name"])]
     if args.get("xy"):
+        # ★ xy 是**屏幕物理像素**，与 ctl_tree / ctl_find 返回的 rect / center **同源同口径**
+        #   （contract.tools.json → conventions.coordinates：「一律物理像素（DPI 感知），
+        #     屏幕坐标」；act.py:1447 的 SetCursorPos(x,y) 点的是屏幕绝对坐标）。
+        #   ⛔ **不要减窗口原点**、不要乘缩放比 —— 那样算出来的点仍会落在窗口矩形内，
+        #     不会被 act.py:1813 的包含校验拦住 ⇒ 静默点错，比直接崩更难查。
         x, y = _xy(args["xy"])
         argv += ["--xy", f"{x},{y}", "--coord"]
     if "retry" in args:
@@ -1719,7 +2199,10 @@ def t_click(args: dict) -> dict:
     if r.get("ok"):
         r["data"] = {**(r.get("data") or {}), "frame_before": None, "frame_after": None,
                      "note": "按控件名/eid 点击不依赖观测；走坐标时已校验 capture_id",
-                     "点到": args.get("_eid_hit")}
+                     "点到": args.get("_eid_hit"),
+                     # ★ W2-C：让程序能自证坐标系，不必靠人记得 SOP 怎么写。
+                     "坐标口径": "屏幕物理像素（与 ctl_find/ctl_tree 的 rect/center 同源；"
+                                  "不要减窗口原点）"}
         if args.get("_enabled_unknown"):
             # ★ S2b：未知时**三个通道一起留痕**（DSH 放行 O-1：两个都挂）。
             #   ① data.enabled_unverified —— 机读，给程序判断
@@ -1729,13 +2212,17 @@ def t_click(args: dict) -> dict:
             #   措辞照项目口径写：**不据此断言它可用**。
             # 不动 ok / code：这是一次成功的动作，只是附带一条不确定提示
             #   （先例：core.py:479 的 t_brake 就是在 ok=True 上挂 warning）。
-            _eid = (args.get("_eid_hit") or {}).get("eid")
+            _hit = args.get("_eid_hit") or {}
+            _eid = _hit.get("eid") or _hit.get("name") or "元素"
             r["data"]["enabled_unverified"] = True
             r["blind_spots"] = list(r.get("blind_spots") or []) + [
                 "元素 %s 的启用性未验证（UIA 读 IsEnabled 失败）—— 不据此断言它可用" % _eid]
             _w = ("元素 %s 的启用性未验证（UIA 读 IsEnabled 失败）⇒ 这次点击是在"
                   "「不知道能不能点」的状态下发出的；点完请核对界面是否真的响应了" % _eid)
             r["warning"] = _w if not r.get("warning") else (str(r["warning"]) + "；" + _w)
+        if args.get("_name_fallback_warn"):
+            _fw = str(args["_name_fallback_warn"])
+            r["warning"] = _fw if not r.get("warning") else (str(r["warning"]) + "；" + _fw)
     return r
 
 

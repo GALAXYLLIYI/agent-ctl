@@ -38,6 +38,17 @@ FIND_MAX_NODES = 3000
 DEFAULT_MAX_DEPTH = 25
 SEARCH_TIMEOUT_SEC = 2.0
 
+# ★ T1/W3-A（2026-10-14）：**只标注，不新增第二套坐标。**
+#   本文件早先有人把树里的 rect 当成「屏幕坐标」、把 --xy 当成「窗口局部坐标」，
+#   于是去「减窗口原点换算」—— 换算后点仍可能落在窗口矩形内 ⇒ 不被 rc=5 拦住
+#   ⇒ **静默点错**，而且被写成 SOP 就制度化了。
+#   DSH 已读码裁定：--xy 与 ctl_tree 的 rect **同一套 = 屏幕物理像素**
+#   （contract.conventions.coordinates / act.py 的 SetCursorPos / PER_MONITOR_DPI_AWARE）。
+#   所以这里**只加一句标注**，措辞照契约原文；**绝不加 rect_local / center_local /
+#   窗口原点 这类换算字段** —— 多摆一套坐标，agent 总有选错的那个。
+COORD_SYS = ("屏幕物理像素（与 contract.conventions.coordinates 同一套）；"
+             "窗口 rect 由 ctl_windows 实时提供，不许缓存")
+
 # ── 交互类型白名单（照 Windows-MCP 的判据，但只用类型，没抄它整份实现）
 INTERACTIVE_TYPES = frozenset({
     "ButtonControl", "EditControl", "CheckBoxControl", "RadioButtonControl",
@@ -318,7 +329,8 @@ def walk(handle, *, max_nodes=DEFAULT_MAX_NODES, max_depth=DEFAULT_MAX_DEPTH,
 def window_state(handle):
     """先说清楚窗口能不能读，再去遍历。**返回的是事实，不是判断。**"""
     out = {"句柄": int(handle), "最小化": False, "前台": False,
-           "根矩形": [0, 0, 0, 0], "根矩形宽": 0, "根矩形高": 0, "说明": ""}
+           "根矩形": [0, 0, 0, 0], "根矩形宽": 0, "根矩形高": 0, "说明": "",
+           "坐标系": COORD_SYS}          # ★ W3-A：既有键一个不动，只多这一句标注
     try:
         import ctypes
         h = int(handle)
@@ -407,6 +419,7 @@ def find(handle, query, *, max_nodes=FIND_MAX_NODES, max_depth=DEFAULT_MAX_DEPTH
     return {
         "命中": hits[:limit],
         "命中数": len(hits),
+        "坐标系": COORD_SYS,              # ★ W3-A：同上，纯增量
         # ★ S2b：默认 detail=False 时「命中」数组**是空的**，光靠节点上的
         #   enabled_unverified 等于没加 —— 所以在返回 dict 上留个计数，
         #   让默认路径也有留痕。计的是**实际返回给模型的那批**（被 limit 截断的不算）。
@@ -428,6 +441,7 @@ def tree(handle, *, max_nodes=DEFAULT_MAX_NODES, max_depth=DEFAULT_MAX_DEPTH,
         "句柄": int(handle),
         "节点数": len(nodes),
         "截断": truncated,
+        "坐标系": COORD_SYS,              # ★ W3-A：同上，纯增量
         # ★ S2b：同理 —— detail=False 时「节点」是空列表，计数才是默认路径下的可机读余痕。
         "启用性未知": sum(1 for n in nodes if n.get("enabled") is None),
         "耗时_ms": int((time.perf_counter() - t0) * 1000),

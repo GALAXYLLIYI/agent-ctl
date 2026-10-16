@@ -24,6 +24,10 @@ AgentCtl 是这台 Windows 机器上**电脑控制的唯一入口**：看屏幕�
 2. **同一时刻只有一个 agent 能动手**（持租约的人）。你拿不到租约就**只能看**。
 3. **你说的每一句"我做了"，都要能被时间线反驳。** 所以每个动作都会给你 `event_id` 和前后帧号——把它们写进你的汇报。
 
+**另有一条是给你看的、不是给你用的**：控制期间屏幕四边会有一圈细边框，颜色 = 当前档位（A 蓝／B 黄／C 橙／D 紫；通行证过期或已急停时红）。
+⛔ **边框是给人看的，不是你的传感信号** —— 它不告诉你「现在能不能动」。
+> ⚠️ **没看见边框 ≠ 当前安全**（可能只是接线未生效）：**一律以 `ctl_status` 为准**；颜色与 `ctl_status` 矛盾时信 `ctl_status`。完整档位表见 `contract\tools.json` 的 `conventions.edge_border_hint`。
+
 ---
 
 ## 1. 怎么连
@@ -190,13 +194,77 @@ AgentCtl 是这台 Windows 机器上**电脑控制的唯一入口**：看屏幕�
 ③ 变了就拒：窗口位置/前台状态/画面哈希/超时 —— 任一变化 → code=12，要求你重看一次
 ```
 
-**能用控件名就别用坐标**：`ctl_click --name "保存"` 比 `--xy` 稳得多。坐标是最后手段。
+**桌面窗口场景**能用控件名就别用坐标：`ctl_click --name "保存"` 比 `--xy` 稳得多。
+> ⚠️ **这句只对桌面窗口成立。** 网页（Chromium 内核）页面里 `--name` 只看得见浏览器外壳、`eid` 在 D1 修好之前不能跨调用用 —— **网页场景照 §3-bis 走**。
 
 **澄清两件容易被猜错的事**：
-- **按控件名点击（`name`）不需要 `from_capture`** —— 它靠 UIA 现查，不依赖你刚才看的那张图。但**建议**先 `ctl_tree` 确认那个名字真在树里。
+- **按控件名点击（`name`）不需要 `from_capture`** —— 它靠 UIA 现查，不依赖你刚才看的那张图。但**建议**先 `ctl_tree` 确认那个名字真在树里。（⚠️ 网页场景是例外，见 §3-bis）
 - **只有走坐标（`xy`）才强制要求 `from_capture`**，且必须是**最近一次**观测的 id。
 
-**坐标永远不许缓存**：一律从**当次** `ctl_windows` 的 `rect` 现场换算。
+**坐标永远不许缓存**：一律用**当次**观测里拿到的值；要核窗口范围就现调 `ctl_windows` 取。
+
+**⚠️ 坐标只有一套：屏幕物理像素**（契约 `conventions.coordinates`）。`ctl_tree` / `ctl_find` 返回的 `rect` / `center` 就是这一套，`ctl_click --xy` **原样收，不需要任何换算** —— 见 §3-bis 步骤②。
+
+### 3-bis ★ 网页场景正确姿势（**这一节是「写动作三步」的全项目唯一定义处**）
+
+> ⛔ **别处不要复述这三步。** 契约 `conventions`、`ctl_status` 的返回、设计文档都只放**指针**。
+> 同一段话写两遍就会漂，漂了就等于没有规矩。
+
+**为什么网页要单独开一节**：Chromium 内核的页面内容深于 10 层，而 `--name` 那条老路径是
+`find_control(hwnd, name, max_depth=10)`（`legacy_toolsct.py` 的 `find_control()`，真源 `dsh-viewer-plugin	oolsct.py`）
+—— **只看得到浏览器外壳**（本机实测：命中 40 个，全是外壳）。这就是 D2。
+而 `eid` 是**遍历当场编的序号**，签发它那遍与点击时重走那遍的 `roles` 口径不同（D1，见上文「`eid` 是什么」那张表）
+—— **窗口完全静止也会点错**。
+⇒ 网页场景唯一稳的写法是 **坐标 ＋ `from_capture`**。
+
+**⚠️ 坐标只有一套：屏幕物理像素**（契约 `conventions.coordinates` 写死了这一条）。
+`ctl_tree` / `ctl_find` 的 `rect` / `center` 就是这一套，`ctl_click --xy` 收的也是同一套。
+
+#### ⛔ 前置：没有这两样，下面三步白做
+
+| 缺什么 | 症状 | 怎么补 |
+|---|---|---|
+| 通行证（B 级及以上） | `code=9` | `ctl_authorize --scopes B --reason "..."` —— 会让用户看到弹窗，密钥**永远不经过你** |
+| 租约 | `code=10`（附当前持有者） | `ctl_lease --action acquire --actor <你的名字> --scopes B`；`--actor` 必须与租约持有者一致 |
+
+写动作还要带 `--actor <你的名字>`（或设环境变量 `AGENTCTL_ACTOR`）—— 它决定「是不是你持着租约」。
+漏了服务会直接拒，并把可复制的命令原样还给你（`src/agentctl/core.py` 的 `_require_write()` 就是这么写的）。
+
+#### ① 观测 —— 拿快照
+
+```
+ctl_tree  --hwnd <hwnd>                          # 看整页
+ctl_find  --hwnd <hwnd> --query "<目标上的文字>"  # 只要某一个元素
+```
+
+返回里带 `capture_id` 和 `capture_ttl_sec`。
+**实测 TTL = 15 秒**（`src/agentctl/gate.py` 的 `CAPTURE_TTL = 15.0` 常量；所有签发点
+（`core.py` 的 `_issue_capture_from_tree()` / `_issue_capture_from_shot()`）以及 `gate.issue_capture` 的默认参数**都不覆盖**它）。
+⇒ **15 秒内要走完 ②③**；超了就**重新 ①**，别拿旧 id 硬点（会拿到 `code=12`）。
+
+#### ② 在【同一次快照】里定位
+
+在**刚才那一次**返回里找到目标节点，读它的 `center`（= `rect` 的中心）。
+
+**这个 `center` 就是屏幕物理像素，`ctl_click --xy` 原样收，不需要任何换算。**
+
+要核一次就：`ctl_windows --hwnd <hwnd>` 拿该窗口的 `rect`，**确认这个点在 rect 里面**。
+不在里面 ⇒ 服务会拒（`code=5`，「坐标/前台/窗口不稳定」）。
+窗口 `rect` 由 `ctl_windows` **实时提供**，⛔ 不许缓存。
+
+#### ③ 15 秒内点
+
+```
+ctl_click --actor <你的名字> --hwnd <hwnd> --xy <x>,<y> --from_capture <capture_id>
+```
+
+**⛔ 网页场景不要用 `--eid`，也不要用 `--name`**（两条都在修：`eid`＝D1、`name`＝D2；原因见上文）。
+
+#### ④ 核验（★ 别跳）
+
+`ok:true` / `code=0` 只代表**命令成功发出**，不代表事情成了。
+去 `ctl_timeline` 看事件，或给 `ctl_click` 加 `verify_expect` 在动作**前**声明到达条件。
+⛔ **`code=8` 是「动作发出去了但画面没变」—— 不许当成功。**
 
 ---
 
@@ -262,7 +330,7 @@ GET /v1/events?event_id=10231&limit=5
 | `ctl_shot` | `POST /v1/perceive/shot` | `hwnd`(省略=整屏), `region`=[l,t,r,b], `scale`(0.5), `format`("jpeg"), `quality`(70), `inline`(false), `look`(false), `why`("") |
 | `ctl_tree` | `POST /v1/perceive/tree` | `hwnd`*, `max_nodes`(600), `max_depth`(25), `roles`(["interactive","text"]), `detail`(false) |
 | `ctl_find` | `POST /v1/perceive/find` | `hwnd`*, `query`*, `limit`(40), `max_nodes`(3000), `detail`(false) |
-| `ctl_click` | `POST /v1/act/click` | `hwnd`*, 三选一（按可靠度）：`eid`（配 `expect` 核对名字）→ `name` → `xy`=[x,y]（**走 xy 时 `from_capture` 必填**）；`button`("left"), `retry`(1), `dry_run`(false) |
+| `ctl_click` | `POST /v1/act/click` | `hwnd`*, 定位方式：**`xy`=[x,y] ＋ `from_capture`（最稳，网页场景就用它，见 §3-bis）** ／ `eid`（配 `expect`；**D1 修好前不许跨调用用**）／ `name`（**网页里只命中外壳**，桌面窗口才适用）；`button`("left"), `retry`(1), `dry_run`(false) |
 | `ctl_type` | `POST /v1/act/type` | `hwnd`*, `text`*, `clear`(true), `force_send`(false) |
 | `ctl_fill` | `POST /v1/act/fill` | `hwnd`*, `xy`*, `from_capture`*, `text`*, `clear`(true) |
 | `ctl_lease` | `POST /v1/lease` | `action`*("acquire"/"renew"/"release"/"status"), `actor`, `scopes`=["B"], `ttl_sec`(600，上限 600) |
@@ -275,6 +343,9 @@ GET /v1/events?event_id=10231&limit=5
 | `ctl_witness` | `POST /v1/witness` | `action`*("now"/"history"), `limit`(50) |
 | `ctl_record` | `POST /v1/record` | `action`*("start"/"stop"/"pause"/"resume"/"status"), `profile`("default"/"light"/"action_only") |
 | `ctl_browser` | `POST /v1/browser` | `action`*("pages"/"text"/"find"/"eval"), `url_contains`, `selector`, `js` |
+
+★ **写动作还要带 `--actor <你的名字>`**（或设环境变量 `AGENTCTL_ACTOR`）—— 它决定「是不是你持着租约」，漏了会被拒（`core.py` 写动作入口取 `actor`、`_require_write()` 拿它校验租约）。
+⚠️ 契约里 `ctl_click` / `ctl_type` / `ctl_fill` 的入参表**目前没有列 `actor`** —— 那是契约漏项，**以代码为准**。
 
 ### `ctl_wait` · 阻塞等事件（2026-10-07 新增）
 
@@ -356,7 +427,7 @@ agent: （自动醒）收到，B 级，继续
 `ctl_find` 直接返回结构化节点；`ctl_tree` 默认只给**紧凑文本**，要结构化就加 `detail=true`。
 
 ```jsonc
-{ "eid": "e120",          // ★ 元素 id —— 下一步 ctl_click --eid e120 就点它，别自己算坐标
+{ "eid": "e120",          // 元素 id —— ⚠️ **D1 修好之前不许跨调用用**；同一个号只在拿到它的那一次返回里有效
   "depth": 3,            // 在树里的层级（渲染时按相对深度缩进）
   "type": "ButtonControl",
   "name": "管理订阅",
@@ -375,11 +446,24 @@ agent: （自动醒）收到，B 级，继续
 - ⛔ **`type` 落在交互类型里也不等于点得中** —— 那块坐标可能被上层浮层盖住了。
   **点了没变化就重新观察，别盲目重试。**
 
-**★ `eid` 是什么，为什么它比坐标和名字都强**：
+**★ `eid` 是什么，以及它现在有个必须知道的坑（D1）**：
 
-`eid` 是本次遍历里元素的序号（`e0`、`e1`…）。它**不是缓存坐标** —— 点之前会重新走一遍树
-重新定位，并核对 `expect` 给的名字。界面变了、元素没了或名字对不上，都会**拒绝并让你重来**，
-不会照着旧坐标戳下去。这治的正是本机头号事故「拿旧截图点新画面」。
+`eid` 是**本次遍历当场编的序号**（`e0`、`e1`…，编号在遍历中累加 —— `src/agentctl/uia_tree.py` 的 `walk()`）。
+
+`ctl_click --eid` 用它之前会**重新走一遍树**去找这个号，并核对 `expect` 给的名字；元素没了或名字对不上会**拒绝并让你重来**。
+
+⚠️ **但「重新走的那一遍」与「签发它的那一遍」用的 `roles` 口径不同**：
+
+| 出口 | 代码位置 | `roles` |
+|---|---|---|
+| `ctl_tree` 签发 | `core.py` 的 `t_tree` | `("interactive","text")`（上限 600 节点） |
+| `ctl_find` 命中 | `uia_tree.py` 的 `find()` | `("all",)`（上限 3000 节点） |
+| `ctl_click --eid` 重解析 | `core.py` 的 `t_click`（eid 分支） | `("all",)` |
+
+⇒ **同一个 `e120` 在两张表里指的根本不是同一个节点，窗口完全静止也一样点错。**
+`uia_tree.py` 的 `walk()` 里早就把同一个坑记下来了：`roles=("all",)` 会退化成跟默认一样，扫过节点数直接对不上（实测 787 → 3）。
+
+**所以：修好之前 `eid` 不许跨调用使用** —— 只允许在「拿到它的那一次返回」里用。网页场景请走 §3-bis 的坐标 ＋ `from_capture`。（D1 正在修；修好之后本节会更新。）
 
 ---
 
@@ -402,13 +486,16 @@ agent: （自动醒）收到，B 级，继续
 **为什么它比截图强**：截图里两个长得一样的按钮，模型只能猜；元素树里它们**各有名字**。
 这治的就是「点了才知道点错」—— 反复点回去重做，根子是**选择的依据是像素，不是元素**。
 
-**标准流程**：
+**标准流程（★ 2026-10-14 已按 D1 修正 —— 下面这版才是当前正确的）**：
 
 ```
-ctl_windows                              → 拿到 hwnd
-ctl_find   --hwnd N --query "提交"       → 拿到 eid + 名字 + 坐标
-ctl_click  --hwnd N --eid e120 --expect "提交"   → 点（点前重解析 + 核对）
+ctl_windows  --hwnd <hwnd>                          → 拿实时 rect（核一下点落在里面）
+ctl_find     --hwnd <hwnd> --query "提交"           → 拿 capture_id + center（15 秒内有效）
+ctl_click    --actor <你> --hwnd <hwnd> \
+             --xy <center_x>,<center_y> --from_capture <capture_id>
 ```
+
+**为什么不再拿 `--eid` 当默认**：见上文「`eid` 是什么」那张 roles 口径表 —— 签发与重解析口径不同，同一个号在两张表里指不同节点，**窗口静止也会点错**。`--eid` 修好（D1）之前**不许跨调用用**。
 
 **什么时候退回截图**：
 
@@ -459,7 +546,7 @@ ctl_click  --hwnd N --eid e120 --expect "提交"   → 点（点前重解析 + �
 | `ctl_tree` | UI 元素树（**不截图**；能用它就别用坐标，更别用截图） | A |
 | `ctl_find` | 按名字搜元素（**先想清楚要什么就用这个**，比拉全树省一个数量级） | A |
 | `ctl_browser` | 浏览器 CDP（pages/text/find/eval） | A |
-| `ctl_click` | 点击（`eid` 优先 → 控件名 → 坐标；坐标须绑 capture_id） | B |
+| `ctl_click` | 点击（**坐标 ＋ `from_capture` 最稳，网页场景就用它，见 §3-bis**；`eid` 在 D1 修好前不许跨调用用；`name` 在网页里只命中外壳） | B |
 | `ctl_type` / `ctl_fill` | 打字 / 原子填字段（默认先清空） | C |
 | `ctl_lease` | 申请/释放单写者租约 | 免证（需 token） |
 | `ctl_authorize` | 请用户授权（唤起弹窗） | 免证 |
@@ -477,7 +564,7 @@ ctl_click  --hwnd N --eid e120 --expect "提交"   → 点（点前重解析 + �
 ```
 1. 先 status —— 看证、看租约、看刹车。
 2. 先 windows —— 拿实时 rect，永不缓存坐标。
-3. 能用控件名就别用坐标；用坐标必须带 from_capture。
+3. 用坐标必须带 from_capture；**网页场景只用坐标**（§3-bis）—— 别用 eid/name。桌面窗口才轮得到"能用控件名就别用坐标"。
 4. 动作后自己去核验 —— code=8 不是成功，是"没变化"。
 5. code=9 就停下要证，code=12 就重新观测，绝不硬点。
 6. 不可逆动作前后都留帧，把 event_id 写进汇报。
@@ -496,3 +583,5 @@ ctl_click  --hwnd N --eid e120 --expect "提交"   → 点（点前重解析 + �
 > **重扫窗口**，白费力气还把排查引偏。
 > ⚠️ **更正上面 S7 那段里的码表清单**：`error_codes` 现在是 `0/3/4/5/7/8/9/10/11/12/15`
 > （S7 写的那 10 个在那一刻是对的，本轮新增 `15`）；`event_codes` 仍只有 `13`。
+>
+> 最后更新：2026-10-14 03:0x｜**T1 窗1（W1-A 网页场景 SOP ＋ W1-B 边框口径）**：① 新增 **§3-bis「网页场景正确姿势」** —— **唯一**定义「写动作三步」的地方（全项目别处只放指针，别复述）；② §3 与 §4.5/§4.6-bis/§7/§8 里 **「eid 优先 → 控件名 → 坐标」那一族说法全部改掉** —— 它们在 D1（eid 的 roles 口径不一致）修好之前是在教 agent 点歪：现在统一为「**坐标 ＋ `from_capture` 最稳**」，`eid` 不许跨调用用，`name` 在网页里只命中外壳；③ §3 补明**坐标只有一套（屏幕物理像素）、`--xy` 原样收不需要任何换算**，并把 capture_id 的 TTL 按代码实测值写成 **15 秒**（原为派单口径，本轮已核 `gate.py` 的 `CAPTURE_TTL` 常量）；④ §0 补一条边框提示，并写死「**边框不是传感信号、无边框 ≠ 安全，以 `ctl_status` 为准**」。本轮**未新增/未改动任何错误码**，**未动任何 `input_schema` 结构**。

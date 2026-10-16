@@ -1,5 +1,5 @@
 {
-  "schema_version": 4,
+  "schema_version": 5,
   "_关于": "AgentCtl 的机器可读接口契约（草案 v1）。给 agent 直接读取用的——不是给人看的清单。人看的那份是 agent-manual 里的 agent_tools.json（老清单，保持不动）。",
   "_来源": "docs/详细设计_v1.md 第 6 章（接口契约），本仓库内相对路径",
   "_状态": "设计稿：字段名可能微调；实现前以本文件为冻结基线，改动必须升 schema_version",
@@ -73,7 +73,7 @@
   },
   "conventions": {
     "naming": "ctl_* 前缀 + snake_case",
-    "coordinates": "一律物理像素（DPI 感知），屏幕坐标；窗口 rect 由 ctl_windows 实时提供，不许缓存",
+    "coordinates": "一律物理像素（DPI 感知），屏幕坐标；窗口 rect 由 ctl_windows 实时提供，不许缓存。⚠️ 只有这一套：ctl_tree / ctl_find 返回的 rect 与 center 就是它，ctl_click --xy 原样收，**不需要任何换算**；动作侧注释见 core.py 的 t_click（eid 路径把 hit[\"center\"] 直接写回 xy）。要核点是否落在窗口内就现调 ctl_windows 对 rect（服务端 act.py 就是这么判的，不在里面返回 code=5）",
     "images": "默认返回文件路径 + 帧号；仅 inline=true 且缩放后小于客户端上限时才内联图像",
     "stdout": "★ stdout 只走协议；日志与诊断一律 stderr，且不打印参数原值",
     "truncation": "★ 宁可显式报『超出上限』，绝不静默截断",
@@ -88,6 +88,8 @@
         "t_mono",
         "ttl_ms"
       ],
+      "ttl_sec": 15,
+      "ttl_source": "★ 2026-10-14 实测代码核对：src/agentctl/gate.py 的 CAPTURE_TTL 常量 = 15.0；所有签发点（core.py 的 _issue_capture_from_tree() / _issue_capture_from_shot()，以及 gate.issue_capture 的默认参数）**都不覆盖**它 ⇒ 实际 TTL = 15 秒。⚠️ 同块的 capture_id_fields 列了 ttl_ms，但记录里实际存的是 issued_at / expires_at（gate.py 的 issue_capture()），**没有 ttl_ms 字段** —— 该项待裁决；算寿命请按 issued_at 与 expires_at 之差，不要依赖 ttl_ms",
       "on_mismatch": "返回 code=12，要求重新观测"
     },
     "gate_tiers": {
@@ -95,6 +97,17 @@
       "B": "点击/滚动",
       "C": "打字/快捷键",
       "D": "拖拽"
+    },
+    "edge_border_hint": {
+      "_说明": "控制期间屏幕四边有细边框，颜色 = 当前档位（实现在 src/agentctl/ctrl_border.py）。★ 2026-10-15 起四档改为**逐档加深的蓝**并**逐档加厚**（A3/B4/C5/D6 物理 px），最内一圈是 1px **反色描边**（亮档配深 #0A0E14、暗档配浅 #F5F8FF），描边**不增加总厚** —— 最浅档在白底、最深档在深底都还看得见边。改配色必须同步这里（并过 tests/_2h_wF_配色冻结判据.py）",
+      "_前提": "★ 2026-10-14 起由服务启动时自动拉起；若你未见边框，说明接线未生效 —— 如实报告用户，别当成自己看漏",
+      "_不是传感信号": "边框只是给人看的，不告诉你能不能动。无边框 ≠ 当前安全；颜色与 ctl_status 矛盾时一律以 ctl_status 为准",
+      "A": "浅蓝 #8FD8FF｜只读感知｜只能看，不动",
+      "B": "中浅蓝 #3BA6F0｜点击滚动",
+      "C": "中深蓝 #1565C0｜打字快捷键｜多档取最高（A+B+C → C）",
+      "D": "深蓝 #0B3D91｜拖拽",
+      "红": "⚠ 通行证过期或已急停(brake) → 立刻停手，不要再发任何动作；报告用户（红 #F44336 不在四档渐变里，红只表示状态）",
+      "无边框": "边框端口未接线或 WDA 设置失败 → 不能把「没边框」理解成「当前安全」，以 ctl_status 为准"
     },
     "scope_vocabulary": {
       "_说明": "★ API 表面上范围一律用 A/B/C/D 短代号（由自足性测试暴露出的口径混乱所修）",
@@ -105,6 +118,7 @@
       "_note": "与既有闸门打交道的完整串由【服务自己翻译】，调用方只管用短代号"
     },
     "action_requires": "一个写动作要合法，必须同时有：①用户签发的通行证（限时/限范围/限次数）②单写者租约。顺序：status → authorize → lease → act",
+    "_写动作三步_唯一定义处": "docs\\AGENT接口.md §3-bis「网页场景正确姿势」。★ 同一段步骤**只许在那儿定义一次**；本契约、ctl_status 的返回、设计文档都只放指针，复述就会漂（2026-10-14 定）",
     "gate_note": "A→B 需一次用户监督下的实测；B→C、C→D 需连续 20 次干净成功（铁律 11⑥）"
   },
   "tools": [
@@ -419,7 +433,7 @@
     {
       "name": "ctl_click",
       "title": "点击",
-      "description": "点击。三条路径按可靠度排：① eid（元素 id，点前重解析+核对）② name（按控件名）③ xy（裸坐标，必须配 from_capture）。",
+      "description": "点击。★ 三条路径按 2026-10-14 的实测结论重排：① xy（屏幕物理坐标 ＋ from_capture，**最稳，网页场景就用它**）② eid（⚠️ D1 修好之前**不许跨调用使用** —— 签发那遍与重解析那遍的 roles 口径不同，同一个号在两张表里指不同节点，窗口静止也会点错）③ name（⚠️ 网页里只命中浏览器外壳，D2 修好前只对桌面窗口适用）。写法见 docs\\AGENT接口.md §3-bis。",
       "annotations": {
         "readOnlyHint": false,
         "destructiveHint": false,
@@ -443,7 +457,7 @@
           },
           "name": {
             "type": "string",
-            "description": "按 UIA 控件名点击（首选）"
+            "description": "按 UIA 控件名点击。⚠️ 网页（Chromium 内核）里只命中浏览器外壳 —— 那条老路径的 find_control 深度上限只有 10（D2，窗2 在修）；桌面窗口场景才适用"
           },
           "xy": {
             "type": "array",
@@ -452,7 +466,7 @@
             },
             "minItems": 2,
             "maxItems": 2,
-            "description": "屏幕物理坐标（次选，必须配 from_capture）"
+            "description": "屏幕物理坐标（★ 首选，网页场景就用它；必须配 from_capture）。与 ctl_tree 的 rect 同一套，原样收，不需要任何换算"
           },
           "from_capture": {
             "type": "string",
@@ -478,7 +492,7 @@
           },
           "eid": {
             "type": "string",
-            "description": "★ 首选：ctl_tree / ctl_find 返回的元素 id（如 e120）。**不是缓存坐标** —— 点之前会重新解析一遍，界面变了就拒绝并让你重来。比 name 稳：name 可能有重名，eid 不会。"
+            "description": "⚠️ **D1 修好之前不许跨调用使用。** ctl_tree / ctl_find 返回的元素 id（如 e120）是**遍历当场编的序号**。点之前确实会重新解析一遍并核对 expect，但**重新解析用的 roles 与签发用的 roles 不同**（签发 core.py 的 t_tree = (\"interactive\",\"text\")，重解析 core.py 的 t_click eid 分支 = (\"all\",)）⇒ 同一个号在两张表里指不同节点。网页场景请改用 xy ＋ from_capture（见 docs\\AGENT接口.md §3-bis）。"
           },
           "expect": {
             "type": "string",
@@ -1041,7 +1055,7 @@
   "_agent_call_discipline": [
     "1. 开工先 ctl_status：看有没有通行证、租约在谁手里、刹车松没松、录制开没开。",
     "2. 动手前先 ctl_windows 拿实时 rect；★ 不许缓存坐标。",
-    "3. 能用 UIA 控件名就不要用坐标；用坐标就必须带 from_capture。",
+    "3. 用坐标就必须带 from_capture；★ 网页场景**只用坐标**（见 docs\\AGENT接口.md §3-bis）—— 别用 eid（D1 修好前不许跨调用用）/ name（网页里只命中外壳）。桌面窗口才轮得到「能用 UIA 控件名就不要用坐标」。",
     "4. 每个写动作之后不要相信返回值里的 changed——自己 ctl_shot 或 ctl_timeline 核验一次到达条件。",
     "5. 遇到 code=8（无变化）不要当成功；遇到 code=12（capture 过期）重新观测再动手，别硬点。",
     "6. 无证（code=9）就停下向用户申请，★ 不许试图绕过。",
@@ -1056,5 +1070,6 @@
     "step_4": "POST /v1/act/click  body: {\"hwnd\":N,\"xy\":[x,y],\"from_capture\":\"...\"}",
     "step_5": "GET /v1/events?from=...&to=...  → 复核"
   },
+  "_2026-10-14_T1窗1": "schema_version 4 → 5。本轮改动全是**文档/文案**性质：①conventions 新增 edge_border_hint（含「接线未生效要如实报告」的前提句，并写死「边框不是传感信号、无边框≠安全、以 ctl_status 为准」）；②conventions.capture_binding 新增 ttl_sec=15 与 ttl_source（2026-10-14 实测 gate.py 的 CAPTURE_TTL 常量，非派单口径）；③conventions.coordinates 补明「只有这一套、--xy 原样收不换算」（DSH 裁定 D3 不成立）；④新增 conventions._写动作三步_唯一定义处 指针（唯一定义处＝docs\\AGENT接口.md §3-bis，避免第二真源）；⑤ctl_click 的 description/eid/name/xy 四处描述文案按 D1/D2 改写。⛔ **未动任何工具的 input_schema 结构**（properties 的键集、types、enum、required、additionalProperties 全部原样，只改 description 文本）；⛔ 未增删改任何 error_codes / event_codes。",
   "_2026-10-07_白名单废止": "用户指示「不整名单限制，每次都问」。legacy_tools/whitelist.json 已作废：里面的 8 个条目一次性转成了 asked_targets.json 里的放行记录，之后不再读。现在起，任何**没见过**的窗口第一次被操作时都会弹窗问用户；同意一次管 30 分钟。**敏感窗口黑名单不在这条里** —— 用户自己的授权弹窗（标题 DSH电脑控制授权）任何动作一律禁止，不问、不放行。"
 }

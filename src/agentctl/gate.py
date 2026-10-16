@@ -415,6 +415,26 @@ SCOPES = {
 }
 FULL_TO_SHORT = {v: k for k, v in SCOPES.items()}
 PERCEIVE = ("A", "B", "C", "D")          # 感知是所有级别的底座
+# 每张通行证的动作次数上限。
+#
+# ★ 2026-10-15（窗D·P5）口径**第二次**订正 —— 用户裁定：上限按「已授予档位里最紧的一档」取。
+#   改前（窗B 当时写下的口径，也是改前代码的真实行为）：core.ctl_authorize 按
+#     `ACT_LIMIT.get(short(scopes[0]), 20)` 取默认值
+#     ⇒ 凡 scopes 里**碰巧**排第一的是 A 的证（A / A,B / ABCD …）都把 acts_limit 盖成 200；
+#     而 _check_locked 放行时读的是**证上的** p["acts_limit"]，不是表里对应档位那一项
+#     ⇒ 这张证上 B/C/D 的上限实际是 **200**（B 自己只有 20、D 只有 10）。
+#     实测证据见 work\_2h_wB_回执.md §3.1 与 work\_2h_wB_红.txt 的 P5.3 对照组。
+#   改后：一律调 effective_act_limit()（本文件下方），[A,B,C]⇒20、[A,D]⇒10、[B]⇒20、[B,D]⇒10。
+#
+#   ⚠️ A 级**仍然不计数**（铁律 11⑥：20 次门槛只卡有副作用的层级）：
+#     _check_locked 对 A 走 skip_count 早退，永远读不到任何上限。
+#     所以 effective_act_limit() 把 A 排除在 min 之外 —— **不是**要给 A 计数，
+#     恰恰相反：A 的那一项本来就不该代表任何「有副作用档位」的上限。
+#   ⚠️ 于是「只带 A 的证」现在拿到 acts_limit=20（改前是 200）：
+#     这**不是**把闸门收紧 —— 只带 A 的证上任何 B/C/D 动作都先被 `sc not in allowed` 拒掉，
+#     根本走不到读 acts_limit 那一步 ⇒ **可观测行为零变化**，只是那个数不再是一张废纸。
+#   ⚠️ 别把 ACT_LIMIT["A"] 这一项删掉：legacy_tools\gate.py 是另一份实现，它**给 A 计数**、
+#     那边的 A=200 才是 A 自己的上限。两份语义不同，别拿一边的结论去改另一边。
 ACT_LIMIT = {"A": 200, "B": 20, "C": 20, "D": 10}
 
 # 颜色短代号常量。2026-10-07 补）
@@ -422,6 +442,33 @@ ACT_LIMIT = {"A": 200, "B": 20, "C": 20, "D": 10}
 #   表面看起来像「闸门拒绝」，实际是崩了）。
 # 本次一并补全，并把两个已知使用点换成常量。
 A, B, C, D = "A", "B", "C", "D"
+
+
+def effective_act_limit(scopes, default: int = 20) -> int:
+    """一张通行证该盖的 acts_limit —— **已授予档位里最紧的那一档**。
+
+    ★ 为什么不是「scopes[0]」（2026-10-15 用户裁定）：
+      scopes[0] 是**用户输入时的排列**，不是授权强度的度量。
+      改前实测（work\\_2h_wB_回执.md §3.1）：同样已用 25 次，只带 B 的证被拒（25/20），
+      而 A 打头的证仍放行（25/200）⇒ 改前那张证上 B/C/D 的上限是 200，
+      由「scopes[0] 恰好是 'A'」这个**巧合**决定。
+    ★ 为什么不是「权限最大的那一档」（D→10）：
+      D 只管拖拽、并不蕴含 B/C。一张只带 [B] 的证不该被 D 的 10 卡住。
+      本函数取的是 min(各**有副作用**档位自己的上限)，与「哪一档权限最大」是两件事。
+    ★ 为什么把 A 排除在 min 之外：
+      A 级走 skip_count 早退、永远读不到上限（铁律 11⑥）。留着它，min 会被 200 拖大，
+      那等于间接给 A 计数；或者被别处的理解反向误用。排除它，口径才干净。
+    ⚠️ 单源：发证（core.ctl_authorize）、显示、自检都调这里，
+       别再各自按 scopes[0] 现算一遍 —— 上一轮就是这么分叉出 200 的。
+    ⚠️ 认不出的档（"Debug" 之类）不参与取最小，也不放行（闸门铁律 1：不猜不编）。
+    """
+    limits = []
+    for s in (scopes or ()):
+        t = short(s)
+        if t == A or t not in ACT_LIMIT:
+            continue
+        limits.append(ACT_LIMIT[t])
+    return min(limits) if limits else default
 
 # 错误码（与契约 tools.json 对齐）
 CODE_OK, CODE_DENY_WHITELIST, CODE_NO_CTRL, CODE_UNSTABLE = 0, 3, 4, 5
@@ -610,6 +657,7 @@ def _save(path, obj):
         json.dump(obj, f, ensure_ascii=False, indent=1)
     os.replace(tmp, path)
 
+exclusive_lock = _exclusive   # ★ T1 窗2（DSH 唯一授权的这一行）：公开别名，不改任何逻辑/语义
 # ────────────────────── 急停 ──────────────────────
 def brake_engaged() -> bool:
     return os.path.exists(BRAKE_FLAG)
@@ -743,6 +791,11 @@ def _check_locked(p: dict, sc: str, *, skip_count: bool = False) -> tuple[bool, 
         # 只读感知：A 级零副作用。铁律 11⑥：「20 次门槛只卡有副作用的层级」。
         return True, f"范围「{SCOPES.get(sc, sc)}」有效至 {p.get('expires')}（只读感知，不计数）", CODE_OK
     n = int(p.get("acts", 0))
+    # ⚠️ 这里是**第二套口径**（2026-10-15 GLM/ZCode 复检点出"双轨"，此处只加指认、不改行为）：
+    #   `ACT_LIMIT.get(sc, 10)` 按「**本次请求的那一档**」取上限；
+    #   而发证侧（core.py:1186）走 `gate.effective_act_limit(scopes, 20)` ⇒ 按「**全证**里最紧的
+    #   有副作用档位」取。两者只在本证**没写** acts_limit 时才可能落到这里（正常发证都带值）。
+    #   ⇒ **改任何一边都要同时看一眼另一边**（core.py:1178-1190 的注释与本处互指）。
     limit = int(p.get("acts_limit") or ACT_LIMIT.get(sc, 10))
     if n >= limit:
         return False, f"本张通行证动作次数已用尽（{n}/{limit}）", CODE_UNAUTH

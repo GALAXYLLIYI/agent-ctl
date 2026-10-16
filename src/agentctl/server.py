@@ -157,11 +157,22 @@ def serve(port: int = PORT):
     print(f"AgentCtl HTTP 已启动： http://{HOST}:{port}/v1/health", flush=True)
     print(f"  令牌文件： {TOKEN_FILE}", flush=True)
     print(f"  令牌预览： {tok[:8]}…（完整值在文件里）", flush=True)
+    # ★ T1/W3-B：屏幕边缘状态提示跟着服务起来（档位/急停自动变色）。
+    #   逻辑全在 ctrl_border 里，这里只调一行；起不来也只是少一条边框，不影响服务。
+    try:
+        from agentctl import ctrl_border
+        ctrl_border.start_follow("server")
+    except Exception as e:
+        sys.stderr.write(f"[border] 接线异常（服务照常，只是没有边框）：{e!r}\n")
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
         print("\n收到中断，退出", flush=True)
     finally:
+        try:
+            ctrl_border.stop_follow()
+        except Exception as e:
+            sys.stderr.write(f"[border] 收边框异常（边框子进程靠 --parent-pid 自救）：{e!r}\n")
         srv.server_close()
 
 
