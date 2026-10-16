@@ -73,7 +73,21 @@ tools/*
 #                   内部推演过程，含另一个项目的路径。
 #   ★ 不是「有价值所以藏起来」，是「里面的路径换台机器就是错的」。
 #     真要公开，把里面的绝对路径改成占位符再单独提一次。
-tests/
+# tests/  ← 2026-10-16（DSH，用户批准）改成"排除内容 + 精准开白名单"：
+#   ★ git 的坑：**父目录被整体排除后，子文件无法再用 ! 重新包含**
+#     ("It is not possible to re-include a file if a parent directory of that file is excluded")
+#     ⇒ 所以必须把 `tests/` 写成 `tests/*`（只排除内容、不排除目录本身），白名单才生效。
+#   ★ 为什么要开白名单：`tests\run_all.py` 是「**放行单必须先跑**」那道闸门（见 SKILLS）。
+#     它若不在仓里，换台机器 / 清仓 clone 就**没有闸门**，那条规矩等于空文。
+#   ★ 白名单只放行"收口闸门那套"：入口 + 8 条判据（`_*.py`）+ P4 夹具目录；
+#     其余 s2_/s3_/s4_/s5_ 自测脚本**仍按原意忽略**（它们含本机绝对路径、换台机器跑不了）。
+tests/*
+!tests/run_all.py
+!tests/check_t1_w1.py
+!tests/_*.py
+!tests/fixtures/
+!tests/fixtures/*.png
+!tests/fixtures/*.py
 docs/证据/
 docs/详细设计_v1.md
 docs/基线摘要与开工任务书.md
