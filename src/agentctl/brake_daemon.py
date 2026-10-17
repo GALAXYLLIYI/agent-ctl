@@ -32,7 +32,7 @@ gate.py 负责「判断」（读文件看停没停），这里负责「触发」
 ★ 窗P1（2026-10-16）补的**源码树入口**（本文件此前**根本没有 __main__ 块**，
   374 行到 _pid_alive 就结束了 —— 于是 `python -m agentctl.brake_daemon`
   **import 完就秒退**，屏幕上什么都不出现，还不留任何日志）：
-    cd <工作区>/Documents/agent-ctl/src
+    cd <仓根>/src
     python -X utf8 -m agentctl.brake_daemon            # 与上面两条完全等价
     python -X utf8 src/agentctl_main.py brake-daemon   # 不想切目录就用这条
 """

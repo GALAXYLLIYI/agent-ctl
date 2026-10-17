@@ -17,7 +17,7 @@ dsh-viewer-plugin/tools ──copy+净化──▶ dist/_legacy_for_pack/ ──
 生成器是 `tools/gen_legacy.py`（7 条精确净化规则 + AST 补 import + md5 台账）。
 打包流程**根本不读本目录**。
 
-⇒ **要改控制链路，改 `<工作区>/Documents/dsh-viewer-plugin/tools/` 那一份。**
+⇒ **要改控制链路，改 `<工作区>/dsh-viewer-plugin/tools/` 那一份。**
 在本目录改完发现包没变，不是 bug，是这条路已经不参与打包了。
 
 ### ② 仍是运行时兜底家目录（不能删）
@@ -41,7 +41,7 @@ dsh-viewer-plugin/tools ──copy+净化──▶ dist/_legacy_for_pack/ ──
 
 | 项 | 值 |
 |---|---|
-| HOME | `<工作区>/Documents/dsh-viewer-plugin/tools` |
+| HOME | `<工作区>/dsh-viewer-plugin/tools` |
 | gate.py | 该目录下那份（18799 B） |
 | 体检 | `ok=true`、`caps.targets=true` ← 认 targets |
 

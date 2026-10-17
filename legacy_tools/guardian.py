@@ -21,6 +21,18 @@ ENFORCE = "--enforce" in sys.argv
 REPLAY = "--replay" in sys.argv
 
 
+def _resolve(p):
+    """展开 policy 里的路径：`<工作区>` 占位符 + `%ENV%` 环境变量。
+
+    ★ 2026-10-17（用户裁：**不公开用户名**）：guardian_policy.json 是进仓文件，
+      里面的「急停文件 / 日志目录」不能再把本机用户名写死。
+      `<工作区>` = 本目录(legacy_tools)的上两级（= 仓根的上一级），可用
+      `AGENTCTL_WORKSPACE` 覆盖；语义与原来那两条绝对路径**完全一致**。
+    """
+    ws = os.environ.get("AGENTCTL_WORKSPACE") or os.path.dirname(os.path.dirname(HERE))
+    return os.path.expandvars(str(p)).replace("<工作区>", ws)
+
+
 # ---------- 内存/提交 ----------
 class MEMSTATUS(ctypes.Structure):
     _fields_ = [("dwLength", wt.DWORD), ("dwMemoryLoad", wt.DWORD),
@@ -297,11 +309,11 @@ def main():
     if REPLAY:
         return replay()
     pol = json.load(open(POLICY, encoding="utf-8"))
-    logdir = pol["日志目录"]
+    logdir = _resolve(pol["日志目录"])
     os.makedirs(logdir, exist_ok=True)
     csvp = os.path.join(logdir, "guardian.csv")
     logp = os.path.join(logdir, "guardian.log")
-    stopflag = pol["急停文件"]
+    stopflag = _resolve(pol["急停文件"])
     fast = pol["_采样"]["快采样秒"]
     slow_every = pol["_采样"]["慢采样秒"]
 

@@ -62,10 +62,11 @@ def _collect_selftest():
         miss.append({
             "项": "解释器（用了托管 Python）",
             "实参": py,
-            "下一步": "改用**系统 Python 3.12**（本机实测可用的那条）：\n"
-                      "        \"<用户目录>\\AppData\\Local\\Programs\\Python\\Python312\\python.exe\" "
-                      "-X utf8 act.py <action> --hwnd N\n"
-                      "      （托管解释器 <用户目录>\\.workbuddy\\binaries\\python\\... 没装 pywin32 与 tkinter，"
+            "下一步": "改用**系统 Python 3.12**（完整安装版，不是宿主自带的托管解释器）：\n"
+                      "        用那条 python.exe 跑： <系统Python>\\python.exe -X utf8 act.py <action> --hwnd N\n"
+                      "      取法：跑 `where python`，挑出「Programs\\Python\\Python3xx」那种系统安装版；\n"
+                      "           再跑 `\"<那个路径>\" -c \"import sys;print(sys.executable)\"` 确认。\n"
+                      "      （托管解释器 —— 宿主工具自带的那个 —— 往往没装 pywin32 与 tkinter，"
                       "换它跑必然两项都缺。）",
         })
     else:
@@ -94,8 +95,8 @@ def _collect_selftest():
             "项": "tkinter（授权弹窗 auth_popup.py 依赖）",
             "实参": why,
             "下一步": "tkinter 随系统 Python 自带；缺失说明当前解释器是**精简/嵌入式版**。"
-                      "请换用完整安装的系统 Python（官方安装包勾选 tcl/tk），"
-                      "本机可用：\"<用户目录>\\AppData\\Local\\Programs\\Python\\Python312\\python.exe\"。",
+                      "请换用完整安装的系统 Python（官方安装包勾选 tcl/tk）；"
+                      "可用 `where python` 找到系统安装版，再用 `-c \"import tkinter\"` 自检。",
         })
     return miss, ok
 
@@ -278,7 +279,7 @@ def _cmd_read(hwnd):
 #   跨线 import 会把两条线的耦合重新焊死（本单只动 act.py）。所以这里**只读文件**。
 # ★ 不写死本机路径（开源的最低要求，也是 tools/port_legacy.py 的统一规则）。
 #   原先这里写死了三条开发机的绝对路径：换机器/换用户名全部落空，
-#   而且会把目录结构和用户名 <用户> 一起公开到仓库里。
+#   而且会把目录结构和用户名一起公开到仓库里。
 #   改成：**环境变量 > 脚本自身目录**。真源就放在 tools\ 下，快照目录自然在
 #   同级的 _work\，语义与原来一致，但不再依赖任何人的盘符布局。
 _SNAP_CANDIDATES = tuple(
@@ -596,7 +597,7 @@ WHITELIST = _load_whitelist()
 #   同进程别的窗），所以这里只能按标题拦 —— 这一点写清楚，免得后人以为漏了。
 #
 # ⚠️⚠️ 2026-10-16 同步提醒（本仓库这一份**不是生效的那份**，见本目录 README）：
-#   生效的老线真源是 <工作区>\Documents\dsh-viewer-plugin\tools\act.py，
+#   生效的老线真源是 <工作区>\dsh-viewer-plugin\tools\act.py，
 #   打包也从那里现场生成（tools\gen_legacy.py 的 SRC 常量）。
 #   **那一份必须同步加上同样的 "AgentCtl 急停"**，否则这条硬约束在运行时是空的。
 BLOCKED_TITLES = (
@@ -611,7 +612,7 @@ BLOCKED_TITLES = (
 #   判据：tests\_急停弹窗判据.py 第 6b 条按字面查这一行，改了就红。
 #
 # ⚠️⚠️ 同上：本仓库这一份**不是生效的那份**（见本目录 README）。
-#   生效的老线真源是 <工作区>\Documents\dsh-viewer-plugin\tools\act.py，
+#   生效的老线真源是 <工作区>\dsh-viewer-plugin\tools\act.py，
 #   打包也从那里现场生成。两处都要有，否则这一层是空的。
 BLOCKED_CLASSES = (
     "AgentCtlBrakePopup",

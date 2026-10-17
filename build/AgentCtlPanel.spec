@@ -6,6 +6,18 @@
 详见 src/panel_main.py 的模块说明。
 """
 from PyInstaller.utils.hooks import collect_submodules
+import os
+
+# ★ 2026-10-17（用户裁：**不公开用户名**）：构建路径不再写死本机目录（同 AgentCtl.spec）。
+_SPEC = globals().get("SPEC") or ""
+_SPEC_DIR = (os.path.dirname(os.path.abspath(_SPEC)) if _SPEC
+             else os.path.abspath(globals().get("SPECPATH") or "."))
+_ROOT = os.path.dirname(_SPEC_DIR)
+
+
+def _R(*parts):
+    return os.path.join(_ROOT, *parts).replace("\\", "/")
+
 
 hiddenimports = ['winrt.windows.media.ocr', 'winrt.windows.graphics.imaging',
                  'winrt.windows.storage.streams', 'winrt.windows.globalization',
@@ -17,15 +29,13 @@ hiddenimports += collect_submodules('comtypes')
 
 
 a = Analysis(
-    ['<工作区>/Documents/agent-ctl/src/panel_main.py'],
-    pathex=['<工作区>/Documents/agent-ctl/src',
-            '<工作区>/Documents/agent-ctl/vendor',
-            '<工作区>/Documents/agent-ctl/stubs'],
+    [_R('src/panel_main.py')],
+    pathex=[_R('src'), _R('vendor'), _R('stubs')],
     binaries=[],
-    datas=[('<工作区>/Documents/agent-ctl/contract/tools.json', 'contract'),
+    datas=[(_R('contract/tools.json'), 'contract'),
            # ★ P2（2026-10-16）：面板要读「动作面异常提示」那份文件（hint_view），
            #   阈值文件同样随包走 —— 否则面板显示的阈值和引擎用的兜底值可能不是一套。
-           ('<工作区>/Documents/agent-ctl/src/agentctl/action_guard_policy.json', 'agentctl')],
+           (_R('src/agentctl/action_guard_policy.json'), 'agentctl')],
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},

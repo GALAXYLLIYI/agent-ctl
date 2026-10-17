@@ -21,7 +21,7 @@ sys.stdout.reconfigure(encoding="utf-8")
 ROOT = Path(__file__).resolve().parent.parent
 TARGET = ROOT / "legacy_tools"
 
-PAT_PATH = re.compile(r"[A-Z]:\\[A-Za-z0-9_\\.一-鿿-]+|<用户>|dsh-viewer-plugin|dsh-viewer")
+PAT_PATH = re.compile(r"[A-Z]:\\[A-Za-z0-9_\\.一-鿿-]+|Users\\[^\\]+|dsh-viewer-plugin|dsh-viewer")
 PAT_NAME = re.compile(r"用户|豆包|WorkBuddy|WorkBuddy|TRAE|trae|dsh\b")
 PAT_WECHAT = re.compile(r"1323779\d{4}|微信|weixin")
 

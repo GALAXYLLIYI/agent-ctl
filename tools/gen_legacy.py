@@ -38,7 +38,11 @@ import time
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SRC = r"<工作区>\Documents\dsh-viewer-plugin\tools"
+# ★ 2026-10-17（用户裁：**不公开用户名**）：本文件会进公开仓，不能再把本机路径写死。
+#   工作区 = 仓根的上一级，由仓根推导；可用 AGENTCTL_WORKSPACE 覆盖（工作区搬走时）。
+WORKSPACE = os.environ.get("AGENTCTL_WORKSPACE") or os.path.dirname(ROOT)
+SRC = os.environ.get("AGENTCTL_LEGACY_SRC") or os.path.join(
+    WORKSPACE, "dsh-viewer-plugin", "tools")
 # ★ D1：双基线台账 —— A₀（上次生成时产物的规范化 md5）与 T₀（生成时真源的规范化 md5）记在这。
 #   台账**必须进 git**（G3 边界③：台账不在仓 = 基线可被无声篡改 = 共谋）。.gitignore 有专门白名单行。
 LEDGER_DEFAULT = os.path.join(ROOT, "tools", "legacy_ledger.json")
@@ -80,6 +84,11 @@ FILES = ["gate.py", "gate_lock.py", "act.py", "perceive.py", "auth_popup.py", "b
 
 # ── 净化规则：逐条精确替换，不做模糊匹配 ───────────────────────────────
 # 每条 = (文件名, 旧文本, 新文本, 为什么)
+# ★ 2026-10-17（用户裁：不公开用户名）：规则里的「针」不再把本机工作区路径写死 ——
+#   它们是"要在真源里匹配到的那串字面量"，由工作区根推导即可，**行为一个字节都不变**
+#   （校准办法：work\_净化规则等价性核对_20261017.py，改前改后都必须 35/35 逐字节相同）。
+_WS1 = WORKSPACE                        # 单反斜杠形态：<工作区>
+_WS2 = WORKSPACE.replace("\\", "\\\\")  # 双反斜杠形态（源码里是转义后的写法）
 APP_DIR_BLOCK = (
     "# ★ 默认写进 %LOCALAPPDATA%\\AgentCtl\\shots，不写死本机路径。\n"
     "#   平台进程会用 AGENTCTL_SHOTS_DIR（或直接注入 SHOTDIR）指过来，\n"
@@ -90,31 +99,31 @@ APP_DIR_BLOCK = (
 
 RULES = [
     ("perceive.py",
-     'SHOTDIR = r"<工作区>\\Documents\\agent-manual\\_监控\\shots"',
+     'SHOTDIR = r"' + _WS1 + r'\agent-manual\_监控\shots"',
      APP_DIR_BLOCK + 'SHOTDIR = os.environ.get("AGENTCTL_SHOTS_DIR") or os.path.join(_APP_DIR, "shots")',
      "截图目录：不写死本机路径"),
     ("perceive.py",
-     'DIFF_CACHE_DIR = r"<工作区>\\Documents\\agent-manual\\_监控\\perceive_cache"',
+     'DIFF_CACHE_DIR = r"' + _WS1 + r'\agent-manual\_监控\perceive_cache"',
      'DIFF_CACHE_DIR = os.environ.get("AGENTCTL_CACHE_DIR") or os.path.join(_APP_DIR, "perceive_cache")',
      "树差量缓存目录：同上"),
     ("selftest.py",
-     'SHOTS = r"<工作区>\\Documents\\agent-manual\\_监控\\shots"',
+     'SHOTS = r"' + _WS1 + r'\agent-manual\_监控\shots"',
      APP_DIR_BLOCK + 'SHOTS = os.environ.get("AGENTCTL_SHOTS_DIR") or os.path.join(_APP_DIR, "shots")',
      "自测读截图目录：同上"),
     ("cdp.py",
-     '"--user-data-dir=F:\\\\<用户>\\\\Documents\\\\_edge_cdp"',
+     '"--user-data-dir=' + _WS2 + r'\\_edge_cdp"',
      '"--user-data-dir=" + os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "AgentCtl", "_edge_cdp")',
      "浏览器 profile：不写死本机路径"),
     ("coord.py",
-     'import sys; sys.path.insert(0, r"<工作区>\\Documents\\dsh-viewer-plugin\\tools")',
+     'import sys; sys.path.insert(0, r"' + _WS1 + r'\dsh-viewer-plugin\tools")',
      'import sys, os; sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))',
      "自插老线路径：包内要指向自己"),
     ("option_locator.py",
-     'r"<工作区>\\Documents\\agent-manual\\_监控\\shots\\*_win2754900.png"',
+     'r"' + _WS1 + r'\agent-manual\_监控\shots\*_win2754900.png"',
      'os.path.join(os.environ.get("AGENTCTL_SHOTS_DIR", ""), "*_win2754900.png")',
      "选图目录：同上"),
     ("selftest.py",
-     'os.path.join(r"<工作区>\\Documents\\agent-manual", f)',
+     'os.path.join(r"' + _WS1 + r'\agent-manual", f)',
      'os.path.join(os.environ.get("AGENTCTL_MANUAL_DIR", ""), f)',
      "手册目录（铁律 10 的页脚自测）：不写死本机路径；打包后没有手册就整段跳过"),
 ]

@@ -22,6 +22,7 @@ r"""把 legacy_tools/ 里写死的本机路径改成跟机器无关的写法。
 """
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -58,23 +59,29 @@ def shots_block(name: str) -> str:
 
 
 # (文件, 原文, 替换文)
+# ★ 2026-10-17（用户裁：不公开用户名）：规则里的「针」由仓根推导，不再把本机路径写死。
+#   _WS1 = 单反斜杠形态（= 源文件里那串字面量的**值**）；_WS2 = 双反斜杠形态（cdp.py 里是
+#   再转义过的一层）。工作区 = 仓根的上一级；可用 AGENTCTL_WORKSPACE 覆盖。
+_WS1 = os.environ.get("AGENTCTL_WORKSPACE") or str(T.parent.parent)
+_WS2 = _WS1.replace("\\", "\\\\")
+
 EDITS = [
     # ★ T10（2026-10-09）：原来这两条把老线的写死路径转成 env 优先。
     #   T10 已把老线直接改成 env 优先，转换**无对象**了 —— 留着不会报错，
     #   只会静默不匹配，等于给后人一个「已在转换」的错觉。故删除。
     #   防漂移靠 T10 的全机字面量扫描自测（命中即败），不靠这里的转换。
-    ("perceive.py", 'SHOTDIR = r"<工作区>\\Documents\\agent-manual\\_监控\\shots"', shots_block("SHOTDIR")),
-    ("selftest.py", 'SHOTS = r"<工作区>\\Documents\\agent-manual\\_监控\\shots"', shots_block("SHOTS")),
+    ("perceive.py", 'SHOTDIR = r"' + _WS1 + r'\agent-manual\_监控\shots"', shots_block("SHOTDIR")),
+    ("selftest.py", 'SHOTS = r"' + _WS1 + r'\agent-manual\_监控\shots"', shots_block("SHOTS")),
     ("coord.py",
-     'sys.path.insert(0, r"<工作区>\\Documents\\dsh-viewer-plugin\\tools")',
+     'sys.path.insert(0, r"' + _WS1 + r'\dsh-viewer-plugin\tools")',
      "sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))"
      "   # ★ 跟着脚本走，不写死本机路径（换机器就 import 不到）"),
     ("cdp.py",
-     '"--user-data-dir=F:\\\\<用户>\\\\Documents\\\\_edge_cdp"',
+     '"--user-data-dir=' + _WS2 + r'\\_edge_cdp"',
      '"--user-data-dir=" + os.path.join('
      'os.environ.get("LOCALAPPDATA", ""), "AgentCtl", "_edge_cdp")'),
     ("option_locator.py",
-     'glob.glob(r"<工作区>\\Documents\\agent-manual\\_监控\\shots\\*_win2754900.png")',
+     'glob.glob(r"' + _WS1 + r'\agent-manual\_监控\shots\*_win2754900.png")',
      'glob.glob(os.path.join('
      'os.environ.get("AGENTCTL_SHOTS_DIR", ""), "*_win2754900.png"))'),
 ]

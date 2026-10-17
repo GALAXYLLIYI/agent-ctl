@@ -1,5 +1,21 @@
 # -*- mode: python ; coding: utf-8 -*-
+import os
+
 from PyInstaller.utils.hooks import collect_submodules
+
+# ★ 2026-10-17（用户裁：**不公开用户名**）：构建路径不再写死本机目录。
+#   PyInstaller 执行 spec 时会注入 SPEC（本文件完整路径）/ SPECPATH（所在目录）；
+#   由它推导仓根 ⇒ 与原来那串绝对路径**完全等价**，换机器/换用户名都不用改。
+_SPEC = globals().get("SPEC") or ""
+_SPEC_DIR = (os.path.dirname(os.path.abspath(_SPEC)) if _SPEC
+             else os.path.abspath(globals().get("SPECPATH") or "."))
+_ROOT = os.path.dirname(_SPEC_DIR)
+
+
+def _R(*parts):
+    """仓内路径（统一正斜杠，PyInstaller 两种分隔符都吃）。"""
+    return os.path.join(_ROOT, *parts).replace("\\", "/")
+
 
 hiddenimports = ['winrt.windows.media.ocr', 'winrt.windows.graphics.imaging', 'winrt.windows.storage.streams', 'winrt.windows.globalization', 'winrt.windows.foundation', 'winrt.windows.foundation.collections', 'PIL._tkinter_finder']
 hiddenimports += collect_submodules('winrt')
@@ -8,8 +24,8 @@ hiddenimports += collect_submodules('comtypes')
 
 
 a = Analysis(
-    ['<工作区>/Documents/agent-ctl/src/agentctl_main.py'],
-    pathex=['<工作区>/Documents/agent-ctl/src', '<工作区>/Documents/agent-ctl/vendor', '<工作区>/Documents/agent-ctl/stubs'],
+    [_R('src/agentctl_main.py')],
+    pathex=[_R('src'), _R('vendor'), _R('stubs')],
     binaries=[],
     # _selftest_src：把 widget.py 的**源码原文**随包带走。
     # 目的只有一个 —— 装完的 exe 跑 selftest 时要能读到源码做审计
@@ -17,18 +33,18 @@ a = Analysis(
     # 不带的话 AgentCtl.exe selftest 直接 FileNotFoundError 崩掉，
     # 装出来的包就没法自证没被开后门。平铺目录且**不叫 agentctl**，
     # 免得跟真正的包重名把 import 路径搅乱。
-    datas=[('<工作区>/Documents/agent-ctl/contract/tools.json', 'contract'),
-           ('<工作区>/Documents/agent-ctl/src/agentctl/widget.py', '_selftest_src'),
+    datas=[(_R('contract/tools.json'), 'contract'),
+           (_R('src/agentctl/widget.py'), '_selftest_src'),
            # ★ B 项（2026-10-05）：OCR 的 PowerShell 兜底脚本必须**随包走**。
-           #   原来 clock.py 写死了本机路径 F:\..._ctl_recon\WinOcrProbe.ps1，
+           #   原来 clock.py 写死了本机路径 <工作区>\_ctl_recon\WinOcrProbe.ps1，
            #   而这个文件根本没进包 —— 装出来的 exe 那条兜底路是死的。
            #   现在 clock.py 按 _MEIPASS\ocr\ 解析，spec 这里把它放进去，两边对上。
-           ('<工作区>/Documents/agent-ctl/ocr/WinOcrProbe.ps1', 'ocr'),
+           (_R('ocr/WinOcrProbe.ps1'), 'ocr'),
            # ★ P2（2026-10-16）：动作面异常刹车的**阈值文件**必须随包走。
            #   action_guard.py 按「模块旁边的 json」找它 ⇒ 放 agentctl/ 目录，
            #   与冻结态 __file__ 落在 _MEIPASS\agentctl\ 对上。
            #   不带的话装出来的 exe 只能吃代码里的兜底值 ⇒ 用户改阈值改不动。
-           ('<工作区>/Documents/agent-ctl/src/agentctl/action_guard_policy.json', 'agentctl')],
+           (_R('src/agentctl/action_guard_policy.json'), 'agentctl')],
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
