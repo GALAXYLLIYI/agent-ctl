@@ -2,14 +2,18 @@
 """brake.py —— 电脑控制的第 3 步：急停（刹车）
 
 两条通道，任一生效即停：
-  1) 全局热键 Ctrl+Alt+Home（常驻监听，`--daemon`）
+  1) 全局热键 Ctrl+Alt+Home —— 常驻监听**已迁新线**（`brake-daemon`，带弹窗）；
+     老线 `brake.py --daemon` **已退役**：只打印去向并 rc=2，不再常驻。
   2) 急停文件存在（桌面「急停（双击）.bat」建、 「恢复（双击）.bat」删）
 
 **存在即停，必须留痕**：建文件时写入时间与来源，谁拉的手刹要查得到。
 所有控制脚本在动手前必须先问 `brake.released()`，不 released 就不许动。
 
 用法：
-  python brake.py --daemon        # 常驻监听热键（建议开机后手动起，不注册自启）
+  python brake.py --daemon        # ❌ 已退役：只打印去向 + rc=2，不再常驻监听
+  # 新线入口（带弹窗，拉闸时看得见）：
+  #   python -X utf8 src\agentctl_main.py brake-daemon
+  #   AgentCtl.exe brake-daemon
   python brake.py stop --why "桌面 bat"    # 拉手刹
   python brake.py release         # 松手刹（删文件，需人工再点一次授权才能继续控制）
   python brake.py status          # 看当前状态
@@ -93,37 +97,58 @@ def release(by="人工"):
 
 
 def daemon():
-    """常驻：注册全局热键，按下即拉刹车。"""
-    if not user32.RegisterHotKey(None, 1, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, VK_HOME):
-        err = ctypes.get_last_error() if hasattr(ctypes, "get_last_error") else 0
-        log(f"❌ 热键 Ctrl+Alt+Home 注册失败（可能被别的程序占了）——"
-            f"按准则：热键不可用就不许进入 B 级以上的控制。err={err}")
-        return 2
-    log("✅ 急停热键已注册：Ctrl+Alt+Home（按下即刹车，留痕到 "
-        f"{FLAG}）")
-    log(f"当前刹车状态：{'已拉下' if engaged() else '松开'}")
-    prev = engaged()
-    msg = wt.MSG()
-    last_poll = 0.0
-    while True:
-        # 有消息就处理（阻塞等待，不空转），超时 0.5 秒回来顺手看一眼文件状态
-        r = user32.MsgWaitForMultipleObjects(0, None, False, 500, 0x04FF)  # QS_ALLINPUT
-        if r == 0:
-            while user32.PeekMessageW(ctypes.byref(msg), None, 0, 0, 1):
-                if msg.message == WM_HOTKEY:
-                    stop(why="全局热键 Ctrl+Alt+Home")
-                    prev = engaged()      # 自己动的手也要同步，否则留痕里冒出假的"文件被人动过"
-                user32.TranslateMessage(ctypes.byref(msg))
-                user32.DispatchMessageW(ctypes.byref(msg))
-        now = time.time()
-        if now - last_poll >= 2:
-            last_poll = now
-            cur = engaged()
-            if cur != prev:
-                log(f"刹车状态变化：{'拉下' if cur else '松开'}（外部通道：桌面 bat 或命令行，非热键）")
-                prev = cur
-    return 0
+    """老线常驻热键 —— **已退役**（窗Q2 · 2026-10-16）。
 
+    为什么退役，而不是「在老线补一个弹窗继续跑」：
+      · 原来这个函数注册热键、按下即写急停文件，**全程没有任何用户可见输出** ——
+        用户照旧文档 / 旧横幅起 daemon 之后，屏幕上什么都不会出现，真出事时只能靠猜。
+        「以为看得见，其实看不见」比没有刹车更危险。
+      · 弹窗能力已经落在新线 agentctl.brake_daemon（那才是唯一一份实现）。
+        在老线再接一份 = 第三份并行副本，正是本仓反复出病的形状；
+        而且 legacy_tools 必须能独立打包，不能反过来依赖新线。
+
+    现在它只做一件事：大声说出「我退役了、去哪起」，并 **rc=2**。
+    rc=2 是硬要求 —— 返回 0 等于告诉调用方「一切正常」，那比静默更坏。
+
+    ★ 函数名**故意保留**：guardian.ensure_brake() 会 Popen 本脚本的 --daemon，
+      别处也可能 from brake import daemon。保留名字，它们拿到的是 rc=2（可见失败）；
+      改名 / 删函数，它们拿到的是 AttributeError（静默到下一层才炸）。
+
+    ★ 模块顶部的 time / ctypes.wintypes / MOD_* / VK_HOME / WM_HOTKEY / user32
+      **有意保留**：退役后确实没人用了，但 pack_dist 的 pyflakes 门槛把
+      imported-but-unused 归在「提醒」级（不拦发包），留着零风险、删了多一处回归面。
+
+    stop / release / status **不受影响**，继续可用（桌面 bat 与受控演练脚本在用）。
+    """
+    notice = (
+        "\n"
+        "================================================================\n"
+        "  老线 brake.py --daemon 已退役（2026-10-16）\n"
+        "\n"
+        "  它不再注册热键、也不再常驻。原因很直白：它全程没有任何可见输出 ——\n"
+        "  按旧文档起 daemon，屏幕上什么都不会出现，真出事时只能靠猜。\n"
+        "\n"
+        "  请改用新线常驻热键（带弹窗，拉闸时看得见）：\n"
+        "      python -X utf8 src\\agentctl_main.py brake-daemon\n"
+        "      AgentCtl.exe brake-daemon\n"
+        "\n"
+        "  手工通道不受影响，仍然可用：\n"
+        "      python brake.py stop --why \"原因\"\n"
+        "      python brake.py release\n"
+        "      python brake.py status\n"
+        "================================================================"
+    )
+    try:
+        print(notice, file=sys.stderr, flush=True)
+    except Exception:
+        pass
+    try:
+        log("❌ brake.py --daemon 已退役：拒绝常驻监听（rc=2）—— 请改用新线 brake-daemon")
+    except Exception:
+        # ★ 留痕失败**绝不能**把「响亮拒绝」降级成 traceback + rc=1。
+        #   拒绝永远优先于留痕（与 gate.py 的 fail-safe 同一形状）。
+        pass
+    return 2
 
 def main():
     ap = argparse.ArgumentParser()

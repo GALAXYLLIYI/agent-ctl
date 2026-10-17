@@ -228,7 +228,7 @@ def _dpi_report(hwnd=None):
     return "\n      ".join(lines)
 
 
-def _tell_next(rc, why, hwnd=None, extra=None):
+def _tell_next(rc, why, hwnd=None, extra=None, tip=None):
     """非零 rc 的统一出口：打印「现象」+「下一步」。返回 rc（便于 `return _tell_next(...)`）。
 
     刻意**不做成异常**：act.py 的既有契约是"返回错误码"（drill / DSH 都按 rc 分支），
@@ -237,7 +237,10 @@ def _tell_next(rc, why, hwnd=None, extra=None):
     lines = ["⛔ rc=%d：%s" % (rc, why)]
     if extra:
         lines.append("   " + str(extra))
-    tip = NEXT_STEP.get(rc)
+    # tip 允许调用方自带建议（2026-10-16 窗K 加）：同一个 rc 在本仓可能对应两种
+   # 语义（rc=7 早被「文档非空防污染护栏」占着，本单又用它表示「终端待人工确认」），
+   # 光按 rc 查表会把驴唇不对马嘴的建议打出来。由调用方显式传 tip 就没这个问题。
+    tip = tip if tip is not None else NEXT_STEP.get(rc)
     if tip:
         try:
             lines.append("   ↪ 下一步：\n      " + tip(hwnd))
@@ -576,7 +579,347 @@ WHITELIST = _load_whitelist()
 # ⚠️ 2026-10-12：同一天应用白名单被废止，**唯独这一条不能跟着删**。
 # 它让控制系统无法操作使用者自己的授权弹窗，是唯一的**防自授权**闸门：
 # 删掉它，agent 就能点掉自己的授权框给自己放行，闸门系统形同虚设。
-BLOCKED_TITLES = ("DSH电脑控制授权",)
+#
+# ⚠️ 2026-10-16（窗I）加第二条「AgentCtl 急停」—— 与上面**同源**，所以不能只写一句：
+#   急停拉下时会弹一张**桌面置顶**的告警窗（新线 src\agentctl\brake_popup.py），
+#   上面写着「是谁在动 / 它的 MCP 链接 / 怎么恢复」。
+#   那张窗是**安全提示**，不是提示性装饰 —— 一旦 agent 能点掉它、或用自己的窗口
+#   把它压在下面，用户就永远看不见「车已经被停住了」，而急停的**唯一价值恰恰
+#   就在于「一定会被看见」**。
+#   更要紧的一条：那张窗是 agent 唯一能拿到「自己是谁」的出口（actor + MCP 段名）；
+#   盖住它 = 让出事前自证的路。所以它和授权弹窗属于同一类：**不许被本系统触碰**。
+#   判据：tests\_急停弹窗判据.py 第 6 条按字面查这一行，改了就红。
+#
+#   按**标题子串**拦（下面 check_target 判的是 `b in i["title"]`），所以登记的是
+#   稳定短键而不是整条标题 —— 整条标题里那个 ⛔ 是 emoji，改文案不该连带改闸门。
+#   窗口**类名**是 tkinter 的 TkTopLevel（与本进程所有 Tk 顶层窗共用，改它会波及
+#   同进程别的窗），所以这里只能按标题拦 —— 这一点写清楚，免得后人以为漏了。
+#
+# ⚠️⚠️ 2026-10-16 同步提醒（本仓库这一份**不是生效的那份**，见本目录 README）：
+#   生效的老线真源是 <工作区>\Documents\dsh-viewer-plugin\tools\act.py，
+#   打包也从那里现场生成（tools\gen_legacy.py 的 SRC 常量）。
+#   **那一份必须同步加上同样的 "AgentCtl 急停"**，否则这条硬约束在运行时是空的。
+BLOCKED_TITLES = (
+    "DSH电脑控制授权",
+    "AgentCtl 急停",
+)
+
+# ⚠️ 2026-10-16（窗I）新增：**按类名**也拦一条。
+#   为什么要类名这一层：BLOCKED_TITLES 判的是**标题子串**，标题是可以被改的 ——
+#   改一次标题就绕过去了。而这张急停窗的类名是它自己注册的（AgentCtlBrakePopup），
+#   **不随标题变**，所以多这一层不多花什么，却堵掉了「改标题绕过」这条路。
+#   判据：tests\_急停弹窗判据.py 第 6b 条按字面查这一行，改了就红。
+#
+# ⚠️⚠️ 同上：本仓库这一份**不是生效的那份**（见本目录 README）。
+#   生效的老线真源是 <工作区>\Documents\dsh-viewer-plugin\tools\act.py，
+#   打包也从那里现场生成。两处都要有，否则这一层是空的。
+BLOCKED_CLASSES = (
+    "AgentCtlBrakePopup",
+)
+
+# ═════════ 2026-10-16（窗K · P0）自指保护判据：标题 → **身份优先 + 三重匹配** ═════════
+# 为什么要升级（派单原话）：上面 BLOCKED_TITLES 自己在注释里写着「唯一的防自授权闸门」，
+# 而它只认**一个标题字符串**。标题是最容易被改的一层 —— 改一个字、换一种语言、
+# 换个弹窗形态，或者干脆**躲进终端里手打命令**，这道闸门就漏。
+# 「agent 点掉自己的授权框给自己放行」正是这里要防的头号情形，所以判据必须落在
+# **改不掉的东西**上：**属主进程身份**。
+#
+# 三层判据（check_target 里依次判，任一命中即拒）：
+#   ① **属主进程名**（GetWindowThreadProcessId → pid → 进程名）—— 身份优先，本层为主；
+#   ② **窗口类名**（GetClassNameW）—— 进程名读不到、或进程名变了时的第二道；
+#   ③ **窗口标题** —— BLOCKED_TITLES 原样保留作**兜底**，一个字没删、没挪。
+#
+# ⚠️ 下面这些进程名与类名是**实跑测出来的**，不是照抄文档（原始输出见回执
+#    work\_2h_wK\回执.md 与 work\_2h_wK\probe_*.py）：
+#   · cmd.exe 开的新控制台：类名 ConsoleWindowClass。属主**大多数时候**是 cmd.exe，
+#     但只要控制台里前台跑起别的程序，那张窗的属主就**变成那个程序** ——
+#     实测：cmd.exe /k 里跑 ping，属主读出来是 PING.EXE。
+#     ⇒ 进程层与类名层**必须都有**，少任何一层都会漏。这是本判据存在的第一理由。
+#   · python.exe 自己建的窗，属主进程名读出来就是 python.exe
+#     ⇒ 授权弹窗那一栏用进程名判（派单要求「别猜，去跑一遍确认」，跑出来的就是这个）。
+#   · conhost.exe 名下实测到两张窗：UAC Input Indicator / UAC_InputIndicatorOverlayWnd
+#     （UAC 提示的输入指示器）。**它们不是 ConsoleWindowClass** ⇒ 只认类名会漏，
+#     这也是进程层必须保留 conhost.exe 的原因。
+#   · Windows Terminal 本机**没装**（实测 System32\wt.exe 不存在）
+#     ⇒ 那两行是预防性登记，本轮**没有实测数据**，不拿「实测」二字糊弄人。
+#   · ⚠️ 授权弹窗的**类名**（tkinter 的 TkTopLevel）在本轮**没能实测** ——
+#     这台机器上 Python 的 Tcl 组件装坏了（_tkinter.TclError: 找不到 init.tcl），
+#     auth_popup 那个 tk 弹窗根本起不来。TkTopLevel 这条是**照本文件上方那段旧记述**
+#     登记的（见「AgentCtl 急停」注释里关于窗口类名的那几行），不是本轮实测。
+
+# ① 属主进程名 · **硬拒**（永远不给临时放行，理由见下面的 _deny_owner）
+BLOCKED_PROCESSES_HARD = (
+    # 实测：本机 auth_popup.py 由 core.py 用 python 子进程拉起，tk.Tk 建的窗属主就是这个
+    # 解释器。把它列进来 = 「凡是 Python 进程自己拥有的窗口，一律不许被本系统触碰」。
+    # ★ 这条网织得**故意粗**：用户自己写的 Python GUI 也会被一起拦下。这是选安全侧的取舍 ——
+    #   粗网漏不掉自授权，窄网漏。收窄成「python.exe + TkTopLevel 类名」需要用户拍板。
+    "python.exe",
+    # ★ 冻结打包态的同一个解释器：core.py 的 _py_argv 走 [sys.executable, ...]，
+    #   打包后 sys.executable 就是 AgentCtl.exe —— 授权弹窗与急停弹窗的属主
+    #   在发行态会读成这个名字。本轮实测跑的是源码态（读出 python.exe），
+    #   这一行是**照 core.py:450 推出来的**，不是实测，别当成实测数据。
+    #   就算它错了也不致命：TkTopLevel / AgentCtlBrakePopup 两层类名仍在后面兜着。
+    "agentctl.exe",
+    "consent.exe",         # UAC 提权确认框：点它 = 直接把权限给了
+    "SystemSettings.exe",  # 系统安全设置页：改的就是权限本身
+)
+
+# ① 属主进程名 · **终端**（双刃剑）：默认拒，但允许「人确认过的 30 分钟临时放行」
+BLOCKED_PROCESSES_TERMINAL = (
+    "cmd.exe", "powershell.exe", "pwsh.exe", "conhost.exe",
+    "wt.exe", "WindowsTerminal.exe", "OpenConsole.exe",
+)
+
+# ② 窗口类名 · 硬拒（在 BLOCKED_CLASSES 之外补的；TkTopLevel 即 tkinter 顶层窗）
+BLOCKED_CLASSES_HARD_EXTRA = (
+    "TkTopLevel",
+)
+
+# ② 窗口类名 · 终端（ConsoleWindowClass 与两张 UAC 指示器为实测；CASCADIA 为预防）
+BLOCKED_CLASSES_TERMINAL = (
+    "ConsoleWindowClass",             # 实测：cmd / powershell 的控制台窗
+    "CASCADIA_HOSTING_WINDOW_CLASS",  # Windows Terminal（本机未装，预防性登记）
+    "UAC Input Indicator",            # 实测：conhost 名下
+    "UAC_InputIndicatorOverlayWnd",   # 实测：conhost 名下
+)
+
+# 类名硬拒的合集（既有 BLOCKED_CLASSES + 本轮新增）。单独起名是为了
+# **一个字都不动 BLOCKED_CLASSES 那个字面量** —— wI 判据第 ⑥ 条是按字面读它的。
+BLOCKED_CLASSES_HARD_ALL = BLOCKED_CLASSES + BLOCKED_CLASSES_HARD_EXTRA
+
+# 属主进程名统一小写后比较：Windows 上进程名**大小写随映像头而定**（实测同一台机器上
+#   读出过 cmd.exe 与 PING.EXE 两种写法），按 == 精确比大小写等于给自己埋一个漏。
+BLOCKED_PROCESSES_HARD_LC = tuple(p.lower() for p in BLOCKED_PROCESSES_HARD)
+BLOCKED_PROCESSES_TERMINAL_LC = tuple(p.lower() for p in BLOCKED_PROCESSES_TERMINAL)
+
+# ── 终端的 30 分钟临时放行（复用 code 7 那套「问一次、管 30 分钟」的机制）────────
+# ★ 为什么终端不能一刀切永久封：终端是**双刃剑**。拦住它能防「躲进终端手打命令绕闸门」，
+#   但用户有时**就是要**让助手在终端里跑一句。所以做成
+#   **默认拒 + 需人当场确认的 30 分钟临时放行**，而且：
+#     · 按 **(进程, 类名)** 记，不是永久白名单（进程重开即失效，类名不同也不认）；
+#     · 时长**硬上限 30 分钟**（TERMINAL_PASS_MAX_MIN），给再大的参数也压回来；
+#     · 签发与拒签都**写事件**（_auth/terminal_pass.jsonl，一行一条 JSON），事后查得到；
+#     · 授权弹窗 / UAC / 系统设置那一族**根本没有这条通路**（approve 明确拒签）——
+#       否则「agent 自己给自己开一张通行证」就等于把这道闸门整个拆了。
+AUTHDIR = os.path.join(HERE, "_auth")
+TERMINAL_PASS_MAX_MIN = 30
+# 这两个路径给判据留了覆盖口（与 wI 判据用 AGENTCTL_TIMELINE 同一路子）：
+# 判据把状态写到自己的临时目录，绝不碰真机的放行记录。
+TERMINAL_PASS_FILE = os.environ.get("AGENTCTL_TERMINAL_PASS_FILE") or os.path.join(
+    AUTHDIR, "terminal_pass.json")
+TERMINAL_PASS_LOG = os.environ.get("AGENTCTL_TERMINAL_PASS_LOG") or (
+    TERMINAL_PASS_FILE + ".jsonl")
+
+
+def _pass_now(now=None):
+    return float(time.time() if now is None else now)
+
+
+def _hhmmss(t):
+    return datetime.datetime.fromtimestamp(float(t)).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _pass_alive(p, t):
+    try:
+        return float(p.get("expires_at") or 0) > t
+    except (TypeError, ValueError):
+        return False
+
+
+def _read_passes():
+    """读放行记录。**读不出来一律当作「没有记录」**（fail-closed：状态不明即不认）。"""
+    try:
+        with open(TERMINAL_PASS_FILE, encoding="utf-8") as f:
+            obj = json.load(f)
+        ps = obj.get("passes") if isinstance(obj, dict) else None
+        return ps if isinstance(ps, list) else []
+    except FileNotFoundError:
+        return []
+    except Exception as e:
+        log("⚠️ 终端放行记录读不出来（%s: %s）—— 按**没有放行**处理（fail-closed）"
+            % (type(e).__name__, e))
+        return []
+
+
+def _write_passes(passes):
+    """原子写。与 auth_popup / gate 共用同一把跨进程锁与同一个 save_json
+    （gate_lock 是本仓这三侧的**唯一定义处**，不许在这里复制一份锁逻辑过去）。"""
+    import gate_lock
+    with gate_lock.exclusive(os.path.dirname(TERMINAL_PASS_FILE) or AUTHDIR):
+        gate_lock.save_json(TERMINAL_PASS_FILE, {"v": 1, "passes": passes})
+
+
+def terminal_pass_ok(process, class_, now=None):
+    """这个 (进程, 类名) 现在有没有**没过期的**临时放行。返回 (bool, 说明)。"""
+    t = _pass_now(now)
+    proc = (process or "").strip().lower()
+    cls = (class_ or "").strip()
+    if not proc:
+        return False, "属主进程名读不到，没有可核对的放行身份"
+    for p in _read_passes():
+        if (p.get("process") or "").strip().lower() != proc:
+            continue
+        if (p.get("class") or "").strip() != cls:
+            continue
+        try:
+            exp = float(p.get("expires_at") or 0)
+        except (TypeError, ValueError):
+            continue
+        if exp > t:
+            left = int(round((exp - t) / 60.0))
+            return True, ("命中用户确认过的临时放行：%s/%s，还剩约 %d 分钟（%s 到期）"
+                          % (proc, cls or "(空)", left, p.get("expires_at_h") or "?"))
+    return False, ""
+
+
+def _pass_event(kind, process, class_, **extra):
+    """写一条事件。**放行本身必须留痕** —— 没有事件，
+    「谁在什么时候让助手碰了终端」就成了一件查不出来的事。"""
+    try:
+        import getpass
+        user = getpass.getuser()
+    except Exception:
+        user = "?"
+    rec = {"ts": datetime.datetime.now().isoformat(timespec="seconds"),
+           "event": kind, "process": process, "class": class_,
+           "user": user, "pid": os.getpid()}
+    rec.update(extra)
+    try:
+        d = os.path.dirname(TERMINAL_PASS_LOG)
+        if d:
+            os.makedirs(d, exist_ok=True)
+        with open(TERMINAL_PASS_LOG, "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except Exception as e:
+        log("⚠️ 事件写不下去（%s: %s）—— 本次放行**照常生效**，但事后查不到，"
+            "这一条要人工补记" % (type(e).__name__, e))
+    return rec
+
+
+def grant_terminal_pass(process, class_, minutes=TERMINAL_PASS_MAX_MIN, now=None):
+    """给 (进程, 类名) 记一条临时放行。返回 (成功?, 说明)。
+
+    ★ 只对**终端族**开放。授权弹窗 / UAC / 系统设置那一族一律拒签 ——
+      理由写在上面那段注释里：给它们开这张证，等于让 agent 自己给自己发通行证，
+      这道闸门就没有意义了。
+    """
+    proc = (process or "").strip()
+    cls = (class_ or "").strip()
+    pl = proc.lower()
+    is_term = pl in BLOCKED_PROCESSES_TERMINAL_LC or cls in BLOCKED_CLASSES_TERMINAL
+    if not is_term:
+        why = ("%s/%s 不属于终端族 —— 临时放行**只对终端开放**。"
+               "授权弹窗、UAC、系统设置这些窗永远不许被本系统碰，"
+               "这里是最后一道不签字的地方。" % (proc, cls))
+        _pass_event("terminal_pass_refused", proc, cls, reason=why)
+        return False, why
+    mins = max(1, min(int(minutes or TERMINAL_PASS_MAX_MIN), TERMINAL_PASS_MAX_MIN))
+    t = _pass_now(now)
+    exp = t + mins * 60
+    rec = {"process": pl, "class": cls,
+           "granted_at": _hhmmss(t), "expires_at_h": _hhmmss(exp),
+           "expires_at": exp, "minutes": mins}
+    passes = [p for p in _read_passes() if _pass_alive(p, t)]
+    passes = [p for p in passes
+              if not (p.get("process") == pl and (p.get("class") or "") == cls)]
+    passes.append(rec)
+    _write_passes(passes)
+    _pass_event("terminal_pass_granted", pl, cls, minutes=mins,
+                expires_at_h=rec["expires_at_h"],
+                reason="用户当场确认（code 7 弹窗）")
+    log("🔓 终端临时放行 %d 分钟：%s / %s —— 只在这一对身份上、到点自动失效，不是白名单"
+        % (mins, pl, cls))
+    return True, "已记 %d 分钟临时放行：%s / %s（到 %s 自动失效）" % (
+        mins, pl, cls, rec["expires_at_h"])
+
+
+# ── 拒绝的两类出口：rc 决定「硬拒」还是「要问用户」────────────────────────
+# 硬拒（授权弹窗 / 急停窗 / UAC / 系统设置）→ rc=3，与改动前一致。
+# 终端默认拒 → **rc=7**：复用 code 7 那条「这个窗口用户还没点头，去问一声」的通路
+#   （core.py 的 _map_rc 把 rc=7 映成 CODE_NEEDS_ASK，随后弹窗问用户本人；
+#    用户同意 → act.py approve → 记 30 分钟放行 → 原样重试一次）。
+#   为什么不给它 3：3 在契约里的意思是「白名单/敏感窗口拒绝」，是**死路一条**；
+#   终端不是死路 —— 用户点个头就能过。给 3 等于把一条正常的人机协作通路堵死。
+#
+# ⚠️ 一处**已知的老撞车**（本轮没资格改，如实记下）：act.py 的 rc=7 早被
+#   「文档非空防污染护栏」（do_type，act.py 里那处 _tell_next(7, ...)）占着，
+#   而 core.py 把 rc=7 一律映成 CODE_NEEDS_ASK ⇒ 打字的防污染护栏会**误触发**
+#   一次授权弹窗。这是改动前就有的老账，不在本单范围内（不许改闸门判定逻辑）。
+#   本单因此给「问用户」这件事加了标记前缀（_TERMINAL_ASK_MARK）而不是只看 rc，
+#   至少本单这一路的**提示语**是对的、不会打出防污染护栏那段驴唇不对马嘴的建议。
+TERMINAL_ASK_RC = 7
+_TERMINAL_ASK_MARK = "〔终端·待人工确认〕"
+
+
+def _is_terminal_ask(why):
+    return bool(why) and str(why).startswith(_TERMINAL_ASK_MARK)
+
+
+def _tell_deny(why, hwnd=None, extra=None):
+    """check_target 的拒绝统一出口：终端类走 rc=7，其余走 rc=3。"""
+    if _is_terminal_ask(why):
+        return _tell_next(TERMINAL_ASK_RC, why, hwnd, extra=extra, tip=lambda h: (
+            "目标是**终端窗口**，默认禁 —— 终端能绕开一切闸门，所以不许碰。\n"
+            "  ★ 但它不是死路：平台会弹窗问用户本人，要不要让助手在这个终端里跑一句；\n"
+            "    用户当场同意 → 按 (进程, 类名) 记 **30 分钟**临时放行"
+            "（写事件、到点自动失效）→ 这次任务里就能正常操作。\n"
+            "  ⛔ 别绕道：换别的手段去动那个窗口，等于把闸门当没设。\n"
+            "  先确认自己打的是哪个窗口：python -X utf8 win_list.py <关键词>"))
+    return _tell_next(3, why, hwnd, extra=extra)
+
+
+def _owner_lc(info):
+    return (info.get("process") or "").strip().lower()
+
+
+def _deny_owner(info):
+    """① 属主进程身份这一层。返回拒绝原因（None = 本层没拦）。"""
+    p = _owner_lc(info)
+    if not p or p == "?":
+        # 读不到属主（提权窗口 / psutil 读不到）**不许当成命中** —— 那会把所有提权
+        # 窗口一起打死，代价远大于收益。但也**不许当成安全**：这一层判空这件事
+        # 得让人看得见，所以由调用方把它打进日志，而不是假装判过了。
+        return None
+    if p in BLOCKED_PROCESSES_HARD_LC:
+        if (info.get("class") or "") == "AgentCtlBrakePopup":
+            return ("急停置顶告警窗（谁在动 / 怎么恢复），任何动作一律禁止"
+                    "〔属主进程 %s〕" % info.get("process"))
+        return ("要操作窗口属主进程是 **%s** —— 本机的授权弹窗、UAC 提权框、"
+                "系统安全设置页都长这样（实测 auth_popup 的属主就是 python.exe）。"
+                "这套命令存在的意义就是**不许助手碰这一族窗口**：碰了它，"
+                "agent 就能自己点掉授权框、自己给自己放行。⛔ 不要绕道。"
+                % info.get("process"))
+    if p in BLOCKED_PROCESSES_TERMINAL_LC:
+        return (_TERMINAL_ASK_MARK +
+                "要操作窗口是**终端**（属主进程 %s / 窗口类名 %s）—— 终端默认禁："
+                "它是双刃剑，躲进去就能手打命令绕开一切闸门。"
+                "但用户有时就是要让助手在终端里跑一句，所以这里**不写死**："
+                "交回上层弹窗问用户本人，当场同意后按 (进程, 类名) 记一条 30 分钟"
+                "临时放行（写事件、到点自动失效），之后这一路才放行。"
+                "⛔ 不要绕道用别的手段去动那个窗口。"
+                % (info.get("process"), info.get("class")))
+    return None
+
+
+def _deny_class(info):
+    """② 窗口类名这一层（进程层之外的第二道）。返回拒绝原因或 None。"""
+    cls = (info.get("class") or "").strip()
+    if not cls:
+        return None
+    if cls in BLOCKED_CLASSES_HARD_ALL:
+        if cls == "AgentCtlBrakePopup":
+            return "这是急停置顶告警窗（谁在动 / 怎么恢复），任何动作一律禁止"
+        return ("要操作窗口的类名是 **%s**（tkinter 顶层窗）—— 授权弹窗就属于这一族，"
+                "任何动作一律禁止。⛔ 不要绕道。" % cls)
+    if cls in BLOCKED_CLASSES_TERMINAL:
+        return (_TERMINAL_ASK_MARK +
+                "要操作窗口的类名是 **%s**（终端窗）—— 终端默认禁：躲进去就能手打命令"
+                "绕开一切闸门。属主进程这次读出来是 %s，但**类名这一层不依赖进程名**："
+                "实测 cmd.exe 里前台跑起别的程序后，那张控制台窗的属主就会变成那个"
+                "程序（实测读到 PING.EXE），只认进程名会漏。用户当场确认后可按"
+                "(进程, 类名) 记 30 分钟临时放行。⛔ 不要绕道。"
+                % (cls, info.get("process")))
+    return None
 
 user32 = ctypes.windll.user32
 
@@ -900,15 +1243,53 @@ def check_target(hwnd):
       废止前的 14 条连同 why 全文留档在同目录 whitelist.已撤销.json ——
       那些 why 记的是**使用者当时亲手划的操作边界**，属于决定记录而不是配置，删了就没了。
 
-    ⚠️ 下面 BLOCKED_TITLES 那一行**不在这条废止范围内**，也**绝不能**跟着白名单一起删：
-      它禁止控制系统去操作使用者自己的授权弹窗（标题 DSH电脑控制授权）。
-      没有它，agent 就能点掉自己的授权框给自己放行 —— 那是唯一的防自授权闸门。
+    ⚠️ 下面那三层自指保护**不在这条废止范围内**，也**绝不能**跟着白名单一起删：
+      它们禁止控制系统去操作使用者自己的授权弹窗、UAC 框、系统设置页。
+      没有它们，agent 就能点掉自己的授权框给自己放行 —— 那是唯一的防自授权闸门。
+
+    ★ 2026-10-16（窗K · P0）三层判据，顺序即优先级：
+         ① 属主进程名  —— 身份优先（_deny_owner）。**主判据**。
+         ② 窗口类名    —— _deny_class。进程名会变（实测控制台属主会变成前台那条命令），
+                          类名不会，所以它是第二道，也是唯一能盖住「进程名变了」那路的。
+         ③ 窗口标题    —— 下面两行 BLOCKED_TITLES / BLOCKED_CLASSES，**兜底，一个字没删**。
+      顺序为什么这么排：身份改不动，类名次之，标题最容易改 —— 所以先问身份，
+      别让「标题碰巧对上了」冒充「身份核对过了」。
+      终端那一族额外有一条**人确认过的 30 分钟临时放行**（terminal_pass_ok）：
+      默认拦，但用户当场点头后按 (进程, 类名) 放行 30 分钟、写事件、到点自动失效。
+      授权弹窗那一族**没有**这条通路（grant_terminal_pass 拒签）。
     """
     i = win_info(hwnd)
     if not i["title"] and not i["class"]:
         return i, f"句柄 {hwnd} 不是有效窗口"
+    # ① 属主进程身份（读不到属主时这一层判空，如实记账，见 _deny_owner 注释）
+    _own = _deny_owner(i)
+    if _own and not _is_terminal_ask(_own):
+        return i, _own
+    # ② 窗口类名
+    _cls = _deny_class(i)
+    if _cls and not _is_terminal_ask(_cls):
+        return i, _cls
+    # ── 到这里说明 ①/② 有一层命中了**终端族** ──
+    #   终端是双刃剑，所以**默认拦、但不写死**：先看有没有「用户当场确认过的
+    #   30 分钟临时放行」，有就只放这一对 (进程, 类名)，到点自动失效；没有就拒。
+    #   ⚠️ 授权弹窗 / UAC / 系统设置**走不到这里** —— 上面两层的硬拒已经先返回了。
+    if _own or _cls:
+        ok, why_ok = terminal_pass_ok(i.get("process"), i.get("class"))
+        if not ok:
+            return i, _own or _cls
+        log("🔓 终端临时放行生效，放行这一路：%s / %s（%s）"
+            % (i.get("process"), i.get("class"), why_ok))
+    # 进程层判空的记账：属主进程名读不到（提权窗口常见）时，**如实说这一层没判成**，
+   # 不许让它悄悄变成「查过了，安全」。类名层与标题层照常兜底。
+    if not _owner_lc(i) or _owner_lc(i) == "?":
+        log("⚠️ 目标 hwnd=%s 的属主进程名读不到 —— 身份层**没判成**（类名/标题层照常兜底）"
+            % hwnd)
+    # ③ 窗口标题（兜底，两行原样保留）
     if any(b in i["title"] for b in BLOCKED_TITLES):
         return i, "这是用户的授权弹窗（正在输密钥），任何动作一律禁止"
+    if any(b == i["class"] for b in BLOCKED_CLASSES):
+        # 精确相等，不做子串 —— 类名是我们自己注册的短名，子串匹配只会误伤。
+        return i, "这是急停置顶告警窗（谁在动 / 怎么恢复），任何动作一律禁止"
     return i, None
 
 
@@ -1527,7 +1908,7 @@ def do_keys(hwnd, vk=0x41, ctrl=False, times=1, dry=False, wait=0.06, scan_code=
     """
     info, why = check_target(hwnd)
     if why:
-        return _tell_next(3, why, hwnd, extra="（按键动作 vk=0x%X）" % vk)
+        return _tell_deny(why, hwnd, extra="（按键动作 vk=0x%X）" % vk)
     # 模态对话框前置检查（2026-10-12 补，C6）：与 click/fill/scroll/type 同一道闸。
     #   位置与它们一致：**在 gate.require 与任何输入合成之前** —— 被挡就返回 6，
     #   不消耗证/额度，也绝不做出"看着成功其实无效"的按键。
@@ -1582,7 +1963,7 @@ def do_fill(hwnd, xy, text, dry=False, clear=True):
     """
     info, why = check_target(hwnd)
     if why:
-        return _tell_next(3, why, hwnd, extra="（填字段动作）")
+        return _tell_deny(why, hwnd, extra="（填字段动作）")
     _mb = require_no_modal(hwnd, "填字段")
     if _mb:
         return _mb
@@ -1678,7 +2059,14 @@ def do_click(hwnd, name=None, xy=None, dry=False, force_coord=False, retry=1,
     """
     info, why = check_target(hwnd)
     if why:
-        return _tell_next(3, why, hwnd, extra="（点击动作 %s）" % (name or xy))
+        # ⚠️ 2026-10-16（窗K）顺手修一个**改动前就有的崩**：原来这行是
+        #    extra="（点击动作 %s）" % (name or xy)，而 --xy 进来是个**元组**
+        #    （(10, 10)），于是只要「按 xy 点击 + 被 check_target 拒」就抛
+        #    TypeError: not all arguments converted —— 拒绝原因直接丢掉、退出码变 1。
+        #    平时碰不到是因为白名单废止后 check_target 几乎不拒；本单把终端接了进来，
+        #    这条**每次拒终端点击都会走**，不修就等于闸门在关键路径上崩给你看。
+        _what = name or ("%s,%s" % xy if xy else "?")
+        return _tell_deny(why, hwnd, extra="（点击动作 %s）" % _what)
     # 模态对话框前置检查（2026-09-18 新增）：被挡就拒绝，别做出"看着成功其实无效"的动作
     _mb = require_no_modal(hwnd, "点击")
     if _mb:
@@ -1892,7 +2280,7 @@ def scroll_pct(hwnd):
 def do_scroll(hwnd, amount, dry=False, force_wheel=False):
     info, why = check_target(hwnd)
     if why:
-        return _tell_next(3, why, hwnd, extra="（滚动动作）")
+        return _tell_deny(why, hwnd, extra="（滚动动作）")
     # 模态对话框前置检查（2026-09-18 新增）：被挡就拒绝，别做出"看着成功其实无效"的动作
     _mb = require_no_modal(hwnd, "滚动")
     if _mb:
@@ -2089,7 +2477,7 @@ def do_focus(hwnd, dry=False):
     """把白名单窗口切到前台（打字/拖拽的前置条件）。属于动作，记 B 级。"""
     info, why = check_target(hwnd)
     if why:
-        return _tell_next(3, why, hwnd, extra="（切前台动作）")
+        return _tell_deny(why, hwnd, extra="（切前台动作）")
     try:
         gate.require(gate.B, "切前台")
     except gate.GateDenied as e:
@@ -2143,7 +2531,7 @@ def do_type(hwnd, text, dry=False, allow_if_starts_with=None, force_send=False,
     """
     info, why = check_target(hwnd)
     if why:
-        return _tell_next(3, why, hwnd, extra="（打字动作）")
+        return _tell_deny(why, hwnd, extra="（打字动作）")
     # 模态对话框前置检查（2026-09-18 新增）：被挡就拒绝，别做出"看着成功其实无效"的动作
     _mb = require_no_modal(hwnd, "打字")
     if _mb:
@@ -2225,7 +2613,7 @@ def do_drag(hwnd, frm, to, dry=False):
     """D 级：在文本编辑区里拖拽选字。结果用"读回选中的文本"来核验。"""
     info, why = check_target(hwnd)
     if why:
-        return _tell_next(3, why, hwnd, extra="（拖拽动作）")
+        return _tell_deny(why, hwnd, extra="（拖拽动作）")
     # 模态对话框前置检查（2026-10-12 补，C6）：与 click/fill/scroll/type 同一道闸。
     #   位置与它们一致：**在 gate.require / ensure_foreground / drag() 之前** ——
     #   被挡就返回 6，不消耗证/额度，也不置前、不合成任何鼠标事件。
@@ -2279,7 +2667,8 @@ def main():
         return _selftest_or_die()
     ap = argparse.ArgumentParser()
     ap.add_argument("action", nargs="?",
-                    choices=["targets", "click", "scroll", "focus", "type", "drag", "read", "keys", "fill"],
+                    choices=["targets", "click", "scroll", "focus", "type", "drag", "read",
+                             "keys", "fill", "approve"],
                     help="动作名；纯只读诊断（--snap-check）可不给")
     # ★ --hwnd 从 required 改 nargs="?"：① 的 --snap-check 是**纯文件只读诊断**
     #   （只看快照 json，不碰任何窗口），逼它编一个 --hwnd 是没道理的。
@@ -2291,6 +2680,18 @@ def main():
     ap.add_argument("--text")
     ap.add_argument("--to")
     ap.add_argument("--dry-run", action="store_true")
+    # ── 2026-10-16（窗K · P0）approve：给**终端**记一条 30 分钟临时放行 ──
+    #   ★ 这不是白名单口子，是 code 7 那条「问一次、管 30 分钟」的下半段：
+    #     core.py 的 _ask_then_retry 在用户**于弹窗里当场点了同意**之后，调的就是
+    #     "act.py approve --process X --class Y"（见 core.py:_legacy_approve_target）。
+    #     参数名与那一处**逐字对齐**，改了就接不上。
+    #   ★ 它**只能**给终端族签字：授权弹窗 / UAC / 系统设置一律拒签并留事件。
+    ap.add_argument("--process", help="approve：要放行的属主进程名")
+    ap.add_argument("--class", dest="cls",
+                    help="approve：要放行的窗口类名（与进程名一起构成这一对身份）")
+    ap.add_argument("--minutes", type=int, default=TERMINAL_PASS_MAX_MIN,
+                    help="approve：放行几分钟（硬上限 %d 分钟，给再大也压回来）"
+                         % TERMINAL_PASS_MAX_MIN)
     ap.add_argument("--coord", action="store_true", help="点击：强制走坐标路径（练 SendInput 退路）")
     ap.add_argument("--retry", type=int, default=1,
                     help="点击：页面无变化时自动重试几次（默认 1；**幂等动作才用**，切换类按钮设 0）")
@@ -2330,6 +2731,10 @@ def main():
     #   arguments are required"）。
     if a.snap_check:
         pass
+    elif a.action == "approve":
+        # approve 不碰任何窗口（只往 _auth/terminal_pass.json 记一条 + 写事件），
+        # 所以不逼它编一个 --hwnd —— 与 --snap-check 同理。
+        pass
     elif not a.action:
         return _tell_next(2, "缺动作名（且没给 --snap-check）", a.hwnd)
     elif a.hwnd is None:
@@ -2338,6 +2743,17 @@ def main():
     if (a.post or a.post_force) and a.action != "click":
         print(f"⛔ --post / --post-force 只在 click 上生效：{a.action} 没有「投递一次左键」这回事。")
         return 2
+
+    # ── approve（窗K · P0）：签发终端的 30 分钟临时放行 ──
+    #   放在**任何窗口动作之前**、不碰 gate：它本身不是一次动作，
+    #   而是「用户已经在弹窗里点了同意」之后，把那个同意**落成一条有时限的记录」。
+    if a.action == "approve":
+        ok, why = grant_terminal_pass(a.process or "", a.cls or "", a.minutes)
+        print(("✅ " if ok else "⛔ ") + why)
+        print("   记录文件：%s" % TERMINAL_PASS_FILE)
+        print("   事件文件：%s（签发/拒签都写一行，到点自动失效，无需手工清理）"
+              % TERMINAL_PASS_LOG)
+        return 0 if ok else 3
 
     if a.action == "fill":
         if not a.xy:
@@ -2395,7 +2811,7 @@ def main():
             return 9
         info, why = check_target(a.hwnd)
         if why:
-            return _tell_next(3, why, a.hwnd)
+            return _tell_deny(why, a.hwnd)
         ts, geo = targets(a.hwnd, with_geo=True)
         bands = _bands(a.hwnd, geo)
         if a.compact:

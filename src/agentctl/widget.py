@@ -30,7 +30,11 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 #   **急停形同虚设**。安全机制两边必须读同一个源，
 #   所以这里直接从 gate 拿常量，不再复制一份（复制=迟早会漂）。
 from agentctl.gate import (BRAKE_FLAG, brake_engaged, HOME as TOOLS,   # noqa: E402
-                           AUTHDIR, PASSFILE)
+                           AUTHDIR, PASSFILE, LEASE_DB)
+# ★ P2（2026-10-16）：动作面异常提示的**只读**来源。
+#   和租约一样，面板**读文件**、不问闸门 —— 面板自己 1 fps 刷新绝不能触发任何计数或停机。
+#   这里只显示「刚才有一次一级命中」；真拉了急停的话上面那行「急停」已经是红的了。
+from agentctl import action_guard                                    # noqa: E402
 
 # ★ 面板是**只读挂件**，所以老脚本目录定位不到时它照样得能开窗 ★
 #   理由：面板显示的是「急停有没有拉下」——这是最该让用户随时看得见的东西。
@@ -44,6 +48,7 @@ from agentctl.gate import (BRAKE_FLAG, brake_engaged, HOME as TOOLS,   # noqa: E
 #   GATELOG 保留为旧名（指第一个），兼容外部引用。
 GATELOGS = [os.path.join(AUTHDIR, n) for n in ("gate_agentctl.log", "gate.log")] if AUTHDIR else []
 GATELOG = GATELOGS[0] if GATELOGS else None
+LEASEFILE = LEASE_DB          # 租约状态文件（显示用；只读，不问闸门）
 
 REFRESH_MS = 1000          # 1 fps：够看，不吃资源（手册：两次内存事故的教训）
 
@@ -52,7 +57,7 @@ REFRESH_MS = 1000          # 1 fps：够看，不吃资源（手册：两次内�
 #   说的那版物理尺寸是 **510x321** —— 那是**修 DPI 之前**的版本：
 #   窗口按 340x214 画，然后被 Windows 位图放大 1.5 倍，物理上就变大了，**但字是糊的**。
 #   修好 DPI 后逻辑=物理，想再要那个大小，**得把窗口和字号真的放大**，不是等它被拉大。
-PANEL_W, PANEL_H = 560, 330
+PANEL_W, PANEL_H = 560, 374        # ★ P1：加了「租约」一行（+22px）｜★ P2：加了「异常」一行（再 +22px）
 F_TITLE, F_HEAD, F_ROW, F_FOOT = 15, 14, 13, 11
 F_LOG = 11               # 「最近动作」是流水信息，单独小一档，换更多内容
 POSFILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'panel_pos.json')
@@ -112,17 +117,24 @@ def _read_json(path, default):
 def collect_state():
     """把闸门状态读成一个字典。只读文件，不问闸门，不计数。"""
     brake = os.path.exists(BRAKE_FLAG)
+    # 租约：同样**只读文件**（显示「现在是谁在写」，好让人知道要掐的是哪一个）
+    lease = lease_view()
+    # ★ P2：动作面异常的**一级提示**（连点/连败/高频第一次命中时才有）。没有就 None。
+    anomaly = action_guard.hint_view()
     if not PASSFILE:
         # 老脚本目录没定位到 → 通行证**读不到**。说「读不到」，不装作「未授权」
         return {'brake': brake, 'state': '未配置', 'detail': '闸门状态目录不可用',
-                'scopes': [], 'used': 0, 'limit': 0, 'expires': '—'}
+                'scopes': [], 'used': 0, 'limit': 0, 'expires': '—', 'lease': lease,
+                'anomaly': anomaly}
     if not os.path.exists(PASSFILE):
         return {'brake': brake, 'state': '未授权', 'detail': '还没弹过授权窗',
-                'scopes': [], 'used': 0, 'limit': 0, 'expires': '—'}
+                'scopes': [], 'used': 0, 'limit': 0, 'expires': '—', 'lease': lease,
+                'anomaly': anomaly}
     p = _read_json(PASSFILE, {})
     scopes = p.get('scopes') or [p.get('scope', '')]
     base = {'brake': brake, 'scopes': scopes, 'used': p.get('acts', 0),
-            'limit': p.get('acts_limit', 0), 'expires': p.get('expires', '—')}
+            'limit': p.get('acts_limit', 0), 'expires': p.get('expires', '—'),
+            'lease': lease, 'anomaly': anomaly}
     if p.get('consumed'):
         base.update({'state': '已结束', 'detail': '会话已被消费（一次性）'})
     elif time.time() > p.get('expires_at', 0):
@@ -130,6 +142,53 @@ def collect_state():
     else:
         base.update({'state': '工作中', 'detail': '通行证有效'})
     return base
+
+
+def lease_view():
+    """租约的只读视图：现在有没有人持有、是谁、还剩几秒、是不是被掐了。
+
+    ★ 为什么自己读文件而不调 gate.lease_status()：
+      面板的定位是「只读挂件」，显示一律走读文件（PASSFILE 也是这么读的），
+      这样「显示」这条路上永远不会顺手碰到任何会改状态的东西。
+      真正掐人的那一下走 do_revoke_lease()，那里才调闸门。
+    ★ 为什么自己算 remaining_sec 而不是信文件里的字段：
+      lease.json 里存的是 expires_at（绝对时间），剩下的秒数只能现算。
+    """
+    out = {'lease_id': '', 'holder': None, 'scopes': [], 'remaining_sec': 0,
+           'active': False, 'revoked': None}
+    if not LEASEFILE or not os.path.exists(LEASEFILE):
+        return out
+    L = _read_json(LEASEFILE, {})
+    if not L:
+        return out
+    remain = int(max(0, L.get('expires_at', 0) - time.time()))
+    out.update({'lease_id': L.get('lease_id') or '', 'holder': L.get('holder'),
+                'scopes': L.get('scopes') or [], 'remaining_sec': remain,
+                'active': remain > 0 and not L.get('revoked'),
+                'revoked': L.get('revoked')})
+    return out
+
+
+def do_revoke_lease(lease_id, by='panel', reason='用户在面板上手动掐掉'):
+    """**人**点面板上的「掐掉」⇒ 第三方强制吊销**这一张**租约。
+
+    ★★ 为什么这个按钮只给人，不给模型 ★★
+      吊销权 = 「关掉别人的闸门」的能力。本项目刻意**不**把它做成 MCP 工具
+      （契约 ctl_lease 的 action 枚举里没有 revoke，判据第 6 条钉住）：
+      模型能掐别人的租约，安全机制就成了攻击面。
+      于是入口只有两个 —— 这里（人点）与急停（本来就该全掐）。
+
+    ★ 为什么这里**必须**传 lease_id、且**永不**传 confirm_all：
+      空 lease_id 在闸门那边是要 confirm_all=True 才放行的「吊销全部」。
+      面板给的是「只掐一个」按钮，就该永远只掐它显示出来的那一张；
+      万一读到一张空 id（不该发生），宁可拒绝也不能顺手全掐。
+    """
+    from agentctl import gate as _g
+    lid = (lease_id or '').strip()
+    if not lid:
+        return False, '读不到要掐的租约 id，已拒绝（绝不在这里顺手吊销全部）'
+    r = _g.revoke_lease(lease_id=lid, by=by, reason=reason)
+    return bool(r.get('ok')), (r.get('why') or ('已吊销' if r.get('revoked') else '没掐掉'))
 
 
 def tail_gate_log(n=1):
@@ -676,17 +735,21 @@ def run():
     rows = {}
     for i, (key, cap) in enumerate((('brake', '急停'), ('scope', '档位'),
                                     ('quota', '额度'), ('expires', '到期'),
-                                    ('task', '任务'))):
+                                    ('lease', '租约'),
+                                    ('task', '任务'),
+                                    # ★ P2：动作面异常提示（没有提示时显示「正常」）
+                                    ('anomaly', '异常'))):
         lab(body, cap, DIM, F_ROW).grid(row=i, column=0, sticky='w', pady=3)
         v = lab(body, '—', FG, F_ROW)
         v.grid(row=i, column=1, sticky='w', padx=(16, 0), pady=3)
         rows[key] = v
 
-    tk.Frame(body, bg='#33353f', height=1).grid(row=5, column=0, columnspan=2, sticky='ew', pady=11)
-    lab(body, '最近动作', DIM, F_LOG).grid(row=6, column=0, sticky='nw')
+    # ★ P2：多了一行 ⇒ 分隔线与「最近动作」各往下挪一行（行号是写死的，改行数必须一起挪）
+    tk.Frame(body, bg='#33353f', height=1).grid(row=7, column=0, columnspan=2, sticky='ew', pady=11)
+    lab(body, '最近动作', DIM, F_LOG).grid(row=8, column=0, sticky='nw')
     # 固定一行：第一版让它自动换行，长日志把下面的按钮顶出窗口了（按钮看不见 = 等于没有）
     last_val = lab(body, '—', FG, F_LOG, justify='left')
-    last_val.grid(row=6, column=1, sticky='w', padx=(16, 0))
+    last_val.grid(row=8, column=1, sticky='w', padx=(16, 0))
 
     # ── 按钮区（2026-10-04 用户：「能点击的吧，加上个终止按键」）──
     # ⚠ 三个按钮都只是**调用现成工具**（brake.py / auth_popup.py），
@@ -738,9 +801,40 @@ def run():
         toast(('✅ ' if ok else '⛔ ') + msg, bad=not ok)
         root.after(300, tick)
 
+    def on_revoke():
+        """人点「掐掉」⇒ 只掐**面板上显示的那一张**租约（第三方强制吊销）。
+
+        ★ 为什么必须弹确认框：租约是别人的写权限，掐错了它当场就得重新申请。
+          确认框里写清楚「是谁、哪一档、还剩几秒」，让人核得过来。
+        ★ 这里**不提供**「全掐」：全掐是急停的活（拉急停会自动吊销全部租约），
+          两个入口混在一起，早晚会有人在这个按钮上按错。
+        """
+        from tkinter import messagebox
+        L = (collect_state() or {}).get('lease') or {}
+        if not L.get('active') or not L.get('lease_id'):
+            toast('当前没有活着的租约，没什么可掐的')
+            return
+        if not messagebox.askokcancel(
+                '掐掉租约',
+                '掐掉 **%s** 的租约？\n\n'
+                '范围：%s\n剩余：%d 秒\n\n'
+                '后果：它的下一个写动作立刻被闸门拒（别的窗照跑）。'
+                % (L.get('holder') or '?',
+                   '、'.join(L.get('scopes') or []) or '—',
+                   L.get('remaining_sec') or 0),
+                icon='warning'):
+            toast('已取消（没掐）')
+            return
+        ok, msg = do_revoke_lease(L['lease_id'])
+        toast(('✅ ' if ok else '⛔ ') + msg, bad=not ok)
+        root.after(300, tick)
+
     mkbtn(bar, '🔑 授权', OK, on_auth).pack(side='left')
     mkbtn(bar, '⏹ 终止', BAD, on_stop).pack(side='left', padx=6)
     mkbtn(bar, '▶ 解除急停', WARN, on_release).pack(side='left')
+    # ★ P1：第三方强制吊销的**人**侧入口。同一个单写者租约任一时刻只有一张，
+    #   所以是「一个按钮 + 显示是谁」，而不是每张租约一个按钮。
+    mkbtn(bar, '✂ 掐掉租约', WARN, on_revoke).pack(side='left', padx=6)
 
     lab(root, '点击只调现成工具 · 不操作屏幕 · 1 fps', DIM, F_FOOT).pack(anchor='w', padx=14, pady=(8, 10))
 
@@ -796,6 +890,35 @@ def run():
         rows['quota'].config(text='%d / %d（剩 %d）' % (st['used'], st['limit'], left)
                              if st['limit'] else '—')
         rows['expires'].config(text=st['expires'])
+        # 租约：谁在写、哪一档、还剩几秒；被掐过的说清是谁掐的
+        L = st.get('lease') or {}
+        if L.get('active'):
+            rows['lease'].config(
+                text='%s · %s · 剩 %ds' % (L.get('holder') or '?',
+                                          '、'.join(L.get('scopes') or []) or '—',
+                                          L.get('remaining_sec') or 0),
+                fg=OK)
+        elif L.get('revoked'):
+            rows['lease'].config(
+                text='已被 %s 掐掉' % ((L.get('revoked') or {}).get('by') or '?'),
+                fg=BAD)
+        elif L.get('holder'):
+            rows['lease'].config(text='%s（已过期）' % L.get('holder'), fg=DIM)
+        else:
+            rows['lease'].config(text='无', fg=DIM)
+        # ★ P2 动作面异常：显示**证据**（哪条阈值、连几次、什么目标），
+        #   不写「异常异常」这种没法排查的词。已拉急停时上面那行急停才是红的。
+        AN = st.get('anomaly') or {}
+        if AN:
+            rows['anomaly'].config(
+                text='%s %s %s次 · %s' % (
+                    AN.get('threshold_name') or '?',
+                    AN.get('count'),
+                    '（已拉急停）' if AN.get('stage') != 'warn' else '（未拉闸）',
+                    _one_line(AN.get('target') or '', 26)),
+                fg=BAD if AN.get('stage') != 'warn' else WARN)
+        else:
+            rows['anomaly'].config(text='正常', fg=DIM)
         _task_tick(rows['task'])
         last_val.config(text=_one_line(tail_gate_log(1), 52))
         refresh_hotkey()

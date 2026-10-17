@@ -23,7 +23,12 @@ a = Analysis(
            #   原来 clock.py 写死了本机路径 F:\..._ctl_recon\WinOcrProbe.ps1，
            #   而这个文件根本没进包 —— 装出来的 exe 那条兜底路是死的。
            #   现在 clock.py 按 _MEIPASS\ocr\ 解析，spec 这里把它放进去，两边对上。
-           ('<工作区>/Documents/agent-ctl/ocr/WinOcrProbe.ps1', 'ocr')],
+           ('<工作区>/Documents/agent-ctl/ocr/WinOcrProbe.ps1', 'ocr'),
+           # ★ P2（2026-10-16）：动作面异常刹车的**阈值文件**必须随包走。
+           #   action_guard.py 按「模块旁边的 json」找它 ⇒ 放 agentctl/ 目录，
+           #   与冻结态 __file__ 落在 _MEIPASS\agentctl\ 对上。
+           #   不带的话装出来的 exe 只能吃代码里的兜底值 ⇒ 用户改阈值改不动。
+           ('<工作区>/Documents/agent-ctl/src/agentctl/action_guard_policy.json', 'agentctl')],
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},

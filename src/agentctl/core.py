@@ -44,6 +44,9 @@ from agentctl.store import Store                         # noqa: E402
 from agentctl.clock import Clock, Witness                # noqa: E402
 from agentctl import tasks_dispatch                     # noqa: E402
 from agentctl import uia_tree                           # noqa: E402（不截图的识别通道）
+# ★ P2（2026-10-16）：动作面异常刹车。判据逻辑全在 action_guard 里，
+#   core 只在**动作出口**调一次 observe() —— 不在这里写任何阈值、不在这里判该不该停。
+from agentctl import action_guard                        # noqa: E402
 
 # ★ 老脚本目录**只从 gate 拿**（A 项，2026-10-04）★
 # 原来这里自己写死 <项目目录>
@@ -523,6 +526,17 @@ _INTEGRITY_CACHE: dict = {}
 
 def _my_integrity() -> dict:
     r"""报告**本服务进程自己**的完整性级别（结果缓存，只真正探测一次）。
+
+    ⚠️ 2026-10-16（窗K · P0）**自指保护判据升级，与本函数无关，但读它的人该知道**：
+      老线的**防自授权闸门**（act.py 的 check_target）原来只按一个标题字符串拦。
+      现在改成身份优先的三重匹配：属主进程名（python.exe / consent.exe /
+      SystemSettings.exe 硬拒；终端那 7 个进程默认拦）→ 窗口类名 → 标题兜底。
+      ⇒ **对助手的两条直接影响**：
+        ① 往终端窗口发动作（cmd / powershell / pwsh / conhost / wt / WindowsTerminal /
+           OpenConsole）现在**默认被拒**，返回 code=7（要人点头），不是拒之门外的死路；
+        ② 授权弹窗、UAC 框、系统设置页**永远**不许碰，连「用户确认放行」这条路都没有 ——
+           那条路只对终端开放，且限时 30 分钟、按 (进程, 类名)、写事件、到点自动失效。
+      判据：tests\_P0_自指保护判据.py（红验证见 work\_2h_wK\ 下两份原始输出）。
 
     ★ 为什么要有这个：2026-10-02 我在这上面栽了一大圈 ——
       跨完整性级别时 UIPI 会拦掉 UIA 与合成输入，表现为"点击返回 `rc=0` 但界面没变"。
@@ -2353,6 +2367,23 @@ def dispatch(tool: str, args: dict, *, actor: str = "") -> dict:
             r = env(code=e.code, warning=e.why)
         except Exception as e:
             r = env(code=gate.CODE_INTERNAL, warning=f"内部错误 {type(e).__name__}: {e}")
+
+    # ── ★ P2 动作面异常刹车（2026-10-16）─────────────────────────────
+    #   放在**这里**（每种传输都走的唯一出口）而不是 t_click/t_type 各自一份：
+    #   三条判据盯的是「这个 actor 在干什么」，而 actor / 成功失败只有出口这一处拿得准；
+    #   在 t_click 里单独埋 ⇒ ctl_type 的连打就永远看不见。
+    #   ⚠ 它**只观察、不拦阻**：判定与拉闸都在 action_guard 里，
+    #     本次动作该成还成（一级命中本来就只是提示），真要停也是闸门那边拦后续动作。
+    #   ⚠ 判据自己崩了不许把动作带崩 —— 但**不许静默**：把错挂在返回值上，
+    #     否则就是「安全机制静默失效」，比没有安全机制更坏（项目老教训）。
+    try:
+        _anom = action_guard.guard().observe(
+            actor=actor, tool=tool, args=args, ok=bool(r.get("ok")))
+        if _anom:
+            r["action_anomaly"] = _anom
+    except Exception as _e:
+        r["action_guard_error"] = "%s: %s" % (type(_e).__name__, _e)
+
     r["elapsed_ms"] = int((time.perf_counter() - t0) * 1000)
     # ★ 通知搭载（2026-10-07）：每次调用都带上"用户那边发生了什么"。
     #   零额外调用 —— 用户在面板上点了授权，下次我调任何工具就带回来。

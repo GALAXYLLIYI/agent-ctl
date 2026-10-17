@@ -122,7 +122,7 @@ def proc_scan(prev, scan_every):
 
 _GROW_STREAK = {}          # pid → 连续超阈值的采样次数（防一次性尖峰误报）
 BRAKE_SCRIPT = os.path.join(HERE, "brake.py")
-_brake_state = {"pid": None, "fails": 0, "reported": False}
+_brake_state = {"pid": None, "fails": 0, "reported": False, "retired": False}
 
 
 def _brake_daemon_pid():
@@ -145,6 +145,13 @@ def ensure_brake(log):
     为什么让守护脚本管刹车：热键必须有个活进程持有，进程没了热键就**静默失效**——
     而"静默失效的刹车"比"没有刹车"更危险，因为你会以为它还在。
     """
+    # ★ 窗Q2（2026-10-16）：老线 brake.py --daemon 已退役（打印去向 + rc=2，不再常驻）。
+    #   这里必须**停手**：否则每个采样周期都会再 Popen 一次那个立刻退出的进程，而
+    #   Popen 对 rc=2 **不抛异常** —— 于是日志每轮都写「已重新拉起、热键恢复可用」，
+    #   实际上没有任何进程持有 Ctrl+Alt+Home。那比退役前更坏：不是哑，是骗。
+    if _brake_state.get("retired"):
+        return ("老线刹车守护已退役：热键 Ctrl+Alt+Home 需另起新线 brake-daemon"
+                "（桌面 bat 急停仍然可用）")
     pid = _brake_state["pid"]
     if pid and psutil.pid_exists(pid):
         return None
@@ -155,6 +162,20 @@ def ensure_brake(log):
     try:
         p = subprocess.Popen([sys.executable, "-X", "utf8", BRAKE_SCRIPT, "--daemon"],
                              cwd=HERE, creationflags=0x08000000)      # CREATE_NO_WINDOW
+        # ★ 窗Q2：Popen 成功 != 进程活着。退役版的 --daemon **立刻 rc=2 退出**，
+        #   而 Popen 对此不抛异常 —— 不确认存活就会把「没人在按热键」记成
+        #   「热键恢复可用」。等一小会儿确认它真活下来了，再决定要不要记 pid。
+        try:
+            p.wait(timeout=0.8)
+        except Exception:
+            pass
+        if p.poll() is not None:
+            _brake_state["pid"], _brake_state["fails"], _brake_state["reported"] = None, 0, True
+            _brake_state["retired"] = True
+            log("❌ 老线 brake.py --daemon 已退役（rc=%s），本守护不再拉它 —— "
+                "热键 Ctrl+Alt+Home 需由新线常驻：AgentCtl.exe brake-daemon" % p.returncode)
+            return ("老线刹车守护已退役：热键 Ctrl+Alt+Home 需另起新线 brake-daemon"
+                    "（桌面 bat 急停仍然可用）")
         _brake_state["pid"], _brake_state["fails"], _brake_state["reported"] = p.pid, 0, False
         log(f"🛡 刹车守护不在，已重新拉起（PID {p.pid}）——热键 Ctrl+Alt+Home 恢复可用")
         return None

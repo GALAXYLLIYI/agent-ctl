@@ -404,6 +404,17 @@ LOG = os.path.join(AUTHDIR, "gate_agentctl.log") if AUTHDIR else None
 #   而实现分叉。现在四方（老线 gate/brake、新线 gate、legacy_tools）口径一致。
 _APP_DIR = os.environ.get("AGENTCTL_APP_DIR") or os.path.join(
     os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "AgentCtl")
+# ★ 窗I（2026-10-16）补的**公开别名**：只多一个名字，值就是上面那个 _APP_DIR，
+#   **判定逻辑一个字没动**（不碰急停、不碰通行证、不碰档位）。
+#   为什么非有不可：`brake_daemon.py:39` 的心跳路径和 `core.py:65`（冻结态截图目录）
+#   都在读 `gate.APP_DIR`，而本模块从头到尾只定义了 `_APP_DIR` ⇒
+#   **`brake_daemon` 整个模块 import 就 AttributeError**（实测：
+#   `python -c "from agentctl import brake_daemon"` 直接崩）。
+#   后果不是「报错难看」：常驻的急停热键守护进程压根起不来，热键 Ctrl+Alt+Home 是哑的。
+#   也就是说这个别名不补，窗I 的急停置顶弹窗就没有触发者 —— 连同急停本身一起是死的。
+#   （同样的字面量在 legacy_tools\{gate,brake,perceive,selftest}.py 里各有一份本地 _APP_DIR，
+#     那几份是各自模块的私有变量，不依赖这里的别名，本次不动。）
+APP_DIR = _APP_DIR
 BRAKE_FLAG = os.environ.get("AGENTCTL_BRAKE_FLAG") or os.path.join(_APP_DIR, "_急停.flag")
 
 # ── 范围口径：短代号 ↔ 闸门完整串（§1.4）──
@@ -747,7 +758,20 @@ def set_brake(why: str = "未注明") -> tuple[bool, str]:
                 time.sleep(0.02 * (attempt + 1))   # 递增退避，最长 5×0.1s
         if last is not None:
             return False, "拉急停失败（重试 5 次仍不成功）：%s" % last
-        return True, "已拉下急停（%s）" % BRAKE_FLAG
+        # ★ P1（2026-10-16）：急停**本来就该全掐**，所以顺带把租约全吊销。
+        #   为什么放在「旗子写成功之后」而不是之前：旗子写成功才算急停成立，
+        #   顺序反了会出现「租约都吊了、旗子却没写成 ⇒ 没急停却全停」的假象。
+        #   为什么整段包在 try 里：**吊销失败不许把急停带崩** —— 急停已经生效，
+        #   而闸门本来就在每个写动作上拦租约（require_lease），这一步只是提前清场。
+        extra = ""
+        try:
+            rr = revoke_lease(by="brake", reason="急停联动：%s" % why,
+                              confirm_all=True)
+            if rr.get("revoked"):
+                extra = "，并连带吊销 %d 张租约" % (rr.get("count") or 0)
+        except Exception as e:
+            extra = "（连带吊销租约失败：%s —— 急停本身已生效，不受影响）" % e
+        return True, "已拉下急停（%s）%s" % (BRAKE_FLAG, extra)
     except Exception as e:
         return False, "拉急停失败：%s" % e
 
@@ -895,6 +919,16 @@ def renew_lease(lease_id: str, ttl_sec: int = 600) -> dict:
         L = _load(LEASE_DB, {})
         if not L or L.get("lease_id") != lease_id:
             raise GateDenied("租约不存在或已失效", CODE_LEASE_HELD)
+        # ★ P1（2026-10-16）：**被吊销的租约不许续期复活**。
+        #   漏了这一条，「吊销」就只是一句建议 —— 跑飞的那个窗只要顺手 renew 一下
+        #   （lease_id 还是它自己那张、记录也还在）就又活了，require_lease 重新放行，
+        #   人以为自己掐掉了、其实没掐住。判据 tests\_P1_租约吊销判据.py 第 8 条钉这条。
+        if L.get("revoked"):
+            rv = L.get("revoked") or {}
+            raise GateDenied(
+                "租约已被吊销（by=%s / %s），续期不予受理 —— 找用户重新申请"
+                % (rv.get("by") or "未注明", rv.get("at") or "时间不详"),
+                CODE_LEASE_HELD)
         L["expires_at"] = time.time() + max(1, min(int(ttl_sec), 600))
         _save(LEASE_DB, L)
         return L
@@ -912,6 +946,104 @@ def release_lease(lease_id: str = "") -> bool:
         log(f"🔓 租约释放：{L.get('holder')}")
         return True
 
+# ────────────────────── P1：第三方强制吊销（人侧的「只掐一个」）──────────────────────
+# 改前只有两条路能让一个跑飞了的窗停下来：等 ttl_sec 到期（默认 600s），或者拉总闸
+# ⇒ 把所有窗一起停。缺的是中间档：「**只掐掉那一个，别人照跑**」。
+def _lease_event(payload: dict, actor: str = "") -> None:
+    """把一次**真吊销**记进事件流。**永不抛**（留痕失败不许把吊销本身带崩）。
+
+    ★ 为什么在闸门里 import core，而不是让 core 把写入口传进来：
+      core 顶层 import gate，gate 再顶层 import core 就是循环依赖；
+      而**延迟到调用时** import 是安全的 —— 那一刻 core 早已 import 完
+      （真会调 revoke_lease 的两个地方是面板与急停，都已经起来了）。
+      好处是时间线目录、哈希链、落库格式**全都只有 core 一份**，
+      闸门不另造第二个真相源（另造路径这类坑本文件已经吃过一次）。
+    ★ kind 沿用现成的 **lease_release**（core.t_lease 的 release 也在用），
+      不新增任何错误码/事件码；「被吊销」这件事由 payload.revoked/forced 区分。
+    ★ core._ev 是包内私有入口：这里刻意不走 dispatch ——
+      dispatch 只认 TOOLS 里的工具，而吊销**故意不进工具表**（见下面那段）。
+    """
+    try:
+        from agentctl import core
+        core._ev("lease_release", actor=actor or "", tool="gate.revoke_lease",
+                 payload=payload)
+    except Exception:
+        pass
+
+
+def revoke_lease(lease_id: str = "", by: str = "", reason: str = "",
+                 confirm_all: bool = False) -> dict:
+    r"""**第三方**强制吊销租约 —— 人侧的「只掐掉那一个，别人照跑」。
+
+    ★★ 权限面（本单最关键的设计判断，2026-10-16 用户「p1-3 我同意」）★★
+      本函数**刻意不进 MCP 工具表**：contract/tools.json 里 ctl_lease 的 action
+      枚举没有 revoke，core.t_lease 也不认这个 action（判据第 6 条钉住）。
+      理由不是「懒得接」，是**接了就是新攻击面**：能吊销别人租约的角色，
+      等于能「**关掉别人的闸门**」—— 那是把安全机制变成攻击途径。
+      吊销的正当使用者只有两个：**人**（面板上点「掐掉」）与**急停**
+      （急停本来就该全掐，日后要给模型开这个权是**另一个决定**，不在本单）。
+
+    """
+    who = (by or "").strip() or "unspecified"
+    why = (reason or "").strip()
+    lease_id = (lease_id or "").strip()
+    stamp = f"{_dt.datetime.now():%Y-%m-%d %H:%M:%S}"
+    scope = "all" if not lease_id else "one"
+
+    def already(cur_id, holder, msg):
+        """幂等分支：已经是吊销态 / 压根没有这张租约 ⇒ 报「已是吊销态」，**不报错**。
+        ⚠ 这里**一个字都不许改**：现役的那张是别人的租约，吊不到它头上。"""
+        log(f"🔁 租约吊销（空操作）：{msg}（by={who} 目标={lease_id or '(全部)'}）")
+        return {"ok": True, "revoked": False, "already": True, "scope": scope,
+                "lease_id": lease_id or (cur_id or ""), "holder": holder,
+                "by": who, "reason": why, "at": stamp, "count": 0, "why": msg}
+
+    # ── 防手滑：空 id = 「吊销全部」，必须显式确认。**此时什么都不动。** ──
+    if not lease_id and not confirm_all:
+        msg = ("拒绝执行：吊销全部必须显式传 confirm_all=True（防手滑）"
+               "—— 只想掐一个就把 lease_id 传上")
+        log(f"⛔ 拒绝吊销租约：{msg}（by={who}）")
+        return {"ok": False, "revoked": False, "already": False, "scope": "",
+                "lease_id": "", "holder": None, "by": who, "reason": why,
+                "at": stamp, "count": 0, "why": msg, "need": "confirm_all=True"}
+
+    with _exclusive():
+        L = _load(LEASE_DB, {})
+        now = time.time()
+        cur_id = (L or {}).get("lease_id")
+        holder = (L or {}).get("holder")
+        # 「活着」＝ 没过期且没被吊销。本项目是**单写者**租约（lease.json 里任一时刻
+        # 至多一张，见 acquire_lease）⇒ 所以 confirm_all=True 的「全部」今天就是那一张；
+        # 真要改成多租约存储时，这里是唯一要动的地方（判据第 5 条会盯住行为）。
+        live = bool(L) and L.get("expires_at", 0) > now and not L.get("revoked")
+
+        if not live:
+            return already(cur_id, holder, "本机当前没有活着的租约（已是吊销态）")
+        if lease_id and cur_id != lease_id:
+            # ★ 目标不是当前这张 ⇒ 绝不连坐。返回里把当前持有者带上，
+            #   好让人一眼看出「我掐的那张早没了，现在这张不是我的目标」。
+            return already(cur_id, holder,
+                           "目标租约不是当前那张（已被顶替/已吊销），"
+                           "当前 %s 的租约未受影响" % holder)
+
+        # ── 真吊销 ──
+        L["revoked"] = {"at": stamp, "by": who, "reason": why,
+                         "lease_id": cur_id, "expires_at": L.get("expires_at"),
+                         "scopes": L.get("scopes")}
+        L["expires_at"] = 0        # ← 与 release_lease 同一套口径：active 立刻为假
+        _save(LEASE_DB, L)
+        log(f"⛔ 租约吊销：holder={holder} lease={cur_id} by={who} "
+            f"原因={why or '(未注明)'}"
+            + ("（吊销全部）" if scope == "all" else ""))
+
+    _lease_event({"revoked": True, "forced": True, "lease_id": cur_id,
+                  "holder": holder, "by": who, "reason": why,
+                  "scope": scope, "count": 1}, actor=who)
+    return {"ok": True, "revoked": True, "already": False, "scope": scope,
+            "lease_id": cur_id, "holder": holder, "by": who, "reason": why,
+            "at": stamp, "count": 1,
+            "why": "已吊销 %s 的租约 %s（by=%s）" % (holder, cur_id, who)}
+
 def lease_status() -> dict:
     L = _load(LEASE_DB, {}) if LEASE_DB else {}
     if not L:
@@ -926,6 +1058,15 @@ def require_lease(actor: str) -> dict:
     """写动作前校验：必须有一个**未过期且持有者是自己**的租约。"""
     L = lease_status()
     if not L.get("active"):
+        # ★ P1（2026-10-16）：被吊销的租约要说清是**被人掐了**，不能让人以为
+        #   「只是过期了、去续一下就行」—— 那会把人引到错误的处置上。
+        #   拦的动作仍然是下面那条老路（active=False ⇒ 一律拒），这里只改**说法**。
+        rv = L.get("revoked") or {}
+        if rv:
+            raise GateDenied(
+                "租约已被吊销（by=%s / %s，原因：%s）—— 找用户重新申请，续期不再受理"
+                % (rv.get("by") or "未注明", rv.get("at") or "时间不详",
+                   rv.get("reason") or "未注明"), CODE_LEASE_HELD)
         # ★ T12（2026-10-09）：分清「从未申请」与「已过期」。
         #   原先两种情况共用「没有有效租约」一句 ⇒ 实测我把「租约过期」误判成
         #   「从未申请」，白绕一轮重新 acquire 才发现是过期。

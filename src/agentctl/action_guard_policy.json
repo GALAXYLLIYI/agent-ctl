@@ -1,0 +1,35 @@
+{
+  "_说明": "动作面异常刹车（P2）的阈值。改这里就能调行为，**不用改代码**。给人审的文件。",
+  "_来源": "思路直接搬自 legacy_tools/guardian.py 的 _GROW_STREAK（:123/:216『一次性尖峰不算：要连续两次采样都超才算』）—— 那边盯的是内存/资源，这边盯的是**动作**。",
+  "_两级": "第一次命中只写事件 + 面板提示，**不动闸门**；连续第二次仍命中才拉急停（BRAKE_FLAG）。所以任何一条阈值单独抖动一次都不会停机。",
+
+  "enabled": true,
+
+  "same_target_streak": 5,
+  "_same_target_streak说明": "同一 actor 连续对同一坐标/eid/name 动作 N 次算命中。防误报的第一道：正常人同一按钮点两下不算。",
+
+  "fail_streak": 6,
+  "_fail_streak说明": "同一 actor 连续失败 N 次算命中（成功一次即清零）。",
+
+  "rate_per_min": 60,
+  "rate_window_sec": 60,
+  "_rate说明": "单 actor 在 rate_window_sec 秒内动作数 > rate_per_min 算命中。",
+
+  "streak_window_sec": 300,
+  "_streak_window说明": "连击的计数时间窗：超过这个间隔不算『连续』。防止『今天点五次、明天点五次』拼成一条连击。",
+
+  "hits_to_brake": 2,
+  "_hits_to_brake说明": "连续命中几次才拉闸。**不许改成 1** —— 那是『动辄就停』。判据 tests\\_P2_动作面刹车判据.py 第 1/2 条钉住两段行为。",
+
+  "hint_ttl_sec": 600,
+  "_hint_ttl说明": "面板上那条一级提示显示多久（秒）后自动消失。",
+
+  "action_tools": [
+    "ctl_click",
+    "ctl_type",
+    "ctl_fill",
+    "ctl_focus",
+    "ctl_browser"
+  ],
+  "_action_tools说明": "只统计**写动作**。感知类（ctl_shot/ctl_tree/ctl_find 等）不计数 —— 面板自己 1 fps 刷新就跑在感知上，算进去等于自己举报自己。"
+}

@@ -22,7 +22,10 @@ a = Analysis(
             '<工作区>/Documents/agent-ctl/vendor',
             '<工作区>/Documents/agent-ctl/stubs'],
     binaries=[],
-    datas=[('<工作区>/Documents/agent-ctl/contract/tools.json', 'contract')],
+    datas=[('<工作区>/Documents/agent-ctl/contract/tools.json', 'contract'),
+           # ★ P2（2026-10-16）：面板要读「动作面异常提示」那份文件（hint_view），
+           #   阈值文件同样随包走 —— 否则面板显示的阈值和引擎用的兜底值可能不是一套。
+           ('<工作区>/Documents/agent-ctl/src/agentctl/action_guard_policy.json', 'agentctl')],
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
