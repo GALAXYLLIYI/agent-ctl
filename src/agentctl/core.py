@@ -2589,10 +2589,17 @@ SCREEN_SOURCE_CONF = {
 #   只认「时刻」与「带单位的量」，不认裸数字 —— 裸数字可能是订单号/题号，变了就是变了。
 SCREEN_VOLATILE_RE = re.compile(
     r"(\d{1,3}:\d{1,2}(?::\d{1,2})?)"                              # 12:34 / 01:02:03
-    r"|(\d+(?:\.\d+)?\s*(?:ms|毫秒|秒|分钟|分|fps|hz|kb|mb|gb|%))"   # 3.5s / 60 fps / 42%
-    r"|(剩余|倒计时|已用时|用时|elapsed|remaining|countdown|timer|clock)",
+    # ★ 2026-10-17（Z3 守门）：单位表补单字母 s 与 min —— 注释早就宣称命中 `3.5s`，
+    #   而实现里没有 `s` ⇒ 注释与实现漂移（实测 3.5s 不命中）。
+    r"|(\d+(?:\.\d+)?\s*(?:ms|s|秒|毫秒|min|分钟|分|fps|hz|kb|mb|gb|%))"   # 3.5s / 5 min / 42%
+    # ★ 裸关键词删掉 `剩余`：`剩余 3 项` / `剩余 5 min` 里，前者**承载任务信息、不该豁免**，
+    #   后者靠单位（min）照样命中 ⇒ 只删关键词不会漏掉时限类。
+    r"|(倒计时|已用时|用时|elapsed|remaining|countdown|timer|clock)",
     re.IGNORECASE)
-SCREEN_VOLATILE_TYPES = frozenset({"ProgressBarControl", "SpinnerControl"})
+# ★ 2026-10-17（Z3 守门）：**SpinnerControl 移出豁免名单** —— 它在 SCREEN_ACTIONS 里
+#   有 click/set，是可交互节点；既豁免又能交互 ⇒ 动作后核验对它全盲（Z2 的"路径 C"现状）。
+#   交互节点永不豁免（这条同时是任务声明制与必进保证的前提）。
+SCREEN_VOLATILE_TYPES = frozenset({"ProgressBarControl"})
 
 # 角色 → 可用动作。**按角色推**，不问 Pattern（每节点 8 次 COM 往返买不起）。
 SCREEN_ACTIONS = {

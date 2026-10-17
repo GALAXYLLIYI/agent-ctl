@@ -51,7 +51,7 @@ r"""tests\run_all.py —— 判据总入口（窗C · 2026-10-15）
                                       要么在本 CRITERIA 里、要么在它自己的 NOT_WIRED 里
                                       写明理由；且文档写的条数 == len(CRITERIA)）
 
-★ 条数：**2026-10-17 之前 14 条 → 窗V 16（元1/元2）→ 窗W 17（写死）→ 门禁3 18（通道）→ 默认关闭 19 → 孤儿 20 → 视口 21 → 语义屏 22**。
+★ 条数：**2026-10-17 之前 14 条 → 窗V 16（元1/元2）→ 窗W 17（写死）→ 门禁3 18（通道）→ 默认关闭 19 → 孤儿 20 → 视口 21 → 语义屏 22 → volatile 23**。
   ★ 这两条**不登记进 INJECTABLE**：它们的注入自证走各自的 --inject，
     不改「哪些判据支持注入」这一栏的语义（派单 §二）。
 
@@ -143,6 +143,10 @@ CRITERIA = (
      "窗B1（F4）：**语义屏** —— 默认按注意力裁到 ≤40 但视口内可交互**必进**、omitted 诚实报数；"
      "uid 三连稳 + 标题变则版本变 + 版本只能回传；volatile 计时器不爆 STALE；"
      "source_confidence 取 min；must_vlm=¬R1∧¬R2∧¬R3；Chromium name_trust=low"),
+    ("volatile", "_volatile守门_判据.py", (),
+     "窗Z3 规则表落地后的守门：**可交互节点永不豁免**（SpinnerControl 曾在两边）；"
+     "八例逐条对表（剩余 3 项=非 volatile / 3.5s=volatile / 第 7/20 步=非 / 共 166 题=非…）；"
+     "注入 spinner 或 units 必须转红"),
     ("孤儿", "_ctrl_border_孤儿判据.py", (),
      "窗Y：**孤儿边框**不许出现 —— 父进程被硬杀 / 被 terminate / 优雅退出，"
      "边框都要 ≤10s 内收摊且屏幕上 0 个 AgentCtlCtrlBorder* 窗；"
