@@ -2818,6 +2818,8 @@ def _screen_text_key(label: str, volatile: bool) -> str:
 # ★ 声明的**生命周期 = 本调用**：服务端不留声明状态，agent 每次扫描都带上同一份
 #   （它是任务边界的一部分，像 boundary 一样写进任务习惯）。
 WATCH_TEXT_MAX = 32            # 声明条数上限（派单规则4：超了拒绝并说明，不静默截断）
+WATCH_TEXT_WIDTH_MAX = 8       # 单条声明命中节点数上限（窗E1 · Z4 F2）：宽串=没声明；
+                               # 超宽拒绝整调用并点名串与命中数。挂起救不了超宽（它已命中）。
 
 
 def _screen_watch_parse(args) -> tuple:
@@ -2828,9 +2830,14 @@ def _screen_watch_parse(args) -> tuple:
     ★ 空声明是陷阱：空串是**任何** label 的子串 ⇒ 等于「声明了这一屏的所有节点」。明确拒绝。
     """
     raw = args.get("watch_text")
-    if raw is None or raw == "" or raw == [] or raw == ():
-        return [], None
+    if raw is None or raw == [] or raw == ():
+        return [], None                     # 缺省/空数组 = 不声明（契约写明）
     if isinstance(raw, str):
+        if not raw.strip():
+            # 窗E1 · F7：空串以前被静默当「没声明」，与数组内空串的明确拒绝不一致 ——
+            # 静默方向错在「该响不响」：agent 以为声明挂上了，实际啥都没盯。
+            return [], ("watch_text 是空字符串 —— 要么传字符串数组，要么别传这个参数"
+                        "（空数组/缺省 = 不声明；空**串**按形态错误拒绝，不静默）")
         return [], "watch_text 必须是**字符串数组**，不是单个字符串"
     if not isinstance(raw, (list, tuple)):
         return [], "watch_text 必须是字符串数组（拿到 %s）" % type(raw).__name__
@@ -2852,19 +2859,19 @@ def _screen_watch_parse(args) -> tuple:
     return decls, None
 
 
-def _screen_watch_match(label, decls) -> str:
-    """label 命中哪条声明（规范化后**子串**匹配，容忍前后缀噪音）。没命中返回空串。
+def _screen_watch_matches(label, decls) -> list:
+    """label 命中的**所有**声明（规范化后**子串**比对，容忍前后缀噪音）。没命中返回 []。
 
-    ★ 只返回**第一条**命中的声明；一条声明命中几十个节点等于没声明，
-      宽度的账在 _screen_watch_report 的「命中节点数」里如实报。
+    ★ 全收语义（窗E1 · 修 Z4 F1）：一个节点可以同时命中多条声明，**逐条**记账。
+      旧版只返回第一条 ⇒ 第二条重叠声明被互蔽成 unmatched ⇒ 整调用误拒
+      （Z4 实测：声明 ["剩余可选","第 7/20 步"] 盯同一行 T2，第二条被吞）。
+      ⛔ 严禁改回「只取第一条」—— 那是假绿家族的手法。
+      一条声明命中多少个节点的账也在同一份 hits 里（F2 宽度上限与 F1 共用，Z4 提醒）。
     """
     lab = _screen_norm_text(label)
     if not lab or not decls:
-        return ""
-    for orig, n in decls:
-        if n in lab:
-            return orig
-    return ""
+        return []
+    return [orig for orig, n in decls if n in lab]
 
 
 def _screen_watch_report(decls, hits, *, pending_ok: bool) -> dict:
@@ -2879,6 +2886,24 @@ def _screen_watch_report(decls, hits, *, pending_ok: bool) -> dict:
             "口径": "规范化后子串匹配 label。matched=命中到节点的声明；"
                     "unmatched=一条都没命中（默认 ⇒ **整个调用拒绝**，不静默）；"
                     "pending=显式 watch_pending=true 允许挂起的那几条"}
+
+
+def _screen_watch_reject(out: dict, why: str, report: dict, reason: str) -> dict:
+    """声明校验失败的拒绝载荷（窗E1 · Z4 F3）：带**屏上下文**，让 agent 分得清
+    「声明写错 / 白屏 / 错窗口 / 扫描预算没扫到」这四类失败。**不回 objects** ——
+    那会被当成「声明已兑现」。
+
+    reason: "unmatched"（声明不存在）| "width"（命中太宽）—— t_screen 按它给
+    对口的 blind_spots 下一步建议。
+    """
+    total = (out.get("omitted") or {}).get("total")
+    return {"why": why, "watch_校验": report, "拒因": reason,
+            "screen_version": out.get("screen_version"),
+            "window": out.get("window"),
+            "对象总数": total,
+            "性质": ("这是 watch_text **校验失败**，不是屏幕空 —— 本屏候选对象共 %s 个"
+                     "（screen_version=%s）；别把拒绝当成「屏幕没内容」。"
+                     % (total, out.get("screen_version")))}
 
 # ── ② uid 三档（OK / TEXT_CHANGED / STALE）───────────────────────────────
 #   病根：只分「变了 / 没变」一档是错的 —— struct_key 变（可能压根不是同一个对象）
@@ -3291,8 +3316,8 @@ def _screen_build(hwnd: int, args: dict) -> dict:
         in_view = n.get("in_view")
         # ★ 规则2：声明压过视口过滤 —— 要盯的东西滚出屏幕**不能失去比对**
         #   （任务页要滚动）。in_view 字段仍**照实报 false**，不粉饰。
-        watched_decl = _screen_watch_match(label, watch_decls)
-        watched = bool(watched_decl)
+        watch_matched = _screen_watch_matches(label, watch_decls)
+        watched = bool(watch_matched)
         if in_view is False and not include_offscreen and not watched:
             n_view_dropped += 1
             continue
@@ -3304,8 +3329,8 @@ def _screen_build(hwnd: int, args: dict) -> dict:
         #   判据 S1 盯的就是这三者的组合：volatile=true ∧ watched=true ⇒ exempted=false。
         volatile = _screen_is_volatile(role, label)         # ← 修正①：事实
         exempted = bool(volatile and not watched)            # ← 规则1：声明即不豁免
-        if watched:
-            watch_hits[watched_decl] = watch_hits.get(watched_decl, 0) + 1
+        for orig in watch_matched:               # 全收记账（F1）：命中几条声明就记几条
+            watch_hits[orig] = watch_hits.get(orig, 0) + 1
         skey = struct_keys[i] if i < len(struct_keys) else role
         uid = "%s@%s" % (skey, _screen_text_key(label, exempted))   # ← 修正①：两段
         oid = "o" + _hl.sha1(uid.encode("utf-8")).hexdigest()[:6]
@@ -3424,7 +3449,8 @@ def _screen_build(hwnd: int, args: dict) -> dict:
                            "判不出来也按 low）；offset-suspect = 网页且选项字母疑似与位置错位 "
                            "⇒ R2 门槛不通过、这一屏必须落到 VLM",
         "name_trust_依据": trust_ev,
-        "uid_口径": "uid = struct_key@text_key；volatile 节点的 text_key 恒为 ~（不参与比对）",
+        "uid_口径": "uid = struct_key@text_key；volatile 且未被声明（exempted=true）的节点"
+                    "text_key 恒为 ~（不参与比对）；被声明（watched=true）的节点 text_key 照常实算",
         "uid_state_口径": "uid_state ∈ OK / TEXT_CHANGED / STALE（**只有给了 since 才有**）："
                           "struct_key 变 ⇒ STALE（可能不是同一对象，寻址拒绝）；"
                           "struct_key 同而 text_key 变 ⇒ TEXT_CHANGED（同对象内容变，"
@@ -3484,18 +3510,37 @@ def _screen_build(hwnd: int, args: dict) -> dict:
                           "text_key 照常实算、参与 screen_version 进位与 delta，变更必报 "
                           "TEXT_CHANGED（objects[].exempted=false 就是豁免被压掉的证据）；"
                           "且**不受视口过滤**（滚出屏幕也照比）、**不受 top 预算**裁剪（声明必进）。"
-                          "声明只在**本调用**生效，服务端不留声明状态 —— 每次扫描都要带上同一份。")
+                          "记账是**全收**的：一个节点命中几条声明就记几条、一条声明命中几个节点"
+                          "就报几个（watch_校验.命中节点数）；单条声明命中节点数上限 %d，"
+                          "超宽**拒绝整调用**。声明只在**本调用**生效，服务端不留声明状态 "
+                          "—— 每次扫描都要带上同一份。" % WATCH_TEXT_WIDTH_MAX)
+        # 规则4½（窗E1 · F2）：某条声明命中节点数超宽度上限 ⇒ 拒，点名串与命中数。
+        #   ★ 宽度拒绝**不受 watch_pending 影响**：它现在就命中了，不存在「等它出现」。
         # 规则3：首扫校验 —— 有声明一条都没命中 ⇒ **整个调用拒绝**（rc≠0），不许静默吞。
         #   watch_pending=true 时改为挂起（规则5），并逐条标 pending。
         #   ★ 只有 unmatched 才拒：pending 是 watch_pending=true 下**被显式允许**的挂起
         #     （报告里 pending 非空时 unmatched 恒为空 —— 两处都列就是重复报）。
-        if report["unmatched"]:
+        #   两条拒绝路径都走 _screen_watch_reject（F3：带屏上下文，不回 objects）。
+        wide = [(orig, int(watch_hits.get(orig, 0)))
+                for orig, _ in watch_decls
+                if int(watch_hits.get(orig, 0)) > WATCH_TEXT_WIDTH_MAX]
+        if wide:
+            out["_watch_拒绝"] = _screen_watch_reject(
+                out,
+                ("watch_text 里有 %d 条声明命中节点数超过宽度上限 %d（%s）—— "
+                 "一条声明吞半屏等于没声明；请把串改具体（加前后文）。"
+                 % (len(wide), WATCH_TEXT_WIDTH_MAX,
+                    json.dumps(["%s × %d" % (o, c) for o, c in wide],
+                               ensure_ascii=False)[:200])),
+                report, "width")
+        elif report["unmatched"]:
             bad = report["unmatched"]
-            out["_watch_拒绝"] = {
-                "why": ("watch_text 里有 %d 条声明在这屏上**一条都没匹配到**（%s）—— 本调用拒绝，"
-                        "不静默丢弃。要等它稍后出现，显式传 watch_pending=true 挂起（返回里逐条标 pending）。"
-                        % (len(bad), json.dumps(bad, ensure_ascii=False)[:200])),
-                "watch_校验": report}
+            out["_watch_拒绝"] = _screen_watch_reject(
+                out,
+                ("watch_text 里有 %d 条声明在这屏上**一条都没匹配到**（%s）—— 本调用拒绝，"
+                 "不静默丢弃。要等它稍后出现，显式传 watch_pending=true 挂起（返回里逐条标 pending）。"
+                 % (len(bad), json.dumps(bad, ensure_ascii=False)[:200])),
+                report, "unmatched")
     return out
 
 
@@ -3537,13 +3582,34 @@ def t_screen(args: dict) -> dict:
             # ★ 与拒绝路径对齐：成功时 watch_校验 也抬到 data 上（拒绝时那里没有「结果」段）。
             #   否则同一个字段两个位置，调用方得记住「成功去哪儿找、失败去哪儿找」。
             r["data"]["watch_校验"] = res["watch_校验"]
+            # ★ 窗E1 · F5：挂起项进 blind_spots —— 「以后会出现」不能变成永久静默；
+            #   每次放行都点名这几条还没盯上，别让 agent 把 pending 当成已兑现。
+            pend = (res["watch_校验"] or {}).get("pending") or []
+            if pend:
+                r["blind_spots"] = list(r.get("blind_spots") or []) + [
+                    "有 %d 条声明这次一条都没命中，被 watch_pending=true 显式挂起：%s —— "
+                    "这几条**还没盯上**，别当成已兑现；要么改串，要么继续带同一份声明观察"
+                    % (len(pend), json.dumps(pend, ensure_ascii=False)[:160])]
         rej = res.get("_watch_拒绝") if isinstance(res, dict) else None
         if rej:
+            # ★ 窗E1 · F3：拒绝信封带**屏上下文**（screen_version/window/对象总数），
+            #   blind_spots 明写「校验失败≠屏幕空」—— 声明写错/白屏/错窗/预算没扫到
+            #   四类失败现在分得清。**仍不回 objects**：那会被当成「声明已兑现」。
+            data_rej = {"watch_校验": rej.get("watch_校验") or {}}
+            for k in ("screen_version", "window", "对象总数"):
+                if rej.get(k) is not None:
+                    data_rej[k] = rej[k]
+            bs = [str(rej.get("性质") or "")]
+            if rej.get("拒因") == "width":
+                bs.append("有声明命中节点数超过宽度上限（见 watch_校验.命中节点数）—— "
+                          "把串改具体（加前后文）再试；挂起救不了超宽")
+            else:
+                bs.append("有一条声明在这屏上一条都没匹配到 ⇒ 你以为在盯它，"
+                          "其实这一屏没有它；要么改声明串，要么显式 "
+                          "watch_pending=true 挂起")
             return env(code=gate.CODE_NO_CTRL, warning=rej["why"],
-                       data={"watch_校验": rej["watch_校验"]},
-                       blind_spots=["有一条声明在这屏上一条都没匹配到 ⇒ 你以为在盯它，"
-                                    "其实这一屏没有它；要么改声明串，要么显式 "
-                                    "watch_pending=true 挂起"])
+                       data=data_rej,
+                       blind_spots=[b for b in bs if b])
     return r
 
 def t_not_implemented(name: str):

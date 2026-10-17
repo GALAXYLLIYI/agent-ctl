@@ -76,11 +76,12 @@ FAKE_HWND = 424242                  # 合成句柄：界面上没有这个窗口
 #   去掉必进保证就一定报红，这才叫这条断言有判别力。
 N_BTN = 38                          # 视口内可交互按钮
 N_QTEXT = 3                         # 视口内 query 命中的大文本
-N_TEXT = 10                         # 视口内普通文本
+N_TEXT = 8                          # 视口内普通文本（★ 窗E1：10→8 —— 「备注段」恰好命中
+                                    #   8 个节点，做 S5 宽度上限的边界放行例）
 N_OFF = 10                          # 视口外按钮
 QUERY = "题干"
-EXPECT_TOTAL = N_BTN + N_QTEXT + N_TEXT + 3 + N_OFF      # 64（+3 = 计时器 + 状态 + T2 任务信息）
-EXPECT_IN_VIEW = N_BTN + N_QTEXT + N_TEXT + 3             # 54（★ 窗D1 加了 T2）
+EXPECT_TOTAL = N_BTN + N_QTEXT + N_TEXT + 3 + N_OFF      # 62（+3 = 计时器 + 状态 + T2 任务信息）
+EXPECT_IN_VIEW = N_BTN + N_QTEXT + N_TEXT + 3             # 52（★ 窗D1 加了 T2；窗E1 跟 N_TEXT）
 
 REQUIRED_OBJ_FIELDS = ("id", "uid", "label", "role", "rect", "in_view", "interactive",
                        "actions", "source", "source_confidence",
@@ -551,6 +552,42 @@ def _screen_build(hwnd, args):                            # noqa: F811  故意�
     return out
 """
 
+INJECT_WATCH_SHADOW = """
+
+# ===== 以下为 窗E1 注入段（跑红自证专用，勿入产品代码）=====
+_real_matches_shadow = _screen_watch_matches
+
+
+def _screen_watch_matches(label, decls):                  # noqa: F811  故意覆盖真版
+    # 注入的缺陷：退回「只记第一条」—— 第二条重叠声明被互蔽成 unmatched
+    # ⇒ 整调用误拒（Z4 F1 的病灶复原）。
+    return _real_matches_shadow(label, decls)[:1]
+"""
+
+INJECT_WATCH_WIDTH = """
+
+# ===== 以下为 窗E1 注入段（跑红自证专用，勿入产品代码）=====
+# 注入的缺陷：宽度上限名存实亡（改成天文数字）—— 一条宽串吞半屏也放行（Z4 F2 复原）。
+WATCH_TEXT_WIDTH_MAX = 10 ** 9
+"""
+
+INJECT_WATCH_CTX = """
+
+# ===== 以下为 窗E1 注入段（跑红自证专用，勿入产品代码）=====
+_real_build_ctx = _screen_build
+
+
+def _screen_build(hwnd, args):                            # noqa: F811  故意覆盖真版
+    # 注入的缺陷：拒绝信封抠掉屏上下文（screen_version/window/对象总数/性质）——
+    # agent 分不清「声明写错 / 白屏 / 错窗 / 预算没扫到」（Z4 F3 复原）。
+    out = _real_build_ctx(hwnd, args)
+    rej = out.get("_watch_拒绝")
+    if isinstance(rej, dict):
+        for k in ("screen_version", "window", "对象总数", "性质"):
+            rej.pop(k, None)
+    return out
+"""
+
 INJECT = {
     "guarantee": ("拿掉必进保证（纯按分取前 top）", "append", INJECT_GUARANTEE),
     "text_key": ("uid 里去掉 text_key（只剩结构路径）", "append", INJECT_TEXT_KEY),
@@ -564,6 +601,10 @@ INJECT = {
     "watch_exempt": ("声明仍然被豁免（text_key 照压成 ~）", "append", INJECT_WATCH_EXEMPT),
     "watch_leak": ("未声明的 volatile 节点也进位（风暴回流）", "append", INJECT_WATCH_LEAK),
     "watch_silent": ("unmatched 静默吞掉（rc=0）", "append", INJECT_WATCH_SILENT),
+    # ★ 窗E1 的三个新注入（每个只红自己那一组）
+    "watch_shadow": ("退回只记第一条（重叠声明互蔽 ⇒ 误拒）", "append", INJECT_WATCH_SHADOW),
+    "watch_width": ("宽度上限名存实亡（宽串放行）", "append", INJECT_WATCH_WIDTH),
+    "watch_ctx": ("拒绝信封抠掉屏上下文（分不清校验失败与白屏）", "append", INJECT_WATCH_CTX),
 }
 
 
@@ -1486,6 +1527,149 @@ def check_watch_unmatched(core, fx):
     return "S3 未命中必拒", reds, ev
 
 
+def check_watch_shadow_allhit(core, fx):
+    """S4 · 全收记账（窗E1 · 修 Z4 F1）：两条重叠声明都 matched、unmatched 空、
+    调用不被拒 —— 「剩余可选」与「第 7/20 步」都是 T2 同一节点的真子串，
+    旧版只记第一条时第二条被判 unmatched ⇒ 整调用误拒（Z4 P2a 的病灶）。"""
+    reds = []
+    ev = {}
+    core._screen_forget(0)
+    fx.timer_tick = 0
+    fx.quota = 3
+    DECL = ["剩余可选", "第 7/20 步"]
+
+    r1, d1 = call(core, top=500, watch_text=DECL)
+    ck = (r1.get("data") or {}).get("watch_校验") or {}
+    ev["watch_校验"] = ck
+    need(r1.get("ok") is True,
+         "两条重叠声明（命中同一节点）竟被拒：%s" % (r1.get("warning") or "")[:160], reds)
+    need(ck.get("matched") == DECL,
+         "两条重叠声明应**都**进 matched，实得 %r" % (ck.get("matched"),), reds)
+    need(not (ck.get("unmatched") or []),
+         "全收记账下 unmatched 应为空，实得 %r" % (ck.get("unmatched"),), reds)
+    need(not (ck.get("pending") or []),
+         "没开挂起却报了 pending：%r" % (ck.get("pending"),), reds)
+    hit = ck.get("命中节点数") or {}
+    need(int(hit.get("剩余可选") or 0) >= 1 and int(hit.get("第 7/20 步") or 0) >= 1,
+         "两条声明的命中节点数都应 ≥1（互蔽=第二条 0），实得 %r" % hit, reds)
+    t2 = by_label(d1.get("objects") or [], "剩余可选")
+    need(len(t2) == 1 and t2[0].get("watched") is True,
+         "T2 没被标 watched（命中 %d 个）" % len(t2), reds)
+    need("全收" in str(d1.get("watch_口径") or ""),
+         "watch_口径 没把全收记账讲出来", reds)
+
+    # ── 半重叠对照：一条全中 + 一条真不存在 ⇒ 仍拒（全收 ≠ 放水）
+    r2, _ = call(core, top=500, watch_text=["剩余可选", "不存在串xyz"])
+    need(r2.get("ok") is False,
+         "真不存在的声明没被拒（全收被做成了「有命中就全放」）", reds)
+    core._screen_forget(0)
+    fx.timer_tick = 0
+    fx.quota = 3
+    return "S4 重叠声明全收", reds, ev
+
+
+def check_watch_width(core, fx):
+    """S5 · 单条声明宽度上限（窗E1 · 修 Z4 F2）：命中 9 ⇒ 拒且点名串与命中数；
+    恰好命中 8（=WATCH_TEXT_WIDTH_MAX）⇒ 放行；条数上限 32 仍生效；
+    watch_pending 救不了超宽（它现在就命中了，不存在「等它出现」）。"""
+    reds = []
+    ev = {}
+    core._screen_forget(0)
+    fx.timer_tick = 0
+    fx.quota = 3
+
+    # ── 宽度 9：「选项格0」⊆ 选项格01..09（N_BTN=38 夹具）⇒ 超宽必拒且点名
+    r1, _ = call(core, top=500, watch_text=["选项格0"])
+    w1 = str(r1.get("warning") or "")
+    ev["宽度9"] = {"ok": r1.get("ok"), "code": r1.get("code"), "warning": w1[:160],
+                 "watch_校验": (r1.get("data") or {}).get("watch_校验")}
+    need(r1.get("ok") is False, "命中 9 个节点的声明（>上限 8）没被拒", reds)
+    need("选项格0" in w1 and "9" in w1,
+         "宽度拒绝没点名声明串与命中数：%s" % w1[:160], reds)
+    need(r1.get("code") not in (0, None), "宽度拒绝时 code 竟为 0/None：%r" % r1.get("code"), reds)
+    r1b, _ = call(core, top=500, watch_text=["选项格0"], watch_pending=True)
+    need(r1b.get("ok") is False,
+         "watch_pending=true 竟救回了超宽声明（它现在就命中，不存在「等它出现」）", reds)
+
+    # ── 宽度 8：「备注段」⊆ 备注段01..08（N_TEXT=8 夹具）⇒ 恰好在上限上 ⇒ 放行
+    r2, d2 = call(core, top=500, watch_text=["备注段"])
+    ck2 = (r2.get("data") or {}).get("watch_校验") or {}
+    ev["宽度8"] = {"ok": r2.get("ok"), "命中节点数": ck2.get("命中节点数")}
+    need(r2.get("ok") is True,
+         "恰好命中 %d 个（=上限）的声明被拒了（边界 off-by-one）：%s"
+         % (N_TEXT, (r2.get("warning") or "")[:160]), reds)
+    need(int((ck2.get("命中节点数") or {}).get("备注段") or 0) == N_TEXT,
+         "边界放行的那条命中数应恰为 %d，实得 %r" % (N_TEXT, ck2.get("命中节点数")), reds)
+
+    # ── 条数上限 32 仍生效（新规不挤掉老规）
+    many = ["串%02d" % i for i in range(33)]
+    r3, _ = call(core, top=500, watch_text=many)
+    need(r3.get("ok") is False and "32" in str(r3.get("warning") or ""),
+         "33 条声明没被条数上限拒：%s" % (r3.get("warning") or "")[:120], reds)
+    r4, _ = call(core, top=500, watch_text=many[:32], watch_pending=True)
+    need(r4.get("ok") is True, "恰好 32 条挂起被拒了（条数上限应是 32 不是 31）", reds)
+    core._screen_forget(0)
+    fx.timer_tick = 0
+    fx.quota = 3
+    return "S5 声明宽度上限", reds, ev
+
+
+def check_watch_reject_ctx(core, fx):
+    """S6 · 拒绝信封带屏上下文（窗E1 · 修 Z4 F3）：screen_version / window /
+    对象总数 / blind_spots 四样齐全，且明写「这是校验失败，不是屏幕空」；
+    仍不回 objects。宽度拒绝的信封同款。"""
+    reds = []
+    ev = {}
+    core._screen_forget(0)
+    fx.timer_tick = 0
+    fx.quota = 3
+
+    # ── unmatched 拒绝的信封
+    r1, d1 = call(core, top=500, watch_text=["不存在串xyz"])
+    data = r1.get("data") or {}
+    ev["unmatched拒绝信封"] = {"ok": r1.get("ok"), "code": r1.get("code"),
+                       "screen_version": data.get("screen_version"),
+                       "window": data.get("window"),
+                       "对象总数": data.get("对象总数"),
+                       "blind_spots": (r1.get("blind_spots") or [])[:3]}
+    need(r1.get("ok") is False, "unmatched 该拒没拒", reds)
+    need(bool(data.get("screen_version")),
+         "拒绝信封缺 screen_version（agent 分不清是哪一屏的账）", reds)
+    win = data.get("window") or {}
+    need(isinstance(win, dict) and win.get("hwnd") is not None and win.get("title"),
+         "拒绝信封缺 window{hwnd,title}（agent 分不清是不是拿错了窗口）：%r" % win, reds)
+    total = data.get("对象总数")
+    need(isinstance(total, int) and total > 0,
+         "拒绝信封缺 对象总数（agent 分不清白屏与声明写错）：%r" % total, reds)
+    bs = " ".join(str(b) for b in (r1.get("blind_spots") or []))
+    need("校验失败" in bs and "屏幕空" in bs,
+         "blind_spots 没明写「这是校验失败，不是屏幕空」：%s" % bs[:200], reds)
+    need(not d1, "拒绝时仍回了 objects（会被当成声明已兑现）", reds)
+
+    # ── 宽度拒绝的信封同款。★ 分层：宽度上限**会不会生效**归 S5 管（拆了它 S5 红）；
+    #   本组只管「拒的时候信封要全」—— 所以宽度调用若被放行（如 --inject watch_width），
+    #   这里如实记账不越权红，否则一条缺陷带红两组、判别力反而糊。
+    r2, d2 = call(core, top=500, watch_text=["选项格0"])
+    data2 = r2.get("data") or {}
+    ev["宽度拒绝信封"] = {"ok": r2.get("ok"),
+                      "screen_version": bool(data2.get("screen_version")),
+                      "对象总数": data2.get("对象总数")}
+    if r2.get("ok") is False:
+        need(bool(data2.get("screen_version"))
+             and isinstance(data2.get("对象总数"), int) and data2.get("对象总数") > 0,
+             "宽度拒绝的信封没带屏上下文", reds)
+        bs2 = " ".join(str(b) for b in (r2.get("blind_spots") or []))
+        need("校验失败" in bs2 and "屏幕空" in bs2,
+             "宽度拒绝的 blind_spots 没明写「校验失败≠屏幕空」：%s" % bs2[:200], reds)
+        need(not d2, "宽度拒绝时仍回了 objects", reds)
+    else:
+        ev["宽度拒绝信封"]["说明"] = "宽度上限未生效（归 S5 管），信封形状无从验"
+    core._screen_forget(0)
+    fx.timer_tick = 0
+    fx.quota = 3
+    return "S6 拒绝信封带屏上下文", reds, ev
+
+
 
 # ======================================================================
 # --live：真开一个自己的 tkinter 窗口（用完立刻关）
@@ -1634,7 +1818,10 @@ def main():
                      ("(10) since 的版本应答", lambda: check_since_version_reply(core, fx)),
                      ("S1 声明即不豁免", lambda: check_watch_declared(core, fx)),
                      ("S2 未声明不进位", lambda: check_watch_undeclared(core, fx)),
-                     ("S3 未命中必拒", lambda: check_watch_unmatched(core, fx))):
+                     ("S3 未命中必拒", lambda: check_watch_unmatched(core, fx)),
+                     ("S4 重叠声明全收", lambda: check_watch_shadow_allhit(core, fx)),
+                     ("S5 声明宽度上限", lambda: check_watch_width(core, fx)),
+                     ("S6 拒绝信封带屏上下文", lambda: check_watch_reject_ctx(core, fx))):
         title, reds, ev = fn()
         res[title] = reds
         print("")
