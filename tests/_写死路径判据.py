@@ -70,6 +70,10 @@ def classify(rel):
     if low == "readme.md" or low == "contract/tools.json" or low == "install.ps1" \
             or low == ".gitignore" or low.startswith("build/"):
         return ("G", "契约转义示例/安装器天职/忽略规则/打包配置")
+    # ★ 2026-10-17（A 档：证据文档进仓）：说明/索引/判据清单里的盘符路径是**示例或历史引用**，
+    #   运行期不读、也不参与构建 ⇒ 归 G 类（契约/文档）。新增文档不用再逐条改判据。
+    if low.startswith("docs/"):
+        return ("G", "文档里的示例/历史路径，运行期不读")
     if b.startswith("legacy_tools/"):
         return ("C", "生成产物：提示文案或产品默认值；受 CHK-A 守，要改必须改真源")
     if b.startswith("tools/"):
