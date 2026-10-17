@@ -140,14 +140,12 @@ def pump(ms=120):
 
 
 def make_test_window(title="窗S_自起测试靶"):
-    """起靶窗 —— ★ 必须关在**另一个进程**里（DSH 2026-10-17 改）。
+    """起靶窗 —— ★ 必须是**非 Python 宿主的普通桌面程序**（DSH 2026-10-17 三改）。
 
-    为什么：自指保护（窗K/P0）按**身份**拦「把动作打给自己」。同一个进程自建自点，
-    会被正确地拒绝（code=3 白名单/敏感窗口）—— 那不是缺陷，是设计。
-    ⇒ 靶窗宿主 = `tests\\_wS_靶标进程.py` 子进程，本进程只拿它的句柄。
-
-    ★ 握手用**文件**不用管道：第一版用 stdout.readline，子进程一沉默父进程就永久挂住
-      （2026-10-17 实测挂了 3 分钟，只能强杀）。现在是「子进程写报告文件 → 父进程轮询」。
+    为什么：自指保护（窗K/P0）**按属主进程名硬拒 `python.exe`**（授权/急停弹窗都是
+    python 起的，见 act.py 的 BLOCKED_PROCESSES_HARD）。任何 python 拥有的窗**永远点不到**
+    —— 那不是缺陷，是设计。⇒ 靶窗由 `tests\_wS_靶标进程.py` 现场编的
+    `_wS_target.exe`（WinForms）拥有；"靶被打勾"由**状态文件**判定。
     """
     import subprocess
     import tempfile
@@ -155,83 +153,100 @@ def make_test_window(title="窗S_自起测试靶"):
     host = os.path.join(here, "_wS_靶标进程.py")
     if not os.path.isfile(host):
         raise RuntimeError("靶窗宿主不在：%s" % host)
-    box = tempfile.mkdtemp(prefix="agentctl_wS_target_")
-    report = os.path.join(box, "report.json")
-    stop = os.path.join(box, "stop")
-    proc = subprocess.Popen([sys.executable, "-X", "utf8", host, report, stop, "300"],
-                            stdin=subprocess.DEVNULL,
-                            stdout=subprocess.DEVNULL,
-                            stderr=subprocess.DEVNULL)
-    w = None
+    state = os.path.join(tempfile.mkdtemp(prefix="agentctl_wS_target_"), "state.txt")
+    proc = subprocess.Popen([sys.executable, "-X", "utf8", host, state],
+                            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                            stderr=subprocess.DEVNULL, text=True,
+                            encoding="utf-8", errors="replace")
+    top = 0
     t0 = time.time()
-    while time.time() - t0 < 15:
-        if os.path.isfile(report):
-            try:
-                w = json.load(open(report, encoding="utf-8"))
-                break
-            except Exception:
-                pass
+    while time.time() - t0 < 20:
+        line = (proc.stdout.readline() or "").strip()
+        if line.startswith("{"):
+            break
         if proc.poll() is not None:
             break
-        time.sleep(0.05)
-    if not w or "top" not in w:
+    # 等窗体真正出现（FindWindow 按时标题找）
+    import win32gui
+    while time.time() - t0 < 20:
+        top = win32gui.FindWindow(None, title)
+        if top:
+            break
+        time.sleep(0.1)
+    if not top:
         try:
-            proc.kill()
+            proc.terminate()
         except Exception:
             pass
-        raise RuntimeError("靶窗宿主没报句柄：%r" % (w,))
-    w["proc"] = proc
-    w["stop"] = stop
-    w["title"] = title
-    pump(200)
-    return w
+        raise RuntimeError("靶窗没出来（FindWindow 找不到标题 %r）" % title)
+    pump(300)
+    return {"top": int(top), "state": state, "proc": proc, "title": title}
 
 
 def destroy_test_window(w):
     p = (w or {}).get("proc")
+    # ★ 先按 pid 杀**靶 exe 本体**（它是启动器的孙进程；只 terminate 启动器会留下窗）
+    try:
+        import os as _os
+        pidf = _os.path.splitext(w.get("state", ""))[0] + ".exe.pid"
+        if _os.path.isfile(pidf):
+            pid = int(open(pidf, encoding="utf-8").read().strip() or 0)
+            if pid:
+                import subprocess as _sp
+                _sp.run(["taskkill", "/F", "/PID", str(pid)],
+                        capture_output=True, timeout=10)
+    except Exception:
+        pass
     if p is not None:
         try:
-            open(w["stop"], "w").close()          # 先礼：让它自己关窗退出
-        except Exception:
-            pass
-        try:
-            p.wait(timeout=3)
+            p.terminate()
+            p.wait(timeout=5)
         except Exception:
             try:
-                p.terminate()                     # 后兵
-                p.wait(timeout=3)
+                p.kill()
             except Exception:
-                try:
-                    p.kill()
-                except Exception:
-                    pass
+                pass
         return
     try:
-        u32.DestroyWindow(w["btn"])
         u32.DestroyWindow(w["top"])
     except Exception:
         pass
 
 
-def btn_state(hbtn):
-    return int(u32.SendMessageW(hbtn, BM_GETCHECK, 0, 0))
+def btn_state(w):
+    """靶状态：读**状态文件**（WinForms 靶点中会写 "1"）。BST_CHECKED 仍是 1，断言不用改。"""
+    try:
+        with open(w["state"], encoding="utf-8") as f:
+            return int((f.read() or "0").strip() or 0)
+    except Exception:
+        return 0
 
 
-def btn_reset(hbtn):
-    """把靶复位成未勾选。
+def btn_reset(w):
+    """把靶复位成未勾选（写文件即可 —— 这是夹具复位，不是被测对象）。"""
+    try:
+        with open(w["state"], "w", encoding="utf-8") as f:
+            f.write("0")
+    except Exception:
+        pass
+    pump(120)
 
-    ★ 刻意**不走动作出口**：这是测试夹具的复位，不是被测对象。
-      走 dispatch 复位会连带消耗通行证次数、租约，还会污染 action_guard 的计数
-      （它盯的就是「同一个 actor 连着对同一目标动手」）。
+
+def btn_screen_center(w):
+    """复选框中心 ⇒ 屏幕坐标。
+
+    ★ 2026-10-17：窗口有 **DPI 缩放**（380x200 的窗实测 570x300）⇒ 布局里的
+    Left=30/Top=45/W=280/H=30 是 DIP，客户区像素要用 scale 换算，否则点偏
+    （实测就是"点到了窗但没打勾"）。scale 用「客户区宽 / 380」现算。
     """
-    u32.SendMessageW(hbtn, BM_SETCHECK, BST_UNCHECKED, 0)
-    pump(150)
-
-
-def btn_screen_center(hbtn):
     import win32gui
-    l, t, r, b = win32gui.GetWindowRect(int(hbtn))
-    return [(l + r) // 2, (t + b) // 2]
+    l_, t_, r_, b_ = win32gui.GetClientRect(int(w["top"]))
+    cw = max(1, r_ - l_)
+    scale = cw / 380.0
+    x = int((30 + 140) * scale)
+    y = int((45 + 15) * scale)
+    sx, sy = win32gui.ClientToScreen(int(w["top"]), (x, y))
+    return [int(sx), int(sy)]
 
 
 def cursor_pos():
@@ -364,8 +379,8 @@ def assert_experiment_denied(engage_brake):
     W = make_test_window()
     ev = {"engage_brake": engage_brake}
     try:
-        btn_reset(W["btn"])
-        xy = btn_screen_center(W["btn"])
+        btn_reset(W)
+        xy = btn_screen_center(W)
         ev["xy"] = xy
         ev["flag_前"] = bool(os.path.exists(gate.BRAKE_FLAG))
 
@@ -388,7 +403,7 @@ def assert_experiment_denied(engage_brake):
         pump(200)
         before = capture_hwnd(W["top"])
         cur_before = cursor_pos()
-        st_before = btn_state(W["btn"])
+        st_before = btn_state(W)
         ev["前"] = {"像素": (len(before[0]) if before else 0),
                     "指针": list(cur_before) if cur_before else None,
                     "靶状态": st_before}
@@ -397,7 +412,7 @@ def assert_experiment_denied(engage_brake):
         pump(350)
         after = capture_hwnd(W["top"])
         cur_after = cursor_pos()
-        st_after = btn_state(W["btn"])
+        st_after = btn_state(W)
         ev["动作"] = {"ok": bool(r.get("ok")), "code": r.get("code"),
                       "warning": r.get("warning"),
                       "data_raw": ((r.get("data") or {}).get("raw") or "")[:400]}
@@ -416,7 +431,7 @@ def assert_experiment_denied(engage_brake):
         ev["断言成立"] = bool(good)
         return bool(good), ev
     finally:
-        btn_reset(W["btn"])
+        btn_reset(W)
         destroy_test_window(W)
 
 
