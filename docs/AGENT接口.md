@@ -195,7 +195,7 @@ AgentCtl 是这台 Windows 机器上**电脑控制的唯一入口**：看屏幕�
 ```
 
 **桌面窗口场景**能用控件名就别用坐标：`ctl_click --name "保存"` 比 `--xy` 稳得多。
-> ⚠️ **这句只对桌面窗口成立。** 网页（Chromium 内核）页面里 `--name` 只看得见浏览器外壳、`eid` 在 D1 修好之前不能跨调用用 —— **网页场景照 §3-bis 走**。
+> ⚠️ **这句只对桌面窗口成立。** 网页（Chromium 内核）页面里 `--name` 只看得见浏览器外壳；`eid` **已于 2026-10-17 修好、可跨调用**（窗口内容变了会返回 `STALE_SCREEN`，重扫即可）—— **网页场景仍照 §3-bis 走**。
 
 **澄清两件容易被猜错的事**：
 - **按控件名点击（`name`）不需要 `from_capture`** —— 它靠 UIA 现查，不依赖你刚才看的那张图。但**建议**先 `ctl_tree` 确认那个名字真在树里。（⚠️ 网页场景是例外，见 §3-bis）
@@ -330,7 +330,7 @@ GET /v1/events?event_id=10231&limit=5
 | `ctl_shot` | `POST /v1/perceive/shot` | `hwnd`(省略=整屏), `region`=[l,t,r,b], `scale`(0.5), `format`("jpeg"), `quality`(70), `inline`(false), `look`(false), `why`("") |
 | `ctl_tree` | `POST /v1/perceive/tree` | `hwnd`*, `max_nodes`(600), `max_depth`(25), `roles`(["interactive","text"]), `detail`(false) |
 | `ctl_find` | `POST /v1/perceive/find` | `hwnd`*, `query`*, `limit`(40), `max_nodes`(3000), `detail`(false) |
-| `ctl_click` | `POST /v1/act/click` | `hwnd`*, 定位方式：**`xy`=[x,y] ＋ `from_capture`（最稳，网页场景就用它，见 §3-bis）** ／ `eid`（配 `expect`；**D1 修好前不许跨调用用**）／ `name`（**网页里只命中外壳**，桌面窗口才适用）；`button`("left"), `retry`(1), `dry_run`(false) |
+| `ctl_click` | `POST /v1/act/click` | `hwnd`*, 定位方式：**`xy`=[x,y] ＋ `from_capture`（最稳，网页场景就用它，见 §3-bis）** ／ `eid`（配 `expect`；**D1 已修好、可跨调用**，窗口内容变化后返回 `STALE_SCREEN` 需重扫）／ `name`（**网页里只命中外壳**，桌面窗口才适用）；`button`("left"), `retry`(1), `dry_run`(false) |
 | `ctl_type` | `POST /v1/act/type` | `hwnd`*, `text`*, `clear`(true), `force_send`(false) |
 | `ctl_fill` | `POST /v1/act/fill` | `hwnd`*, `xy`*, `from_capture`*, `text`*, `clear`(true) |
 | `ctl_lease` | `POST /v1/lease` | `action`*("acquire"/"renew"/"release"/"status"), `actor`, `scopes`=["B"], `ttl_sec`(600，上限 600) |
@@ -427,7 +427,7 @@ agent: （自动醒）收到，B 级，继续
 `ctl_find` 直接返回结构化节点；`ctl_tree` 默认只给**紧凑文本**，要结构化就加 `detail=true`。
 
 ```jsonc
-{ "eid": "e120",          // 元素 id —— ⚠️ **D1 修好之前不许跨调用用**；同一个号只在拿到它的那一次返回里有效
+{ "eid": "e120",          // 元素 id —— ✅ **D1 已修好、可跨调用**；窗口内容变化后会返回 STALE_SCREEN，重扫即可
   "depth": 3,            // 在树里的层级（渲染时按相对深度缩进）
   "type": "ButtonControl",
   "name": "管理订阅",
@@ -463,7 +463,9 @@ agent: （自动醒）收到，B 级，继续
 ⇒ **同一个 `e120` 在两张表里指的根本不是同一个节点，窗口完全静止也一样点错。**
 `uia_tree.py` 的 `walk()` 里早就把同一个坑记下来了：`roles=("all",)` 会退化成跟默认一样，扫过节点数直接对不上（实测 787 → 3）。
 
-**所以：修好之前 `eid` 不许跨调用使用** —— 只允许在「拿到它的那一次返回」里用。网页场景请走 §3-bis 的坐标 ＋ `from_capture`。（D1 正在修；修好之后本节会更新。）
+**所以：`eid` 现在可以跨调用用了。**（2026-10-17 修好 D1：core.py 旁表 + 身份复核，签发与重解析走同一口径；判据 `_T1_W2` 15 绿）
+★ 唯一的新鲜度约束：**窗口内容变了 ⇒ 旧 eid 失效**，工具会返回 `STALE_SCREEN` 并提示重扫，**别拿同一个 eid 重试**。
+网页场景仍推荐 §3-bis 的坐标 ＋ `from_capture`（少一次解析，不是安全要求）。
 
 ---
 
@@ -495,7 +497,7 @@ ctl_click    --actor <你> --hwnd <hwnd> \
              --xy <center_x>,<center_y> --from_capture <capture_id>
 ```
 
-**为什么不再拿 `--eid` 当默认**：见上文「`eid` 是什么」那张 roles 口径表 —— 签发与重解析口径不同，同一个号在两张表里指不同节点，**窗口静止也会点错**。`--eid` 修好（D1）之前**不许跨调用用**。
+**为什么不再拿 `--eid` 当默认**：见上文「`eid` 是什么」那张 roles 口径表 —— 签发与重解析口径不同，同一个号在两张表里指不同节点，**窗口静止也会点错**。`--eid` 自 2026-10-17 起**可以跨调用用**（窗口内容变化后返回 `STALE_SCREEN`，重扫即可）。
 
 **什么时候退回截图**：
 
@@ -546,7 +548,7 @@ ctl_click    --actor <你> --hwnd <hwnd> \
 | `ctl_tree` | UI 元素树（**不截图**；能用它就别用坐标，更别用截图） | A |
 | `ctl_find` | 按名字搜元素（**先想清楚要什么就用这个**，比拉全树省一个数量级） | A |
 | `ctl_browser` | 浏览器 CDP（pages/text/find/eval） | A |
-| `ctl_click` | 点击（**坐标 ＋ `from_capture` 最稳，网页场景就用它，见 §3-bis**；`eid` 在 D1 修好前不许跨调用用；`name` 在网页里只命中外壳） | B |
+| `ctl_click` | 点击（**坐标 ＋ `from_capture` 最稳，网页场景就用它，见 §3-bis**；`eid` 已修好、可跨调用（窗口变了会 STALE，重扫即可）；`name` 在网页里只命中外壳） | B |
 | `ctl_type` / `ctl_fill` | 打字 / 原子填字段（默认先清空） | C |
 | `ctl_lease` | 申请/释放单写者租约 | 免证（需 token） |
 | `ctl_authorize` | 请用户授权（唤起弹窗） | 免证 |

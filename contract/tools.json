@@ -435,7 +435,7 @@
     {
       "name": "ctl_click",
       "title": "点击",
-      "description": "点击。★ 三条路径按 2026-10-14 的实测结论重排：① xy（屏幕物理坐标 ＋ from_capture，**最稳，网页场景就用它**）② eid（⚠️ D1 修好之前**不许跨调用使用** —— 签发那遍与重解析那遍的 roles 口径不同，同一个号在两张表里指不同节点，窗口静止也会点错）③ name（⚠️ 网页里只命中浏览器外壳，D2 修好前只对桌面窗口适用）。写法见 docs\\AGENT接口.md §3-bis。",
+      "description": "点击。★ 三条路径按 2026-10-14 的实测结论重排：① xy（屏幕物理坐标 ＋ from_capture，**最稳，网页场景就用它**）② eid（✅ **D1 已修好（2026-10-17）**：签发/重解析同一 roles 口径 + 身份复核，判据 `_T1_W2` 15 绿；**可跨调用**，但窗口内容变化后会返回 `STALE_SCREEN`，按提示重扫即可）③ name（⚠️ 网页里只命中浏览器外壳，D2 修好前只对桌面窗口适用）。写法见 docs\\AGENT接口.md §3-bis。",
       "annotations": {
         "readOnlyHint": false,
         "destructiveHint": false,
@@ -494,7 +494,7 @@
           },
           "eid": {
             "type": "string",
-            "description": "⚠️ **D1 修好之前不许跨调用使用。** ctl_tree / ctl_find 返回的元素 id（如 e120）是**遍历当场编的序号**。点之前确实会重新解析一遍并核对 expect，但**重新解析用的 roles 与签发用的 roles 不同**（签发 core.py 的 t_tree = (\"interactive\",\"text\")，重解析 core.py 的 t_click eid 分支 = (\"all\",)）⇒ 同一个号在两张表里指不同节点。网页场景请改用 xy ＋ from_capture（见 docs\\AGENT接口.md §3-bis）。"
+            "description": "✅ **D1 已于 2026-10-17 修好**（core.py 旁表 + 身份复核；判据 `_T1_W2` 15 绿）：ctl_tree / ctl_find 返回的 eid（如 e120）**可以跨调用使用**。旧限制是「签发用 roles=interactive,text、重解析用 all ⇒ 同号不同节点」，该口径差已消除。★ 仍有新鲜度约束：**窗口内容变化后 eid 会失效并返回 `STALE_SCREEN`**，按提示重扫一次即可（不要重试同一个 eid）。网页场景仍首选 xy ＋ from_capture（见 docs\\AGENT接口.md §3-bis）——那是为了少一次解析，不是因为 eid 不安全。"
           },
           "expect": {
             "type": "string",
@@ -1057,7 +1057,7 @@
   "_agent_call_discipline": [
     "1. 开工先 ctl_status：看有没有通行证、租约在谁手里、刹车松没松、录制开没开。",
     "2. 动手前先 ctl_windows 拿实时 rect；★ 不许缓存坐标。",
-    "3. 用坐标就必须带 from_capture；★ 网页场景**只用坐标**（见 docs\\AGENT接口.md §3-bis）—— 别用 eid（D1 修好前不许跨调用用）/ name（网页里只命中外壳）。桌面窗口才轮得到「能用 UIA 控件名就不要用坐标」。",
+    "3. 用坐标就必须带 from_capture；★ 网页场景**只用坐标**（见 docs\\AGENT接口.md §3-bis）—— eid 可跨调用（D1 已修好，窗口变了会返回 STALE_SCREEN 重扫即可）/ name（网页里只命中外壳）。桌面窗口才轮得到「能用 UIA 控件名就不要用坐标」。",
     "4. 每个写动作之后不要相信返回值里的 changed——自己 ctl_shot 或 ctl_timeline 核验一次到达条件。",
     "5. 遇到 code=8（无变化）不要当成功；遇到 code=12（capture 过期）重新观测再动手，别硬点。",
     "6. 无证（code=9）就停下向用户申请，★ 不许试图绕过。",

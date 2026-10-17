@@ -115,7 +115,12 @@ for nm, s in CONTRADICTIONS:
 for sym in ('t_tree', 'find()', 't_click'):
     want('D1-roles口径表-%s' % sym, has(md, sym),
          '缺 roles 口径表条目 %s ⇒ agent 不知道为什么 eid 不能跨调用用' % sym)
-want('D1-不许跨调用', has(md, '不许跨调用'), '未写明「eid 不许跨调用使用」')
+# ★ 2026-10-17（F1 文档纠偏）：D1 已修好，旧断言「不许跨调用」变成在钉过时口径。
+    #   新断言**更强**：既要有「可跨调用」，也要有「窗口变了返 STALE_SCREEN（重扫）」——
+    #   两条都查，覆盖「允许用 + 用错怎么自救」，不是放宽。
+    want('D1-已修好-可跨调用+STALE',
+         has(md, '可跨调用') and has(md, 'STALE_SCREEN'),
+         '未写明「eid 已修好、可跨调用」与「窗口内容变了返回 STALE_SCREEN」')
 
 # ── ④ 边框条目（W1-B），必须带「接线未生效」前提句 ────────────
 eb = js.get('conventions', {}).get('edge_border_hint')
@@ -142,11 +147,14 @@ want('契约-discipline第3条已改', any('网页场景' in x and '只用坐标
 cc = next((t for t in js.get('tools', []) if t.get('name') == 'ctl_click'), None)
 want('契约-ctl_click存在', cc is not None, 'tools 里没有 ctl_click')
 if cc:
-    want('契约-ctl_click描述已重排', '不许跨调用使用' in cc.get('description', ''),
-         'ctl_click.description 仍按旧的 eid-first 口径写')
+    # ★ 2026-10-17（F1）：旧条件是 `'不许跨调用使用' in description` —— 名字说"已重排"，
+    #   实际却在要求**那句过时禁令存在**（名与条件相反）。改成查新事实。
+    want('契约-ctl_click描述已写明 eid 已修好', '可跨调用' in cc.get('description', ''),
+         'ctl_click.description 没写「eid 已修好、可跨调用」')
     eid_desc = cc.get('input_schema', {}).get('properties', {}).get('eid', {}).get('description', '')
-    want('契约-eid不再是首选', 'D1 修好之前不许跨调用使用' in eid_desc,
-         'ctl_click.eid.description 仍标「首选」')
+    # ★ 同上：旧条件要求那句禁令存在。改成查「失效后怎么自救」这条更强的约束。
+    want('契约-eid描述写明 STALE 兜底', 'STALE_SCREEN' in eid_desc,
+         'ctl_click.eid.description 没写「窗口变了返回 STALE_SCREEN、重扫即可」')
 
 # ── ⑥ 码表一个字都不许动 ──────────────────────────────────────
 want('码表-error_codes未动',
