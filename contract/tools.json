@@ -613,6 +613,115 @@
       "returns": "{ field_xy, old_sha256, new_sha256, changed, frame_before, frame_after }"
     },
     {
+      "name": "ctl_scroll",
+      "title": "滚动",
+      "description": "滚动窗口内容。★ **浏览器/网页场景优先用 ctl_browser 的 CDP 通道，不要用这个**：CDP 能拿到精确的 scrollY、能确认真的滚到了，而不是「动作发出去了」。★ 网页没开 CDP 时再用本工具。**方向口径（唯一口径，别自己猜）**：`amount > 0` 向上（看更靠前的内容）、`amount < 0` 向下（看更靠后的内容），core.py **原样透传**不做取反。⚠️ 老脚本 do_scroll 有两条分支，看着像自相矛盾其实**不是**（取证见 work/_A1_receipt.md 第二节）：UIA 分支 `LargeIncrement if amount < 0`，而 `ScrollAmount.LargeIncrement` 的定义是 **PageDown（向下）**、`LargeDecrement` 是 **PageUp（向上）** —— Increment/Decrement 讲的是**滚动偏移的增减**，不是屏幕方向；滚轮分支 `wheel(120 * amount)`，而 mouseData 的**正值 = 向前滚 = 向上**。两条分支各自独立算出来的结论是同一条：**负数 = 向下**。★ **滚动前先取 scroll_y**（CDP：`document.scrollingElement.scrollTop`；桌面：用 ctl_shot 看当前可视区），滚动后比一比 —— GUI 动作没有返回值，「回执说成功」不等于「内容滚过去了」。★ `at` **只做越界校验**，不决定落点：老脚本的 do_scroll 不收落点参数，实际落在控件中心（或窗口中心），本次实际落点会在返回的 `data.落点实际` 里回填。★ `allow_foreground` 不传 = true 就**拒绝**：老脚本有「动作前自动置前」这一步，会把你正在用的窗口切走，抢注意力；放行会写一条 `action_allow_foreground` 事件留痕。★ 返回的 `blind_spots` 里始终有一条「动作发出去了 ≠ 内容滚到位了」，转述结果时必须一并带上。",
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false
+      },
+      "gate": "B",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "hwnd": {
+            "type": "integer"
+          },
+          "amount": {
+            "type": "integer",
+            "minimum": -100,
+            "maximum": 100,
+            "not": {
+              "const": 0
+            },
+            "description": "滚动量。**正 = 向上**（看更靠前）、**负 = 向下**（看更靠后）；单位是「格」（滚轮一格 / 一个 LargeIncrement）。0 会被拒 —— 它什么都不会动，表现和「已经滚到头」一模一样，是最难查的一类故障。"
+          },
+          "at": {
+            "type": "array",
+            "items": {
+              "type": "integer"
+            },
+            "minItems": 2,
+            "maxItems": 2,
+            "description": "★可选，**只做校验用**：屏幕物理坐标，越出窗口矩形就拒绝（code=5）。⚠️ 它**不决定落点** —— 老脚本的 do_scroll 不收落点参数，实际滚轮打在控件中心（控件矩形为空时退回窗口中心），本次实际落点看返回的 `data.落点实际`。"
+          },
+          "allow_foreground": {
+            "type": "boolean",
+            "default": false,
+            "description": "★显式放行「把目标窗口切到前台」。默认 false ⇒ 不传就拒绝（code=5），一个像素都不滚。老脚本滚轮分支必须靠前台才能把滚轮发给光标下的窗口；抢注意力要明说，放行会写 `action_allow_foreground` 事件。"
+          },
+          "dry_run": {
+            "type": "boolean",
+            "default": false
+          }
+        },
+        "required": [
+          "hwnd",
+          "amount"
+        ],
+        "additionalProperties": false
+      },
+      "returns": "{ 方向: 向上|向下, amount, 落点请求, 落点实际, 走哪条分支: UIA_Scroll|SendInput_滚轮, raw }"
+    },
+    {
+      "name": "ctl_keys",
+      "title": "按键",
+      "description": "发送虚拟键 / 键组合（C 级）。**键名走白名单**：PageDown / PageUp / Home / End / ArrowUp / ArrowDown / ArrowLeft / ArrowRight / F1–F12 / Enter / Tab / Esc / Escape / Space / Backspace / Delete / Insert；也可以直接给这些键的十进制或十六进制 vk（如 `34` / `0x22`）。⚠️ **不在白名单里的 vk 一律拒绝**（code=5）—— 虚拟键码是个 16 位空间，其中绝大多数是「切窗口 / 截屏 / 锁屏 / 重启」这类组合键，全量放行等于把它们直接递出去。★ 只声明了 `ctrl` 一个修饰键：老脚本的 do_keys 目前只有 ctrl 一路组合，要 shift / alt 得改 legacy_tools/act.py。★ **必须显式放行置前**：`allow_foreground` 不传或不是布尔 true 就拒绝（code=5），一个键都没发出去 —— 按键只能发给前台窗口，老脚本的「动作前自动置前」会把你正在用的窗口切走，抢注意力；放行会写一条 `action_allow_foreground` 事件留痕。★ 这不是打字：一次性字符串请用 ctl_type。★ 返回的 `blind_spots` 里始终有一条「键发出去 ≠ 界面响应了」（老脚本的证据是前后截图，界面没动时会报「页面无变化」，别把那种情况当成功）。",
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false
+      },
+      "gate": "C",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "hwnd": {
+            "type": "integer"
+          },
+          "keys": {
+            "type": "string",
+            "description": "白名单键名（`PageDown` 等），或这些键的十进制 / 十六进制虚拟键码（`34` / `0x22`）。非白名单一律拒绝并列出可用键。"
+          },
+          "ctrl": {
+            "type": "boolean",
+            "default": false,
+            "description": "配 Ctrl（按住 Ctrl → 敲键 → 松开 Ctrl）。★只有这一路组合 —— 老脚本不支持 shift / alt。"
+          },
+          "times": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 50,
+            "default": 1,
+            "description": "连按几次（退格清空常用 `Backspace` × N）。上限 50 —— 连按上百次多半是调用方的循环写错了。"
+          },
+          "scan_code": {
+            "type": "boolean",
+            "default": false,
+            "description": "走**扫描码注入**（VirtualBox 这类 PS/2 键盘模拟的目标必需）。默认 false。"
+          },
+          "allow_foreground": {
+            "type": "boolean",
+            "default": false,
+            "description": "★显式放行「把目标窗口切到前台」。默认 false ⇒ 不传就拒绝（code=5），一个键都没发出去。放行会写 `action_allow_foreground` 事件留痕。"
+          },
+          "dry_run": {
+            "type": "boolean",
+            "default": false
+          }
+        },
+        "required": [
+          "hwnd",
+          "keys"
+        ],
+        "additionalProperties": false
+      },
+      "returns": "{ vk, 键名, 解析, ctrl, 次数, raw }"
+    },
+    {
       "name": "ctl_lease",
       "title": "控制租约",
       "description": "申请/续期/释放单写者租约。写动作前必须持有。同一时刻只允许一个 actor 持有 B/C/D 权限；只读感知不受限。",
@@ -1048,8 +1157,6 @@
     }
   ],
   "_本版未列入（v1.1 补，列在这里是为了不和设计文档的完整清单打架）": {
-    "ctl_keys": "按键/组合键（C 级）——与 ctl_type 同源，先做打字已够用",
-    "ctl_scroll": "滚动（B 级）",
     "ctl_drag": "拖拽（D 级）——D 级要连续 20 次干净成功才解锁（铁律 11⑥），v1 不向 agent 暴露",
     "_ctl_focus": "（2026-10-06 修正）ctl_focus **已实现并列入 tools**，所以从这里移出。留着会让 check_consistency.py 报『同时在 tools 和 _本版未列入 里』，而且会误导读者以为它还没做。",
     "ctl_screen_info": "屏幕/DPI/多屏信息——并入 ctl_status 的 resources 字段返回，不单开工具"

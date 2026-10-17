@@ -17,6 +17,7 @@ from __future__ import annotations
 import glob
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -2278,6 +2279,206 @@ def t_fill(args: dict) -> dict:
     # ★ 2026-10-10：fill 老线同样要 C 级（do_fill gate.require(C)），理由同 t_type
     return _act("fill", args, argv, scope="C")
 
+# ────────────── 滚动：方向口径的**唯一定义处**（2026-10-17 · 窗A1）──────────────
+# ★ 为什么要提成常量：act.py 的 do_scroll 有两条分支，符号口径分散写在两处
+#   （UIA 分支、滚轮分支）。任何一处被人改反都不会有测试响 ——
+#   症状是「数值一点不动」，非常难查。口径必须**有且只有一处**能被读到。
+#
+# ★ 结论：源码里那两行看着像矛盾，其实**不是矛盾**（取证见 work/_A1_receipt.md 第二节）。
+#     UIA 分支：amt = LargeIncrement if amount < 0 else LargeDecrement
+#       ScrollAmount.LargeIncrement ≡ PageDown（向下）
+#       ScrollAmount.LargeDecrement ≡ PageUp（向上）
+#     滚轮分支：wheel(120 * amount)
+#       mouseData 的**正值 = 向前滚 = 向上**
+#     两条分支**各自独立**算出来的结论是同一条：**amount < 0 ⇒ 向下**。
+#     滚轮分支上方那句注释「负值 = 向下」是对的。之所以容易被读成矛盾，
+#     是因为把 Increment / Decrement 当成了「上 / 下」——
+#     它们讲的是**滚动偏移的增减**，不是屏幕上的方向。
+#
+# ★ 本项目对外口径（契约、判据、回执一律按这一条）：
+#     amount > 0 ⇒ 向上（看更靠前的内容）
+#     amount < 0 ⇒ 向下（看更靠后的内容）
+#     core.py **原样透传**，绝不取反 —— 取反就正好落进 act.py 注释里点名的反向 bug。
+SCROLL_NEGATIVE_IS_DOWN = True
+
+
+def _scroll_direction(amount: int) -> str:
+    """把 amount 翻成中文方向词。口径只从 SCROLL_NEGATIVE_IS_DOWN 取，不就地重写符号。"""
+    is_down = (amount < 0) == SCROLL_NEGATIVE_IS_DOWN
+    return "向下" if is_down else "向上"
+
+
+# ────────────── 按键：键名白名单（2026-10-17 · 窗A1）──────────────
+# ★ 为什么不直接收任意 vk 整数：虚拟键码是个 16 位空间，其中绝大多数是
+#   「切窗口 / 截屏 / 锁屏 / 重启」这类组合键。全量放行等于把它们直接递出去。
+#   白名单只收**导航与编辑类**的键 —— 而它们正是「读长页面」场景真正需要的那些。
+# ★ 反查表由白名单生成、不手写：同一份事实手写两遍，迟早对不上（老教训）。
+KEY_WHITELIST = {
+    "PageDown": 0x22, "PageUp": 0x21, "Home": 0x24, "End": 0x23,
+    "ArrowUp": 0x26, "ArrowDown": 0x28, "ArrowLeft": 0x25, "ArrowRight": 0x27,
+    "F1": 0x70, "F2": 0x71, "F3": 0x72, "F4": 0x73,
+    "F5": 0x74, "F6": 0x75, "F7": 0x76, "F8": 0x77,
+    "F9": 0x78, "F10": 0x79, "F11": 0x7A, "F12": 0x7B,
+    "Enter": 0x0D, "Tab": 0x09, "Esc": 0x1B, "Escape": 0x1B,
+    "Space": 0x20, "Backspace": 0x08, "Delete": 0x2E, "Insert": 0x2D,
+}
+KEY_VK_WHITELIST = {vk: name for name, vk in KEY_WHITELIST.items()}
+_KEY_NAMES = "、".join(sorted(KEY_WHITELIST))
+
+
+def _resolve_vk(keys) -> tuple:
+    """把 keys（键名或 vk 数值）解成虚拟键码。返回 (vk, 说明)；解不出时 vk 为 None。
+
+    收两种写法：白名单里的键名（"PageDown"），或该键的十进制 / 十六进制数值
+    （"34" / "0x22"）。数值**必须落在白名单的码集合里**，理由见 KEY_WHITELIST 上方。
+    """
+    s = str(keys or "").strip()
+    if not s:
+        return None, "keys 不能为空 —— 传一个键名（如 PageDown）或白名单里的 vk 数值"
+    if s in KEY_WHITELIST:
+        return KEY_WHITELIST[s], "键名 %s" % s
+    is_hex = s[:2].lower() == "0x"
+    try:
+        vk = int(s[2:], 16) if is_hex else int(s, 10)
+    except ValueError:
+        return None, ("keys 认不出：%r。可用键名 %s，"
+                      "或它们的十进制 / 十六进制数值（如 34 / 0x22）。" % (s, _KEY_NAMES))
+    if vk not in KEY_VK_WHITELIST:
+        return None, ("vk=0x%X（%d）不在白名单里 —— 这个 16 位空间里绝大多数是"
+                      "切窗口 / 截屏 / 锁屏这类组合键，不放行。可用键名：%s"
+                      "（或它们的十进制 / 十六进制数值）。"
+                      % (vk, vk, _KEY_NAMES))
+    return vk, "数值 %s ⇒ vk=0x%X（%s）" % (s, vk, KEY_VK_WHITELIST[vk])
+
+
+def _allow_foreground(args: dict, tool: str, what: str):
+    """会**主动切前台**的动作必须显式放行，且放行要留痕。成功返回 None。
+
+    ★ 为什么不给默认值：act.py 的 ensure_foreground 在目标不在前台时会
+      **主动把窗口切到前台**。这是会打断使用者正在做的事的动作 ——
+      静默做，等于控制系统替使用者抢注意力（本项目派单明令禁止）。
+    ★ 判据用 `is True` 而不是「假值即拒」：字符串 "true"、数字 1 都不算数，
+      只有 JSON 里的真布尔才放行 —— 否则 CLI 与 MCP 两条传输的口径会漂移。
+    """
+    hwnd = int(args.get("hwnd") or 0)
+    if args.get("allow_foreground") is True:
+        _ev("action_allow_foreground", tool=tool,
+            payload={"hwnd": hwnd, "动作": what, "放行前是否已在前台": _is_foreground(hwnd)})
+        return None
+    return env(code=gate.CODE_UNSTABLE,
+               warning=("%s 需要把目标窗口切到前台才发得出去（老脚本有「动作前自动置前」这一步）。"
+                        "本次**没有**放行 ⇒ 一个键 / 一格滚轮都没发出去。"
+                        "确实要打断当前操作，就显式传 allow_foreground=true —— "
+                        "放行会写一条 action_allow_foreground 事件留痕。" % what))
+
+
+def t_scroll(args: dict) -> dict:
+    """滚动（B 级）。**不重新实现输入** —— 只做服务层的校验、口径标注与回报解析。
+
+    ★ 为什么不自造滚轮：act.py 的 do_scroll 已有两条成熟分支
+      （UIA ScrollPattern / SendInput 滚轮）＋ 模态前置 ＋ 通行证 ＋ 额度 ＋ 证据。
+      服务层再写一份就等于出现第二个「判定逻辑定义处」—— 正是本项目反复出病的根。
+    """
+    hwnd = int(args.get("hwnd") or 0)
+    amount = int(args.get("amount") or 0)
+    if amount == 0:
+        return env(code=gate.CODE_UNSTABLE,
+                   warning=("amount=0 什么都不会动（滚轮增量为 0、Scroll 也不动），"
+                            "而它的表现和「已经滚到头」一模一样 —— 正是老脚本注释里"
+                            "点名过的那个难查故障。向上滚传正数、向下滚传负数，至少 ±1。"))
+
+    # ── at：只做**事实校验**，不传给老脚本 ──────────────────────────────
+    #   act.py 的 do_scroll 不收落点参数，实际落点是它自己按控件中心 / 窗口中心算的。
+    #   这里提前拒掉明显越界的 at，是为了让调用方**别以为 at 决定滚到哪**；
+    #   真正落在哪由老脚本的回报回填（见下面的「落点实际」与 blind_spots）。
+    #   ⚠ 位置在闸门**前面**：取窗口矩形是纯事实查询（不消耗、不改状态），
+    #     与 t_click 的①窗口可读性同一口径 —— 一个明显越界的落点不该先被
+    #     「你有没有租约」顶掉，那只会让调用方白跑一趟拿通行证。
+    at = args.get("at")
+    if at:
+        try:
+            ax, ay = _xy(at)
+        except Exception as e:
+            return env(code=gate.CODE_UNSTABLE,
+                       warning="at 要写成 x,y 两个整数（%s）" % e)
+        rect = _win_rect(hwnd)
+        if not rect:
+            return env(code=gate.CODE_UNSTABLE,
+                       warning="取不到 hwnd=%s 的窗口矩形 ⇒ 无法判断 at 越不越界。"
+                               "先 ctl_windows 确认窗口还在（已关掉就重开）。" % hwnd)
+        if not (rect[0] <= ax <= rect[2] and rect[1] <= ay <= rect[3]):
+            return env(code=gate.CODE_UNSTABLE,
+                       warning=("at (%d,%d) 不在 hwnd=%s 的窗口矩形 %s 内 ⇒ 拒绝，一格都没滚。"
+                                "再强调一次：at 只是**校验用**，老脚本的滚动落点由它自己按"
+                                "控件中心算，不听 at 的。要滚哪段内容请用 amount"
+                                "（正=向上、负=向下）。" % (ax, ay, hwnd, rect)))
+
+    err = _allow_foreground(args, "ctl_scroll", "滚动")
+    if err:
+        return err
+
+    argv = ["scroll", "--hwnd", str(hwnd), "--amount", str(amount)]
+    if args.get("dry_run"):
+        argv += ["--dry-run"]
+    r = _act("scroll", args, argv, scope="B")
+    if not r.get("ok"):
+        return r
+    raw = str((r.get("data") or {}).get("raw") or "")
+    m = re.search(r"光标置于 \((\d+),\s*(\d+)\)", raw)
+    r["data"] = {**(r.get("data") or {}),
+                  "方向": _scroll_direction(amount),
+                  "amount": amount,
+                  "落点请求": [ax, ay] if at else None,
+                  "落点实际": [int(m.group(1)), int(m.group(2))] if m else None,
+                  "走哪条分支": ("UIA_Scroll" if "走 UIA Scroll" in raw
+                                else ("SendInput_滚轮" if "SendInput 滚轮" in raw else None))}
+    r["blind_spots"] = list(r.get("blind_spots") or []) + [
+        "at 只做了越界校验，实际落点由老脚本自算（本次落在 %s）；"
+        "且「动作发出去了」不等于「内容滚到位了」—— 滚完自己核对一眼。"
+        % (r["data"]["落点实际"] or "回报里回填不出，见 data.raw")]
+    return r
+
+
+def t_keys(args: dict) -> dict:
+    """按键（C 级）。白名单键 ＋ 必须显式放行置前。**同样不重新实现输入**。
+
+    ★ 老脚本 do_keys 只有 ctrl 一路组合（shift / alt 要改 act.py，越界）。
+      所以契约的 modifiers 只声明 ctrl —— **不声明一个永远报错的参数**。
+    """
+    hwnd = int(args.get("hwnd") or 0)
+    vk, why = _resolve_vk(args.get("keys"))
+    if vk is None:
+        return env(code=gate.CODE_UNSTABLE, warning=why)
+    times = int(args.get("times") or 1)
+    if not 1 <= times <= 50:
+        return env(code=gate.CODE_UNSTABLE,
+                   warning="times 取 1..50（收到 %d）—— 连按上百次多半是调用方的循环写错了。"
+                           % times)
+
+    err = _allow_foreground(args, "ctl_keys", "按键")
+    if err:
+        return err
+
+    argv = ["keys", "--hwnd", str(hwnd), "--vk", "0x%X" % vk, "--times", str(times)]
+    if args.get("ctrl"):
+        argv += ["--ctrl"]
+    if args.get("scan_code"):
+        argv += ["--scan-code"]
+    if args.get("dry_run"):
+        argv += ["--dry-run"]
+    r = _act("keys", args, argv, scope="C")
+    if r.get("ok"):
+        r["data"] = {**(r.get("data") or {}),
+                     "vk": "0x%X" % vk,
+                     "键名": KEY_VK_WHITELIST.get(vk),
+                     "解析": why,
+                     "ctrl": bool(args.get("ctrl")),
+                     "次数": times}
+        r["blind_spots"] = list(r.get("blind_spots") or []) + [
+            "按键发出去不等于界面响应了 —— 老脚本的证据是前后截图，"
+            "没有 UI 变化时它会报「页面无变化」，那种情况别当成功。"]
+    return r
+
 
 def t_browser(args: dict) -> dict:
     """浏览器 CDP（包壳调 cdp.py）。★ 浏览器场景**优先走它，不要看像素**（§21 第⑤档）。
@@ -2352,6 +2553,8 @@ TOOLS = {
     "ctl_click": t_click,
     "ctl_type": t_type,
     "ctl_fill": t_fill,
+    "ctl_scroll": t_scroll,
+    "ctl_keys": t_keys,
     "ctl_focus": t_focus,
     "ctl_browser": t_browser,
     "ctl_task": lambda a: tasks_dispatch.handle(a, store=store, env=env,

@@ -58,12 +58,38 @@ INTERACTIVE_TYPES = frozenset({
 })
 
 # ── 有文字的类型（要读 Value/Text 的）
+# ★ F3 补（窗A2 · 2026-10-17）：补 PaneControl —— Chromium 的**裸 div**（无 role/aria）
+#   文本常挂在 Pane 上，过去不在白名单里 ⇒ 题干"读不到"有一部分是**被口径筛掉的**，
+#   不是 Chromium 不给。加它只是放宽一档，误收的代价（多几行文本）远小于漏题干。
 TEXT_TYPES = frozenset({
     "TextControl", "EditControl", "DocumentControl", "HyperlinkControl",
     "ListItemControl", "ComboBoxControl", "ButtonControl", "CheckBoxControl",
-    "RadioButtonControl", "TabItemControl",
+    "RadioButtonControl", "TabItemControl", "PaneControl",
 })
 
+# ★ F3 补·兜底（窗A2）：TEXT_TYPES 是白名单，白名单天生漏 —— 网页里自定义控件、
+#   自绘元素、Electron 内嵌页都可能挂在**任何** ControlType 上。所以再加一条
+#   兜底：**任何类型只要文字非空且长度 ≥ TEXT_MIN_LEN 就进 texts**。
+#   这两个开关是给"跑红自证"留的注入口（把 TEXT_FALLBACK 置 False 即退回补前口径）。
+TEXT_FALLBACK = True
+TEXT_MIN_LEN = 2          # 单字符不算文字（图标名/刻度这类噪音不进题干）
+
+# ── 视口口径（F3 · 窗A2 · 2026-10-17）────────────────────────────────────────
+#   病：walk() 过去**只滤零矩形、不裁剪视口** ⇒ 超星那种长页面里 y=17838 的节点
+#       被原样返回，agent 拿它当屏幕坐标点下去会落到别处。
+#       **这不是 agent 用错，是接口没给区分。**
+#   规矩：**只标注，不裁信息**。每个节点都带 in_view / scroll_y / doc_height /
+#       scroll_unknown；include_offscreen=False（默认）才只回视口内的，
+#       True 时全回且 in_view 照标 —— 屏外节点是"现在看不见"，不是坏节点。
+VIEWPORT_SYS = (
+    "in_view = 节点屏幕矩形 ∩ 窗口客户区，面积>0 才算看得见（None = 客户区取不到，未知不裁剪）；"
+    "in_view=false 只是「现在不在这一屏」，不是坏节点 —— 要它就 include_offscreen=True "
+    "重拉，或先滚动页面；scroll_y/doc_height 取不到时是 null 且 scroll_unknown=true，"
+    "不是 0（0 会被读成「已滚到顶」）"
+)
+
+# Document 的矩形比客户区高这么多才当成「整篇文档」（否则它可能只是可见那一屏）
+DOC_TALL_FACTOR = 1.05
 # ── 浏览器外壳：识别「我其实在网页里」时该滤掉的东西（= Windows-MCP 的 use_dom 思路）
 BROWSER_CHROME_NAMES = frozenset({
     "最小化", "最大化", "还原", "关闭", "返回", "前进", "刷新", "主页",
@@ -214,10 +240,174 @@ def _ident(ctrl, rect):
         return ("fb", tuple(rect))
 
 
+def _client_rect(handle):
+    """窗口**客户区**的屏幕矩形 [l,t,r,b]（物理像素，与 rect 同一坐标系）；取不到返回 None。
+
+    ★ 为什么不用根节点矩形当视口：根矩形含标题栏/边框/标签栏，
+      拿它当视口会把标题栏那一圈也算成"看得见"。
+    ★ DPI：进程在 _dpi_awareness() 里已经声明 PER_MONITOR_DPI_AWARE，
+      所以 GetClientRect/ClientToScreen 与 UIA 的 BoundingRectangle **同一套物理像素**，
+      不需要再乘缩放比（早期版本乘过 1.25，那是双乘，反而错位）。
+    ★ 多显示器：ClientToScreen 出来可能是负数，原样留着，不做 clamp。
+    """
+    try:
+        import ctypes
+        from ctypes import wintypes
+        h = wintypes.HWND(int(handle))
+        rc = wintypes.RECT()
+        if not ctypes.windll.user32.GetClientRect(h, ctypes.byref(rc)):
+            return None
+        org = wintypes.POINT(0, 0)
+        if not ctypes.windll.user32.ClientToScreen(h, ctypes.byref(org)):
+            return None
+        return [int(org.x), int(org.y),
+                int(org.x) + int(rc.right - rc.left),
+                int(org.y) + int(rc.bottom - rc.top)]
+    except Exception:
+        pass
+    try:                                   # 老环境没 ctypes.wintypes 时退回 pywin32
+        import win32gui
+        l, t, r, b = win32gui.GetClientRect(int(handle))
+        ox, oy = win32gui.ClientToScreen(int(handle), (0, 0))
+        return [int(ox), int(oy), int(ox) + int(r - l), int(oy) + int(b - t)]
+    except Exception:
+        return None
+
+
+def _in_view(rect, client):
+    """节点屏幕矩形 ∩ 窗口客户区，**面积 > 0** 才算看得见。
+
+    返回 True / False / **None**（客户区取不到 ⇒ 未知）。
+    ★ None 时上层一律**不裁剪** —— 判不出来就当看得见，宁可多给不许少给：
+      漏给 = agent 说"界面上没有这个东西"，那是更危险的错。
+    ★ 相交面积为 0（刚好在客户区下沿之外）判 False；
+      客户区在负坐标屏上（左副屏）时照常参与运算，不做 clamp。
+    """
+    if client is None:
+        return None
+    w = min(rect[2], client[2]) - max(rect[0], client[0])
+    h = min(rect[3], client[3]) - max(rect[1], client[1])
+    return bool(w > 0 and h > 0)
+
+
+def _find_document(root, max_nodes=400, max_depth=14):
+    """BFS 找 DocumentControl（Chromium 的整篇 DOM 都挂在它下面）。找不到返回 None。
+
+    深度/节点数都限量：这是**每次遍历多出来的一趟**，不能拿整树的代价换。
+    实测 Edge 里 Document 在第 4~6 层，几十个节点内就能碰到。
+    """
+    q = [(root, 0)]
+    seen = 0
+    while q and seen < max_nodes:
+        ctrl, depth = q.pop(0)
+        seen += 1
+        try:
+            if ctrl.ControlTypeName == "DocumentControl":
+                return ctrl
+        except Exception:
+            continue
+        if depth >= max_depth:
+            continue
+        try:
+            for ch in ctrl.GetChildren():
+                q.append((ch, depth + 1))
+        except Exception:
+            continue
+    return None
+
+
+def _scroll_info(root, client):
+    """取窗口级滚动真值：scroll_y / doc_height / scroll_unknown / scroll_src。
+
+    ★ **取不到必须 null + scroll_unknown=True，不许填 0。**
+      填 0 等于谎报「已经滚到顶」，agent 会据此认为整篇都看过了 —— 比 null 危险得多。
+    取值两条路，按精度排：
+      ① DocumentControl.BoundingRectangle 是**整篇文档**时（高度明显超过客户区）：
+         scroll_y = 客户区上沿 - 文档上沿（像素精确，滚多少就上移多少）。
+      ② ScrollPattern 的 VerticalViewSize/VerticalScrollPercent 换算：
+         doc_height = 客户区高 × 100 ÷ VerticalViewSize；scroll_y = doc_height × 百分比。
+         百分比只有 1% 的刻度 ⇒ 误差约 ±1% 文档高（27900px 的页就有 ±279px），
+         所以只当 ① 不成立时的退路，scroll_src 里照实写明。
+    都不成立 ⇒ 不知道就是不知道。
+    """
+    info = {"scroll_y": None, "doc_height": None, "scroll_unknown": True,
+            "scroll_src": "取不到（既没 DocumentControl 也没 ScrollPattern）"}
+    if client is None:
+        info["scroll_src"] = "客户区取不到"
+        return info
+    ch = client[3] - client[1]
+    if ch <= 0:
+        info["scroll_src"] = "客户区高度非正"
+        return info
+    doc = _find_document(root)
+    doc_rect = None
+    pct = view = None
+    if doc is not None:
+        try:
+            doc_rect = _rect(doc.BoundingRectangle)
+        except Exception:
+            doc_rect = None
+        try:
+            sp = doc.GetScrollPattern()
+            pct = float(sp.VerticalScrollPercent)
+            view = float(sp.VerticalViewSize)
+        except Exception:
+            pass
+
+    # ① 像素法：文档矩形明显高于客户区 ⇒ 它就是整篇文档
+    if doc_rect and (doc_rect[3] - doc_rect[1]) > ch * DOC_TALL_FACTOR:
+        info.update(scroll_y=max(0, int(client[1] - doc_rect[1])),
+                    doc_height=int(doc_rect[3] - doc_rect[1]),
+                    scroll_unknown=False,
+                    scroll_src="DocumentControl.BoundingRectangle（像素，精确）")
+        return info
+    # ①' 短页：文档矩形整个落在客户区内 ⇒ 一屏装得下，滚动量就是 0
+    #   ★ 但**必须先确认它真的不滚动**：有些浏览器把 Document 矩形裁到可见那一屏，
+    #   页面明明能滚、矩形却只有一屏高。这时若照短页处理，就会谎报 scroll_y=0
+    #   （正是本条最危险的错）。ScrollPattern 说它可滚 ⇒ 不许走这条，改走 ②。
+    if (doc_rect and doc_rect[3] > doc_rect[1]
+            and doc_rect[0] >= client[0] and doc_rect[2] <= client[2]
+            and doc_rect[1] >= client[1] and doc_rect[3] <= client[3]
+            and (pct is None or view is None
+                 or (view >= 99.5 and abs(pct) <= 0.5))):
+        info.update(scroll_y=0, doc_height=int(doc_rect[3] - doc_rect[1]),
+                    scroll_unknown=False,
+                    scroll_src="DocumentControl 矩形完整落在客户区内（一屏装得下）")
+        return info
+    # ② 百分比法
+    if pct is not None and view is not None and 0 < view <= 100.0:
+        dh = int(round(ch * 100.0 / view))
+        info.update(scroll_y=int(round(dh * pct / 100.0)), doc_height=dh,
+                    scroll_unknown=False,
+                    scroll_src="ScrollPattern 百分比换算（VerticalViewSize=%.2f%%，"
+                               "误差约 ±1%% 文档高）" % view)
+    return info
+
+
+def _viewport_fields(in_view, scroll):
+    r"""节点上那三个视口字段（in_view / scroll_y / doc_height / scroll_unknown）。
+
+    单独抽成函数是为了让"跑红自证"能整体覆盖它 —— 把 null 改成 0 的那个缺陷
+    就注在这里，一改就红（判据 tests\_视口口径判据.py --inject scroll）。
+    """
+    return {
+        "in_view": in_view,
+        "scroll_y": scroll.get("scroll_y"),
+        "doc_height": scroll.get("doc_height"),
+        "scroll_unknown": bool(scroll.get("scroll_unknown", True)),
+    }
+
+
 def walk(handle, *, max_nodes=DEFAULT_MAX_NODES, max_depth=DEFAULT_MAX_DEPTH,
-        roles=("interactive", "text"), detail=False, drop_browser_chrome=True):
+        roles=("interactive", "text"), detail=False, drop_browser_chrome=True,
+        include_offscreen=False, stats=None):
     """遍历一棵窗口的元素树，返回 (节点列表, 是否截断)。
 
+    ★ include_offscreen（F3 · 窗A2 · 2026-10-17，默认 False）= 是否连**视口外**的节点一起回。
+      默认只回看得见的；True 时全回，但每个节点都保留 in_view 标记 ——
+      **屏外节点不是坏节点，只是「现在看不见」**，要它得先滚动或显式要全量。
+    ★ stats（可选 dict，出参）= 填「因上限丢弃 / 因视口丢弃」两个计数，
+      让"丢在哪"成为可机读的数字，而不是只留一句 truncated。
     `roles` 决定收哪些：interactive=能点的、text=有字的、all=全要。
     **只读属性，不点不动。**
     """
@@ -244,10 +434,23 @@ def walk(handle, *, max_nodes=DEFAULT_MAX_NODES, max_depth=DEFAULT_MAX_DEPTH,
     nodes = []
     trunc = [False]
 
+    # ── F3（窗A2）：视口口径**每窗算一次**，逐节点只做一次相交判断 ──────────
+    #   客户区用 GetClientRect/ClientToScreen（不是根矩形 —— 根矩形含标题栏/标签栏，
+    #   拿它当视口会把窗口边框那一圈也算成「看得见」）。
+    #   滚动真值走 _scroll_info：取不到就是 null + scroll_unknown，**绝不填 0**。
+    client = _client_rect(int(handle))
+    scroll = _scroll_info(root, client)
+    # 计数（给 stats 出参用）：丢在哪一步、各丢多少，都是可机读的数字
+    cut_cap = [0]        # 因 max_nodes 预算被丢
+    cut_view = [0]       # 因不在视口被丢（include_offscreen=False 时）
+    seen_any = [0]       # 扫过的节点数（含没保留的）
+
     def rec(ctrl, depth, ancestors):
         if len(nodes) >= max_nodes:
             trunc[0] = True
+            cut_cap[0] += 1
             return
+        seen_any[0] += 1
         try:
             rect = _rect(ctrl.BoundingRectangle)
         except Exception:
@@ -264,18 +467,38 @@ def walk(handle, *, max_nodes=DEFAULT_MAX_NODES, max_depth=DEFAULT_MAX_DEPTH,
         #   **但不 return —— 幽灵节点可能有孩子（真元素藏在下面），要继续往下走。**
         zero = (rect[2] <= rect[0]) or (rect[3] <= rect[1])
 
+        # ★ F3·兜底（窗A2）：TEXT_TYPES 是白名单，白名单天生漏 —— Chromium 的**裸 div**
+        #   文本、自定义控件、自绘元素都可能挂在任何 ControlType 上。
+        #   所以除白名单外，只要**这一轮要文本**（roles 含 text），就把所有非零矩形节点
+        #   都问一遍文字，读到 ≥TEXT_MIN_LEN 字的，一样进 texts。
+        #   ★ 要不要多问这一遍由 TEXT_FALLBACK 说了算：置 False 就**逐字退回补前口径**
+        #     （只问白名单），顺带把那次多花的 COM 往返也省掉。
+        #   ★ 只在 want_txt 时兜底：roles=("interactive",) 这种纯点击用途不受影响。
         txt = ""
-        if not zero and (ctype in TEXT_TYPES or want_all):
-            txt = _text_of(ctrl)
+        if not zero:
+            probe = want_all or ctype in TEXT_TYPES or (TEXT_FALLBACK and want_txt)
+            if probe:
+                txt = _text_of(ctrl)
+        # 单字符不进 texts：图标名/刻度这类噪音会把题干淹掉。
+        txt_ok = bool(txt.strip()) and len(txt.strip()) >= TEXT_MIN_LEN
         interactive = ctype in INTERACTIVE_TYPES
 
         # want_all 时**不筛**：既不是交互类型又没有文字的节点照样要，
         # 否则 roles=("all",) 会退化成跟默认一样，扫过节点数直接对不上（实测 787 → 3）。
         keep = (not zero) and (want_all
                                or (want_int and interactive)
-                               or (want_txt and bool(txt.strip())))
+                               or (want_txt and (txt_ok if TEXT_FALLBACK
+                                                 else bool(txt.strip()))))
         if keep and drop_browser_chrome and txt.strip() in BROWSER_CHROME_NAMES:
             keep = False
+
+        # ★ F3：视口判定**只标注；只在默认口径下过滤**。
+        #   in_view 为 None（客户区取不到）时**不过滤** —— 判不出来就当看得见：
+        #   宁可多给，漏给会让 agent 断言「界面上没有这个东西」，那比多给危险得多。
+        in_view = None if zero else _in_view(rect, client)
+        if keep and in_view is False and not include_offscreen:
+            keep = False
+            cut_view[0] += 1
 
         if keep:
             # ★ S2b（2026-10-13）：**读不到 ≠ 启用**。原来 except → True，等于把
@@ -296,6 +519,9 @@ def walk(handle, *, max_nodes=DEFAULT_MAX_NODES, max_depth=DEFAULT_MAX_DEPTH,
                 "center": _center(rect),
                 "enabled": enabled,          # True / False / None(未知)
             }
+            # ★ F3：视口四字段。**只标注，不改 rect、不换算坐标** ——
+            #   坐标系仍是屏幕物理像素（见 COORD_SYS），这里只回答「这一屏看得见吗」。
+            node.update(_viewport_fields(in_view, scroll))
             if enabled is None:
                 # 机读标记：让「未知」在**数据层**就露出来，不靠渲染文本（模型可能不看那行）。
                 # 约定：**只在未知时出现**；键不存在 = 验证过。
@@ -323,6 +549,17 @@ def walk(handle, *, max_nodes=DEFAULT_MAX_NODES, max_depth=DEFAULT_MAX_DEPTH,
             pass
 
     rec(root, 0, frozenset())
+    if isinstance(stats, dict):
+        # 「因上限丢弃」是**下界**：撞到预算就停，不再往下走，树里还剩多少没人知道。
+        stats.update({
+            "扫过节点": seen_any[0],
+            "返回节点": len(nodes),
+            "因上限丢弃": cut_cap[0],
+            "因视口丢弃": cut_view[0],
+            "视口": list(client) if client else None,
+            "滚动": dict(scroll),
+            "include_offscreen": bool(include_offscreen),
+        })
     return nodes, trunc[0]
 
 
@@ -392,6 +629,10 @@ def render(nodes, truncated=False, *, width=64):
             line += " (禁用)"
         elif _en is None:
             line += " (启用性未知)"
+        # ★ F3：屏外节点照回时必须**看得见地标出来** —— 它有真实坐标，
+        #   agent 拿去点会点到别处。默认口径下不会有这一行（屏外已经被滤掉）。
+        if n.get("in_view") is False:
+            line += " (屏外·先滚动再点)"
         out.append("  " * min(n["depth"] - base, 6) + line)
     if truncated:
         out.append("... 还有更多节点，被 max_nodes 截断了 —— 要全的自己调大")
@@ -399,14 +640,20 @@ def render(nodes, truncated=False, *, width=64):
 
 
 def find(handle, query, *, max_nodes=FIND_MAX_NODES, max_depth=DEFAULT_MAX_DEPTH,
-         limit=40, detail=False):
+         limit=40, detail=False, include_offscreen=True):
     """按文字/类型找元素。**这是最该先用的工具** —— 比拉全树省一个数量级。
 
     `query` 大小写不敏感，同时匹配名字和控件类型。
     """
     t0 = time.perf_counter()
+    # ★ F3：find() 默认**把屏外也带上**（与 walk 的默认相反，这是有意的）：
+    #   「找东西」的目标常常正是屏外那一段（长文档里后面的题）。
+    #   若这里也按视口裁剪，agent 会得到「找不到」⇒ 误判成「界面上没有这个东西」。
+    #   屏外命中照样带 in_view=false，并由「屏外命中」计数显式告诉 agent 要先滚。
+    st = {}
     nodes, truncated = walk(handle, max_nodes=max_nodes, max_depth=max_depth,
-                           roles=("all",), detail=detail)
+                           roles=("all",), detail=detail,
+                           include_offscreen=include_offscreen, stats=st)
     q = (query or "").lower()
     hits = [
         n for n in nodes
@@ -424,23 +671,42 @@ def find(handle, query, *, max_nodes=FIND_MAX_NODES, max_depth=DEFAULT_MAX_DEPTH
         #   enabled_unverified 等于没加 —— 所以在返回 dict 上留个计数，
         #   让默认路径也有留痕。计的是**实际返回给模型的那批**（被 limit 截断的不算）。
         "启用性未知": sum(1 for n in hits[:limit] if n.get("enabled") is None),
+        # ★ F3：屏外命中数 + 窗口滚动真值（取不到时是 null 且 scroll_unknown=true）
+        "屏外命中": sum(1 for n in hits[:limit] if n.get("in_view") is False),
+        "滚动": st.get("滚动"),
+        "视口口径": VIEWPORT_SYS,          # ★ F3：口径原文随结果走，别让 agent 猜
         "扫过节点": len(nodes),
         "截断": truncated,
+        "因上限丢弃": st.get("因上限丢弃", 0),
         "耗时_ms": ms,
         "提示": "id 可以直接给 ctl_click 用，不用自己算坐标",
     }
 
 
 def tree(handle, *, max_nodes=DEFAULT_MAX_NODES, max_depth=DEFAULT_MAX_DEPTH,
-         detail=False, roles=("interactive", "text")):
-    """拉整棵树，返回紧凑文本 + 结构化节点。"""
+         detail=False, roles=("interactive", "text"), include_offscreen=False):
+    """拉整棵树，返回紧凑文本 + 结构化节点。
+
+    ★ F3：include_offscreen 默认 **False**（只回这一屏看得见的）。
+      要全量就显式传 True，屏外节点带 in_view=false 一起回 ——
+      **屏外节点不是坏节点，别丢，标出来就行。**
+    """
     t0 = time.perf_counter()
+    st = {}
     nodes, truncated = walk(handle, max_nodes=max_nodes, max_depth=max_depth,
-                           roles=roles, detail=detail)
+                           roles=roles, detail=detail,
+                           include_offscreen=include_offscreen, stats=st)
     return {
         "句柄": int(handle),
         "节点数": len(nodes),
         "截断": truncated,
+        # ★ F3：滚动真值 + 口径原文 + 丢在哪（视口丢多少、预算丢多少）
+        "滚动": st.get("滚动"),
+        "视口": st.get("视口"),
+        "视口口径": VIEWPORT_SYS,
+        "include_offscreen": bool(include_offscreen),
+        "因视口丢弃": st.get("因视口丢弃", 0),
+        "因上限丢弃": st.get("因上限丢弃", 0),
         "坐标系": COORD_SYS,              # ★ W3-A：同上，纯增量
         # ★ S2b：同理 —— detail=False 时「节点」是空列表，计数才是默认路径下的可机读余痕。
         "启用性未知": sum(1 for n in nodes if n.get("enabled") is None),

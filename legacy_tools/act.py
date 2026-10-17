@@ -1920,6 +1920,19 @@ def do_keys(hwnd, vk=0x41, ctrl=False, times=1, dry=False, wait=0.06, scan_code=
         gate.require(gate.C, f"按键 vk=0x{vk:X} ctrl={ctrl} ×{times}")
     except gate.GateDenied as e:
         return _gate_denied(e, hwnd, gate.C, "按键")
+    # ★ 路线 P（2026-10-17 F2）：先不碰前台，PostMessage 按键试一次
+    if not dry:
+        _kb = evidence(hwnd, "post_keys_before")
+        if _post_keys(hwnd, vk, ctrl, times, info=info):
+            time.sleep(0.4)
+            _ka = evidence(hwnd, "post_keys_after")
+            _k0, _k1 = _img_fp(_kb.get("文件") or ""), _img_fp(_ka.get("文件") or "")
+            _kch = None if (_k0 is None or _k1 is None) else (_k1 != _k0)
+            if _kch:
+                log("   ✔ 后台按键生效（像素证据有变化）")
+                return 0
+            log("   ⚠ 后台按键投递了但画面%s ⇒ 落回前台兜底"
+                % ("判不了（unknown）" if _kch is None else "没变"))
     # ★ ③ 动作前自动置前（不再因"不在前台"直接拒绝）
     _fg = ensure_foreground(hwnd, "按键", dry=dry)
     if _fg:
@@ -2278,6 +2291,104 @@ def scroll_pct(hwnd):
         return None
 
 
+# ═════════ 2026-10-17（F2 · 路线 P）：不抢前台的 PostMessage 输入 ═════════
+# 背景：真机上 ensure_foreground 被 Windows 前台锁拒（rc=5），而 AttachThreadInput
+#   那套在本文件 1173-1175 早被判「废」（抢焦点 + 输入队列脏状态）⇒ 只做本路线。
+#   投递成功 ≠ 生效：一律用 evidence 前后指纹判，判不出来就报"未验"，判出没变就
+#   返回可执行提示（要么让用户点一下窗口、要么接受没有后台滚动的窗口类型）。
+WM_MOUSEWHEEL = 0x020A
+WM_KEYDOWN = 0x0100
+WM_KEYUP = 0x0101
+
+
+def _post_wheel(hwnd, info, amount):
+    """PostMessage 滚轮。lParam 用**屏幕坐标**（WM_MOUSEWHEEL 的规定），wParam 高字=delta（正=向上）。"""
+    r = info.get("rect") or (0, 0, 0, 0)
+    x, y = (r[0] + r[2]) // 2, (r[1] + r[3]) // 2
+    delta = 120 * int(amount)
+    wparam = ((delta & 0xFFFF) << 16) & 0xFFFFFFFF
+    lparam = ((y & 0xFFFF) << 16) | (x & 0xFFFF)
+    # ★ 2026-10-17（DSH 补）：只投顶层窗**常常无效** —— WinForms/经典窗口把滚轮交给
+    #   **光标下的那个子控件**。所以再向 WindowFromPoint 拿到的子窗投一次（多投无害）。
+    targets = [int(hwnd)]
+    try:
+        pt = wt.POINT(x, y)
+        ch = user32.WindowFromPoint(pt)
+        if ch and int(ch) != int(hwnd):
+            targets.append(int(ch))
+    except Exception:
+        pass
+    ok = False
+    for h in targets:
+        try:
+            ok = bool(user32.PostMessageW(h, WM_MOUSEWHEEL, wparam, lparam)) or ok
+        except Exception as e:
+            log(f"   PostMessage(WM_MOUSEWHEEL) 失败 hwnd={h}：{str(e)[:60]}")
+    log(f"🖱 滚动 [PostMessage 滚轮 delta={delta} 屏幕({x},{y})，**不碰前台**] "
+        f"窗口「{info.get('title', '')}」 投给={targets} 投递={ok}")
+    return ok
+
+
+def _post_keys(hwnd, vk, ctrl, times, info=None):
+    """PostMessage 按键（WM_KEYDOWN/WM_KEYUP）。不碰前台；Chromium 通常不认这条路。
+
+    ★ 2026-10-17（DSH 补）：顶层窗常忽略 WM_KEY*，真正处理按键的是**带焦点的子控件**
+      ⇒ 除了顶层 hwnd，再向"窗口中心处 WindowFromPoint 拿到的子窗"投一次（与滚轮同一招）。
+    """
+    targets = [int(hwnd)]
+    try:
+        r = (info or {}).get("rect") or (0, 0, 0, 0)
+        pt = wt.POINT((r[0] + r[2]) // 2, (r[1] + r[3]) // 2)
+        ch = user32.WindowFromPoint(pt)
+        if ch and int(ch) != int(hwnd):
+            targets.append(int(ch))
+    except Exception:
+        pass
+    ok = False
+    for h in targets:
+        try:
+            one = True
+            if ctrl:
+                one = bool(user32.PostMessageW(h, WM_KEYDOWN, 0x11, 0)) and one
+            for _ in range(max(1, int(times))):
+                one = bool(user32.PostMessageW(h, WM_KEYDOWN, int(vk), 0)) and one
+                one = bool(user32.PostMessageW(h, WM_KEYUP, int(vk), 0)) and one
+            if ctrl:
+                one = bool(user32.PostMessageW(h, WM_KEYUP, 0x11, 0)) and one
+            ok = ok or one
+        except Exception as e:
+            log(f"   PostMessage(WM_KEY*) 失败 hwnd={h}：{str(e)[:60]}")
+    log(f"⌨ 按键 [PostMessage vk=0x{int(vk):X}{' +Ctrl' if ctrl else ''} ×{times}，"
+        f"**不碰前台**] 投给={targets} 投递={ok}")
+    return ok
+
+
+def _changed_by_evidence(hwnd, tag):
+    """拍前后两张证据图，返回 True/False/None(判不了)。用于"投递成功≠生效"。"""
+    try:
+        b = evidence(hwnd, "post_" + tag + "_before")
+        time.sleep(0.35)
+        a = evidence(hwnd, "post_" + tag + "_after")
+        f0 = _img_fp(b.get("文件") or "")
+        f1 = _img_fp(a.get("文件") or "")
+        if f0 is None or f1 is None:
+            return None
+        return f1 != f0
+    except Exception:
+        return None
+
+
+def _post_hint(kind, hwnd):
+    """后台输入没生效时的可执行提示（不抢前台是我们自己定的规矩）。"""
+    return _tell_next(
+        5,
+        f"后台{kind}已投递但**窗口没反应**（该类窗口忽略 WM_* 消息，常见于 Chromium/Electron）。"
+        "可选两条路：① 请用户把该窗口点到前台后重试（本工具不会自己抢前台）；"
+        "② 该窗口若有 UIA ScrollPattern，改用 UIA 路线"
+        + ("（滚动：本工具会先试 UIA，失败才走消息）" if kind == "滚动" else ""),
+        hwnd)
+
+
 def do_scroll(hwnd, amount, dry=False, force_wheel=False):
     info, why = check_target(hwnd)
     if why:
@@ -2290,7 +2401,15 @@ def do_scroll(hwnd, amount, dry=False, force_wheel=False):
         gate.require(gate.B, f"滚动 {amount}")
     except gate.GateDenied as e:
         return _gate_denied(e, hwnd, gate.B, "滚动")
-    auto, root = _uia(hwnd)
+    try:
+        auto, root = _uia(hwnd)
+    except _UiATimeout as e:
+        # ★ 2026-10-17：UIA 超时**不许炸**（旧版会 traceback ⇒ rc=1 ⇒ 被读成未知返回码）。
+        log(f"   UIA 建构超时（{str(e)[:60]}）⇒ 直接走路线 P（PostMessage 滚轮）")
+        root = None
+    except Exception as e:
+        log(f"   UIA 建构失败（{str(e)[:60]}）⇒ 直接走路线 P")
+        root = None
     # 优先找支持 Scroll 的控件
     target = None
 
@@ -2310,7 +2429,8 @@ def do_scroll(hwnd, amount, dry=False, force_wheel=False):
         except Exception:
             pass
 
-    walk(root)
+    if root is not None:
+        walk(root)
     if target is not None and not force_wheel:
         try:
             pat = target.GetScrollPattern()
@@ -2323,6 +2443,19 @@ def do_scroll(hwnd, amount, dry=False, force_wheel=False):
             return 0
         except Exception as e:
             log(f"   UIA Scroll 不可用（{str(e)[:60]}），改用鼠标滚轮")
+    # ★ 路线 P（2026-10-17 F2）：**先不碰前台**，用 PostMessage 滚轮试一次
+    if not dry:
+        _b = evidence(hwnd, "post_wheel_before")
+        if _post_wheel(hwnd, info, amount):
+            time.sleep(0.4)
+            _a = evidence(hwnd, "post_wheel_after")
+            _f0, _f1 = _img_fp(_b.get("文件") or ""), _img_fp(_a.get("文件") or "")
+            _ch = None if (_f0 is None or _f1 is None) else (_f1 != _f0)
+            if _ch:
+                log("   ✔ 后台滚轮生效（像素证据有变化）")
+                return 0
+            log("   ⚠ 后台滚轮投递了但画面%s ⇒ 落回前台兜底"
+                % ("判不了（unknown）" if _ch is None else "没变"))
     # ★ ③ 动作前自动置前：滚轮事件发给**光标下的窗口**，不在前台时不可控
     _fg = ensure_foreground(hwnd, "滚动(滚轮)", dry=dry)
     if _fg:
