@@ -1,6 +1,6 @@
 ﻿<#
 .SYNOPSIS
-    AgentCtl（电脑控制平台）安装脚本 —— 一行命令装完，不写注册表。
+    Windows agent-ctl 组件 安装脚本 —— 一行命令装完，不写注册表。
 
 .DESCRIPTION
     设计目标是**像 npx 一样「下载就能用」**：
@@ -70,7 +70,7 @@ $RepoHost = 'https://gitee.com'
 $DefaultZip = "$RepoHost/$Owner/agent-ctl/releases/latest/download/agentctl.zip"
 $RepoZip = "$RepoHost/$Owner/agent-ctl/repository/archive/main.zip"
 $MinPy = [Version]'3.10'
-$AppName = '电脑控制平台'
+$AppName = 'Windows agent-ctl 组件'
 
 function Say { param([string]$m) Write-Host "  $m" }
 function Step { param([string]$m) Write-Host ""; Write-Host "== $m" -ForegroundColor Cyan }
@@ -286,7 +286,7 @@ if (-not $NoShortcut) {
     #   用后者的话崩了**什么都没有** —— 用户只会看到「双击了没反应」，无处可查。
     $s.Arguments = '-X utf8 "' + $panelEntry + '"'
     $s.WorkingDirectory = $AppDir
-    $s.Description = 'AgentCtl 电脑控制平台 —— 面板、授权、急停'
+    $s.Description = 'Windows agent-ctl 组件 —— 面板、授权、急停'
     $s.IconLocation = "$pyw,0"
     $s.Save()
     Good "桌面快捷方式：$lnk"
@@ -328,7 +328,7 @@ if (Test-Path $oldInno) {
 Write-Host ''
 Good '全部完成'
 Say "程序：$AppDir"
-Say '开始：双击桌面「电脑控制平台」，或运行 agentctl.cmd serve'
+Say '开始：双击桌面「Windows agent-ctl 组件」，或运行 agentctl.cmd serve'
 Say '更新：重跑同一条安装命令'
 Say '卸载：运行 uninstall.ps1'
 exit 0

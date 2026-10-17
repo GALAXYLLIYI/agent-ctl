@@ -1,6 +1,6 @@
 ﻿<#
 .SYNOPSIS
-    卸载 AgentCtl（电脑控制平台）—— 只删自己写的文件，不碰系统。
+    卸载 Windows agent-ctl 组件—— 只删自己写的文件，不碰系统。
 
 .DESCRIPTION
     为什么能这么简单：这个平台**没有安装注册表项、没有服务、没有写系统目录**，
@@ -38,7 +38,7 @@ param(
 $ErrorActionPreference = 'Stop'
 try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch { }
 
-$AppName = '电脑控制平台'
+$AppName = 'Windows agent-ctl 组件'
 if (-not $Dir) { $Dir = Join-Path $env:LOCALAPPDATA 'AgentCtl' }
 
 function Say { param([string]$m) Write-Host "  $m" }

@@ -137,7 +137,7 @@ def main():
                            "[Environment]::GetFolderPath('Desktop')"],
                           capture_output=True, text=True, encoding="utf-8",
                           errors="replace").stdout.strip()
-    lnk = os.path.join(desk, "电脑控制平台.lnk") if desk else None
+    lnk = os.path.join(desk, "Windows agent-ctl 组件.lnk") if desk else None
     lnk_preexisted = bool(lnk) and os.path.exists(lnk)
     zip_path = os.path.join(clone, "dist", "agentctl.zip")
     rc, _ = run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",

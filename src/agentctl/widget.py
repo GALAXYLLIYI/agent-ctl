@@ -531,7 +531,7 @@ def run():
     import tkinter as tk
 
     root = tk.Tk()
-    root.title('电脑控制平台')
+    root.title('Windows agent-ctl 组件')
     root.configure(bg=BG)
     root.attributes('-topmost', True)
     root.resizable(False, False)
@@ -571,7 +571,7 @@ def run():
     #   真正拦得住的是闸门本身 —— 没有有效通行证，任何控制动作都过不了 gate。
     hdr = tk.Frame(root, bg='#2a2c36')
     hdr.pack(fill='x')
-    lab(hdr, '电脑控制平台 · AgentCtl', FG, F_TITLE, True).pack(side='left', padx=14, pady=9)
+    lab(hdr, 'Windows agent-ctl 组件', FG, F_TITLE, True).pack(side='left', padx=14, pady=9)
 
     # ★ 关闭按钮：用户 2026-10-04「控制面板我不知道怎么关」★
     #   病根：为了省 30px 高度做了 overrideredirect(True)，把系统标题栏整个去掉了，
@@ -602,7 +602,7 @@ def run():
         busy = (not st.get('brake')) and st.get('state') == '工作中'
         if busy:
             ans = messagebox.askyesnocancel(
-                '关闭电脑控制平台',
+                '关闭Windows agent-ctl 组件',
                 'agent 现在正在控制这台电脑。\n\n'
                 '「是」= 先拉下急停再关闭面板（推荐）\n'
                 '「否」= 只关面板，agent 继续工作\n'
