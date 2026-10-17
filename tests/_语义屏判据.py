@@ -24,6 +24,13 @@ r"""判据 · F4 语义屏 ctl_screen（窗B1 · 2026-10-17）
     ⑨ must_vlm 的 R2 加 name_trust 门槛：offset-suspect ⇒ **R2 不成立**、
        must_vlm 转 True；对照组：low 不拦（别把网页一刀切）、原生窗口不报错位。
     ⑩ 给了 since：since_echo 原样回传 + version_match 正确 + 带回**新** screen_version。
+    S1~S3 任务声明制 watch_text（窗D1 · Z3 §4）：
+       S1 声明过的 volatile 节点改了 ⇒ uid_state=TEXT_CHANGED ∧ delta 记新旧 ∧
+          screen_version 进位且**恰好**归因到它（声明压过一切豁免源）；
+       S2 **未声明**的倒计时改了 ⇒ uid 恒 skey@~ ∧ version 不进位（豁免没失守 ⇒
+          STALE 风暴没回流）；
+       S3 声明一个不存在的串 ⇒ rc≠0 且 watch_校验.unmatched 逐条列明（不许静默）；
+          watch_pending=true 才允许挂起；条数上限 32。
 
 跑法：
     python -X utf8 tests\_语义屏判据.py                # 合成夹具（无桌面也能跑）
@@ -72,8 +79,8 @@ N_QTEXT = 3                         # 视口内 query 命中的大文本
 N_TEXT = 10                         # 视口内普通文本
 N_OFF = 10                          # 视口外按钮
 QUERY = "题干"
-EXPECT_TOTAL = N_BTN + N_QTEXT + N_TEXT + 2 + N_OFF      # 63（+2 = 计时器 + 状态）
-EXPECT_IN_VIEW = N_BTN + N_QTEXT + N_TEXT + 2             # 53
+EXPECT_TOTAL = N_BTN + N_QTEXT + N_TEXT + 3 + N_OFF      # 64（+3 = 计时器 + 状态 + T2 任务信息）
+EXPECT_IN_VIEW = N_BTN + N_QTEXT + N_TEXT + 3             # 54（★ 窗D1 加了 T2）
 
 REQUIRED_OBJ_FIELDS = ("id", "uid", "label", "role", "rect", "in_view", "interactive",
                        "actions", "source", "source_confidence",
@@ -243,6 +250,12 @@ class Fixture(object):
         #   web_options："" / "normal" / "scramble" —— 网页选项字母正序 / 乱序。
         self.n_extra_btn = 0
         self.web_options = ""
+        # ★ 窗D1 再加两个（同样默认无害）：
+        #   timer_tick：**独立于 tick 的计时器刻度** —— S2 要的是「只动倒计时、别的都不动」，
+        #     所以必须能把计时器单独推一格。
+        #   quota：T2「剩余可选 N 项 · 第 7/20 步」那个数 —— 承载任务信息的伪 volatile。
+        self.timer_tick = 0
+        self.quota = 3
 
     def set_title(self, t):
         self.title = t
@@ -250,10 +263,20 @@ class Fixture(object):
     def advance(self):
         """推进一格：计时器与状态行**同时**换字（一个 volatile、一个不 volatile）。"""
         self.tick += 1
+        self.timer_tick += 1
+
+    def advance_timer_only(self):
+        """**只**推计时器一格（状态行与别的都不动）—— S2 用它造「只有倒计时在变」。"""
+        self.timer_tick += 1
+
+    def set_quota(self, n):
+        """改 T2 那个「剩余可选 N 项」—— 声明制盯的典型任务信息。"""
+        self.quota = int(n)
 
     @property
     def timer_label(self):
-        return TIMER_LABELS[min(self.tick, len(TIMER_LABELS) - 1)]
+        # ★ 算出来而不是查表：查表会「走到末尾就不动了」，S2 连推两格就测不出变化。
+        return "剩余 00:%02d" % max(0, 59 - self.timer_tick)
 
     @property
     def status_label(self):
@@ -290,6 +313,13 @@ class Fixture(object):
         inner.append(_Ctrl("TextControl", [20, 870, 220, 890], self.timer_label, rid=list(rid)))
         rid[0] += 1
         inner.append(_Ctrl("TextControl", [300, 870, 600, 890], self.status_label, rid=list(rid)))
+        # (4b) ★ 窗D1 · T2：靶场 lab_volatile.html 的 e49 那一行 ——
+        #     「长得像倒计时、其实承载任务信息」。它**当前不被 volatile 规则命中**
+        #     （Z3 已把裸关键词「剩余」删了），所以 uid 本来就实算；
+        #     声明它验的是**另一层价值**：把要盯的串钉住（无视口过滤 + 必进）。
+        rid[0] += 1
+        inner.append(_Ctrl("TextControl", [620, 870, 1000, 890],
+                           "剩余可选 %d 项 · 第 7/20 步" % self.quota, rid=list(rid)))
 
         # (5) ★ 窗C1：网页选项（RadioButtonControl）。字母正序 = 没问题；
         #     乱序 = 「控件自称的字母与它在屏幕上的位置对不上」= 疑似错位。
@@ -452,6 +482,75 @@ def _screen_build(hwnd, args):                            # noqa: F811  故意�
     return out
 """
 
+# ===== 以下为 窗D1 注入段（跑红自证专用，勿入产品代码）=====================
+INJECT_WATCH_EXEMPT = """
+
+# ===== 以下为 窗D1 注入段（跑红自证专用，勿入产品代码）=====
+_real_build_exempt = _screen_build
+
+
+def _screen_build(hwnd, args):                            # noqa: F811  故意覆盖真版
+    # 注入的缺陷：**声明仍然被豁免** —— watched ∧ volatile 的节点照样把 text_key
+    # 压成 ~，换多少字 uid 都不变 ⇒ 「我声明要盯它」等于没声明（这就是 J2 那种假绿）。
+    out = _real_build_exempt(hwnd, args)
+    hit = False
+    for o in (out.get("objects") or []):
+        if o.get("watched") and o.get("volatile"):
+            hit = True
+            o["uid"] = str(o.get("uid") or "").split("@")[0] + "@~"
+            o["exempted"] = True
+            if o.get("uid_state"):
+                o["uid_state"] = "OK"
+    if hit:
+        # 把这趟快照也换成「豁免后的样子」，否则下一趟仍会拿真 uid 算出 TEXT_CHANGED
+        _screen_forget(int(hwnd))
+    return out
+"""
+
+INJECT_WATCH_LEAK = """
+
+# ===== 以下为 窗D1 注入段（跑红自证专用，勿入产品代码）=====
+_real_build_leak = _screen_build
+
+
+def _screen_build(hwnd, args):                            # noqa: F811  故意覆盖真版
+    # 注入的缺陷：**未声明**的 volatile 节点也不再豁免 —— 等于把豁免整个拆了，
+    # 每秒跳一次的倒计时会把 version 顶得到处都是（框架 §⑯ 量的 A 套：13 次假 STALE）。
+    out = _real_build_leak(hwnd, args)
+    import hashlib as _hl
+    hit = False
+    for o in (out.get("objects") or []):
+        if o.get("exempted"):
+            hit = True
+            o["exempted"] = False
+            o["uid"] = (str(o.get("uid") or "").split("@")[0] + "@t"
+                       + _hl.sha1(str(o.get("label") or "").encode("utf-8")).hexdigest()[:10])
+            if o.get("uid_state"):
+                o["uid_state"] = "TEXT_CHANGED"
+    if hit:
+        _screen_forget(int(hwnd))
+    return out
+"""
+
+INJECT_WATCH_SILENT = """
+
+# ===== 以下为 窗D1 注入段（跑红自证专用，勿入产品代码）=====
+_real_build_silent = _screen_build
+
+
+def _screen_build(hwnd, args):                            # noqa: F811  故意覆盖真版
+    # 注入的缺陷：首扫 unmatched **静默吞掉** —— 照常返回 rc=0，
+    # 声明「要盯的东西」不存在也不吭声 ⇒ agent 以为在盯，其实盯的是空气。
+    out = _real_build_silent(hwnd, args)
+    rej = out.pop("_watch_拒绝", None)
+    if rej:
+        ck = rej["watch_校验"]
+        ck["unmatched"] = []
+        ck["pending"] = []
+        out["watch_校验"] = ck
+    return out
+"""
+
 INJECT = {
     "guarantee": ("拿掉必进保证（纯按分取前 top）", "append", INJECT_GUARANTEE),
     "text_key": ("uid 里去掉 text_key（只剩结构路径）", "append", INJECT_TEXT_KEY),
@@ -461,6 +560,10 @@ INJECT = {
     "uid_state": ("uid 三档塌成两档（内容变了也报 STALE）", "append", INJECT_UID_STATE),
     "r2": ("R2 不看 name_trust（错位页面假通过）", "append", INJECT_R2),
     "version_reply": ("since 的版本应答三件套不回", "append", INJECT_VERSION_REPLY),
+    # ★ 窗D1 的三个新注入（每个只红自己那一组）
+    "watch_exempt": ("声明仍然被豁免（text_key 照压成 ~）", "append", INJECT_WATCH_EXEMPT),
+    "watch_leak": ("未声明的 volatile 节点也进位（风暴回流）", "append", INJECT_WATCH_LEAK),
+    "watch_silent": ("unmatched 静默吞掉（rc=0）", "append", INJECT_WATCH_SILENT),
 }
 
 
@@ -600,7 +703,9 @@ def check_volatile(core, fx):
     core._screen_forget(0)
     fx.tick = 0
     _, sc1 = call(core, top=500)
-    t1 = by_label(sc1.get("objects") or [], "剩余")
+    # ★ 选择器用「剩余 0」（计时器形如「剩余 00:5x」）：窗D1 加的 T2「剩余可选 N 项」
+    #   也以「剩余」开头，用「剩余」会同时命中两个 —— 这里只把**选择器**收紧，断言本身没动。
+    t1 = by_label(sc1.get("objects") or [], "剩余 0")
     s1 = by_label(sc1.get("objects") or [], "当前状态")
     ev = {}
     if not (len(t1) == 1 and len(s1) == 1):
@@ -620,7 +725,7 @@ def check_volatile(core, fx):
     v1 = sc1.get("screen_version")
     fx.advance()
     _, sc2 = call(core, top=500, since=v1, watch=True)
-    t2 = by_label(sc2.get("objects") or [], "剩余")
+    t2 = by_label(sc2.get("objects") or [], "剩余 0")
     s2 = by_label(sc2.get("objects") or [], "当前状态")
     if not (len(t2) == 1 and len(s2) == 1):
         reds.append("第二次调用后计时器/状态行不见了")
@@ -970,7 +1075,7 @@ def check_uid_state(core, fx):
          "这一步只该改 text_key，struct_key 不该变", reds)
     need(s3.get("uid_state") == "TEXT_CHANGED",
          "同对象改了字应报 TEXT_CHANGED（动作核验期待这一档），实得 %r" % s3.get("uid_state"), reds)
-    t3 = by_label(sc3.get("objects") or [], "剩余")
+    t3 = by_label(sc3.get("objects") or [], "剩余 0")
     if t3:
         ev["计时器uid_state（volatile换了字）"] = t3[0].get("uid_state")
         need(t3[0].get("uid_state") == "OK",
@@ -1144,6 +1249,243 @@ def check_since_version_reply(core, fx):
     fx.tick = 0
     return "(10) since 的版本应答", reds, ev
 
+def check_watch_declared(core, fx):
+    """S1 · 声明过的 volatile 节点改了 ⇒ 必须 TEXT_CHANGED（**声明压过一切豁免源**）。"""
+    reds = []
+    ev = {}
+    core._screen_forget(0)
+    fx.timer_tick = 0
+    fx.quota = 3
+    # 声明表：倒计时（真 volatile，R1 命中）/ T2 任务信息 / 一个**屏外**节点（验规则2）
+    DECL = ["剩余 00:", "剩余可选", "屏外按钮07"]
+
+    r1, sc1 = call(core, top=500, watch_text=DECL)
+    if not need(r1.get("ok"), "带声明的调用没成功：%s" % r1.get("warning"), reds):
+        return "S1 声明即不豁免", reds, ev
+    objs = sc1.get("objects") or []
+    tmr = by_label(objs, "剩余 0")
+    quota = by_label(objs, "剩余可选")
+    off = by_label(objs, "屏外按钮07")
+    if not need(len(tmr) == 1 and len(quota) == 1 and len(off) == 1,
+                "夹具里没找着计时器/T2/屏外按钮07（%d/%d/%d）"
+                % (len(tmr), len(quota), len(off)), reds):
+        return "S1 声明即不豁免", reds, ev
+    tmr, quota, off = tmr[0], quota[0], off[0]
+    ev["计时器(声明)"] = {k: tmr.get(k) for k in
+                       ("label", "volatile", "watched", "exempted", "uid")}
+    ev["T2任务信息(声明)"] = {k: quota.get(k) for k in
+                       ("label", "volatile", "watched", "exempted")}
+
+    # ── 规则1：声明即不豁免（这条是本组的命门）
+    need(tmr.get("volatile") is True,
+         "计时器按现役规则**本来就是 volatile**，这条断言是空的（夹具坏了）", reds)
+    need(tmr.get("watched") is True, "声明命中的节点没标 watched", reds)
+    need(tmr.get("exempted") is False,
+         "声明了却仍被豁免（volatile=true ∧ watched=true ⇒ exempted 必须 false），实得 %r"
+         % tmr.get("exempted"), reds)
+    need(not str(tmr.get("uid") or "").endswith("@~"),
+         "声明节点的 text_key 被压成了 ~（豁免没压过去）：%r" % tmr.get("uid"), reds)
+    need(str(tmr.get("uid") or "").split("@")[-1].startswith("t"),
+         "声明节点没有实算 text_key：%r" % tmr.get("uid"), reds)
+    # T2：Z3 已删掉裸关键词「剩余」，它当前**不是** volatile ⇒ 声明对它验的是「钉住」这层价值
+    ev["T2是否volatile(现役规则)"] = quota.get("volatile")
+    need(quota.get("watched") is True, "T2 任务信息被声明了却没标 watched", reds)
+    need(quota.get("exempted") is False, "T2 声明后不该处于豁免态", reds)
+
+    # ── 规则2：声明压过视口过滤与 top 预算
+    need(off.get("in_view") is False,
+         "屏外按钮07 明明在视口外，in_view 却报了 true（这条断言就是空的）", reds)
+    need(off.get("watched") is True and bool(off.get("uid")),
+         "声明命中的**屏外**节点没被带回来（声明必须压过视口过滤）", reds)
+    ev["屏外声明节点"] = {k: off.get(k) for k in ("label", "in_view", "watched")}
+    # ★ 「声明必进压过 top 预算」这趟**挪到最后**再跑：快照是按 hwnd 共享的，
+    #   中途插一趟「只声明屏外按钮」的调用，计时器在那趟是未声明状态（text_key 恒 ~），
+    #   基线就被写脏了，后面那趟 TEXT_CHANGED 会对不上 —— 那是测试自造，不是实现的错。
+    # ── 校验段：matched 逐条列明，unmatched/pending 空
+    ck = sc1.get("watch_校验") or {}
+    ev["watch_校验"] = ck
+    need(ck.get("matched") == DECL, "watch_校验.matched=%r，应逐条等于声明 %r"
+         % (ck.get("matched"), DECL), reds)
+    need(not (ck.get("unmatched") or []), "matched 全中却报了 unmatched：%r" % ck.get("unmatched"), reds)
+    need(not (ck.get("pending") or []), "没开 watch_pending 却报了 pending：%r" % ck.get("pending"), reds)
+    need("watch_口径" in sc1, "返回里没把 watch_text 的口径讲出来", reds)
+
+    # ── 规则1 的结果：推一格计时器 ⇒ 必报 TEXT_CHANGED，且进位**可归因到它**
+    v1 = sc1.get("screen_version")
+    old_uid = tmr.get("uid")
+    fx.advance_timer_only()
+    r3, sc3 = call(core, top=500, since=v1, watch=True, watch_text=DECL)
+    if not need(r3.get("ok"), "第二次带声明的调用没成功：%s" % r3.get("warning"), reds):
+        return "S1 声明即不豁免", reds, ev
+    tmr2 = by_label(sc3.get("objects") or [], "剩余 0")
+    if not need(len(tmr2) == 1, "推格后计时器不见了", reds):
+        return "S1 声明即不豁免", reds, ev
+    tmr2 = tmr2[0]
+    d = sc3.get("delta") or {}
+    st = d.get("uid_state_统计") or {}
+    ev["推格后"] = {"label前后": [tmr.get("label"), tmr2.get("label")],
+                "uid前后": [old_uid, tmr2.get("uid")],
+                "uid_state": tmr2.get("uid_state"),
+                "version前后": [v1, sc3.get("screen_version")],
+                "消失": d.get("消失"), "新增": d.get("新增"), "uid_state_统计": st}
+    need(tmr.get("label") != tmr2.get("label"), "计时器文本没变，这条断言就是空的", reds)
+    need(tmr2.get("uid_state") == "TEXT_CHANGED",
+         "声明过的节点改了字必须报 TEXT_CHANGED（实得 %r）—— 这就是「声明即不豁免」的全部意义"
+         % tmr2.get("uid_state"), reds)
+    need(old_uid != tmr2.get("uid"), "换了字 uid 却没变（声明没压过豁免）", reds)
+    need(sc3.get("screen_version") != v1,
+         "声明节点变了，screen_version 却没进位（豁免把它一起吞了）", reds)
+    need(d.get("消失") == [old_uid],
+         "delta.消失 应恰好记着这个声明节点的旧 uid，实得 %r" % (d.get("消失"),), reds)
+    need(d.get("新增") == [tmr2.get("uid")],
+         "delta.新增 应恰好记着新 uid，实得 %r" % (d.get("新增"),), reds)
+    need(int(st.get("TEXT_CHANGED") or 0) == 1 and int(st.get("STALE") or 0) == 0,
+         "进位应**恰好**归因到那一个声明节点（TEXT_CHANGED=1 且 STALE=0），实得 %r" % st, reds)
+
+    # ── 规则2 后半：声明压过 top 预算（放在最后，别用不同的声明集污染共享基线）
+    r2, sc2 = call(core, top=1, watch_text=["屏外按钮07"])
+    got2 = by_label(sc2.get("objects") or [], "屏外按钮07")
+    ev["top=1时的声明节点"] = "%d 条（returned=%d）" % (len(got2), len(sc2.get("objects") or []))
+    need(len(got2) == 1,
+         "top=1 时声明节点被 top 预算裁掉了（声明必进与必进保证同级）", reds)
+    fx.timer_tick = 0
+    fx.quota = 3
+    return "S1 声明即不豁免", reds, ev
+
+
+def check_watch_undeclared(core, fx):
+    """S2 · **未声明**的倒计时改了 ⇒ uid 恒、version 不因它进位（豁免没失守 = 风暴没回流）。"""
+    reds = []
+    ev = {}
+    core._screen_forget(0)
+    fx.timer_tick = 0
+
+    _, sc1 = call(core, top=500)
+    t1 = by_label(sc1.get("objects") or [], "剩余 0")
+    if not need(len(t1) == 1, "夹具里没找着计时器（%d 个）" % len(t1), reds):
+        return "S2 未声明不进位", reds, ev
+    t1 = t1[0]
+    v1 = sc1.get("screen_version")
+    ev["第一扫"] = {k: t1.get(k) for k in ("label", "volatile", "watched", "exempted", "uid")}
+    need(t1.get("volatile") is True, "计时器按现役规则就该是 volatile（夹具坏了）", reds)
+    need(not t1.get("watched"), "没声明却标了 watched", reds)
+    need(t1.get("exempted") is True,
+         "未声明的 volatile 节点应处于豁免态（exempted=true），实得 %r" % t1.get("exempted"), reds)
+    need(str(t1.get("uid") or "").endswith("@~"),
+         "未声明的 volatile 节点 text_key 应恒为 ~，实得 %r" % t1.get("uid"), reds)
+    need("watch_校验" not in sc1, "没给 watch_text 却回了 watch_校验 段", reds)
+
+    # 只推计时器一格：别的什么都不动
+    fx.advance_timer_only()
+    _, sc2 = call(core, top=500, since=v1, watch=True)
+    t2 = by_label(sc2.get("objects") or [], "剩余 0")
+    if not need(len(t2) == 1, "第二扫后计时器不见了", reds):
+        return "S2 未声明不进位", reds, ev
+    t2 = t2[0]
+    d = sc2.get("delta") or {}
+    st = d.get("uid_state_统计") or {}
+    ev["第二扫"] = {"label前后": [t1.get("label"), t2.get("label")],
+                "uid前后": [t1.get("uid"), t2.get("uid")],
+                "uid_state": t2.get("uid_state"),
+                "version前后": [v1, sc2.get("screen_version")],
+                "新增数": d.get("新增数"), "消失数": d.get("消失数"),
+                "uid_state_统计": st}
+    need(t1.get("label") != t2.get("label"), "计时器文本没变，这条断言就是空的", reds)
+    need(t2.get("uid") == t1.get("uid"),
+         "未声明的 volatile 节点换了字 uid 就变了（豁免失守 ⇒ STALE 风暴回流）", reds)
+    need(t2.get("uid_state") == "OK",
+         "未声明的 volatile 节点换字不该报 TEXT_CHANGED，实得 %r" % t2.get("uid_state"), reds)
+    need(sc2.get("screen_version") == v1,
+         "只动了倒计时，screen_version 却进位了（version=%r ≠ %r）—— 风暴回流的凭据"
+         % (sc2.get("screen_version"), v1), reds)
+    need(t1.get("uid") not in (d.get("新增") or []) and
+         t1.get("uid") not in (d.get("消失") or []),
+         "未声明的倒计时被算进了 delta（它没变，不该进）", reds)
+    need(int(st.get("TEXT_CHANGED") or 0) == 0 and int(st.get("STALE") or 0) == 0,
+         "未声明节点不该产生任何 TEXT_CHANGED / STALE，实得 %r" % st, reds)
+    need("watch_校验" not in sc2, "没给 watch_text 却回了 watch_校验 段", reds)
+    fx.timer_tick = 0
+    return "S2 未声明不进位", reds, ev
+
+
+def check_watch_unmatched(core, fx):
+    """S3 · 声明一个**不存在**的串 ⇒ 整个调用拒绝（rc≠0）且 unmatched 逐条列明；挂起须显式。"""
+    reds = []
+    ev = {}
+    core._screen_forget(0)
+    fx.timer_tick = 0
+
+    def 校验(r):
+        return ((r.get("data") or {}).get("watch_校验") or {})
+
+    # ── 一条都没命中 ⇒ 拒绝
+    r1, d1 = call(core, top=500, watch_text=["不存在串xyz"])
+    ck1 = 校验(r1)
+    ev["①不存在"] = {"ok": r1.get("ok"), "code": r1.get("code"),
+                  "warning": (r1.get("warning") or "")[:120], "watch_校验": ck1}
+    need(r1.get("ok") is False, "声明了一个不存在的串，调用竟返回 ok=True（静默吞声明）", reds)
+    need(r1.get("code") not in (0, None), "拒绝时 code 竟为 0/None：%r" % r1.get("code"), reds)
+    need(ck1.get("unmatched") == ["不存在串xyz"],
+         "unmatched 应逐条列明那一条声明，实得 %r" % ck1.get("unmatched"), reds)
+    need(not d1, "拒绝时不该还把这一屏的 objects 回给调用方（否则会被当成声明已兑现）", reds)
+    need(any("watch_pending" in str(b) for b in (r1.get("blind_spots") or [])),
+         "拒绝时 blind_spots 没告诉调用方「可以 watch_pending=true 挂起」", reds)
+
+    # ── 一条命中 + 一条没命中 ⇒ **仍然拒绝**，且 unmatched 只列没命中的那条
+    r2, d2 = call(core, top=500, watch_text=["剩余 00:", "不存在串xyz"])
+    ck2 = 校验(r2)
+    ev["②半命中"] = {"ok": r2.get("ok"), "watch_校验": ck2}
+    need(r2.get("ok") is False, "部分声明没命中却照样返回 ok=True（半截静默）", reds)
+    need(ck2.get("unmatched") == ["不存在串xyz"],
+         "半命中时 unmatched 应只列没命中的那条，实得 %r" % ck2.get("unmatched"), reds)
+
+    # ── watch_pending=true ⇒ 放行，挂起的逐条标 pending
+    r3, d3 = call(core, top=500, watch_text=["剩余 00:", "不存在串xyz"], watch_pending=True)
+    ck3 = 校验(r3)
+    ev["③挂起"] = {"ok": r3.get("ok"), "watch_校验": ck3}
+    need(r3.get("ok") is True,
+         "watch_pending=true 时不该拒绝（显式挂起是允许的）：%s" % (r3.get("warning") or "")[:120], reds)
+    need(ck3.get("pending") == ["不存在串xyz"],
+         "挂起的那条应逐条标进 pending，实得 %r" % ck3.get("pending"), reds)
+    need(not (ck3.get("unmatched") or []),
+         "挂了 pending 就不该再出现在 unmatched 里（两处都列=重复报），实得 %r" % ck3.get("unmatched"), reds)
+    need(ck3.get("matched") == ["剩余 00:"], "matched 应只含真命中的那条，实得 %r" % ck3.get("matched"), reds)
+
+    # ── 规则4：条数上限 32（33 条拒绝；恰好 32 条只因 unmatched 被拒，不是被上限拒）
+    many = ["串%02d" % i for i in range(33)]
+    r4, _ = call(core, top=500, watch_text=many)
+    ev["④33条"] = {"ok": r4.get("ok"), "warning": (r4.get("warning") or "")[:120]}
+    need(r4.get("ok") is False, "33 条声明竟被放行（上限没生效）", reds)
+    need("32" in str(r4.get("warning") or ""),
+         "超限的报错没点明上限 32：%r" % (r4.get("warning") or "")[:120], reds)
+    need("不匹配" not in str(r4.get("warning") or "") and
+         "没匹配到" not in str(r4.get("warning") or ""),
+         "超限应报「条数上限」，不该混成「匹配不到」的报错", reds)
+    r5, _ = call(core, top=500, watch_text=many[:32], watch_pending=True)
+    ev["⑤整32条(挂起)"] = {"ok": r5.get("ok"), "pending条数": len((校验(r5).get("pending") or []))}
+    need(r5.get("ok") is True,
+         "恰好 32 条被拒了（上限应是 32 而不是 31）", reds)
+    need(len(校验(r5).get("pending") or []) == 32,
+         "32 条都挂起时 pending 应有 32 条，实得 %d" % len(校验(r5).get("pending") or []), reds)
+
+    # ── 形态守卫：空声明 / 非数组都明确拒
+    r6, _ = call(core, top=500, watch_text=["剩余 00:", "   "])
+    ev["⑥空声明"] = (r6.get("warning") or "")[:120]
+    need(r6.get("ok") is False and "空声明" in str(r6.get("warning") or ""),
+         "空声明没被明确拒绝（空串会匹配一屏所有节点）", reds)
+    r7, _ = call(core, top=500, watch_text="剩余 00:")
+    ev["⑦非数组"] = (r7.get("warning") or "")[:120]
+    need(r7.get("ok") is False and "数组" in str(r7.get("warning") or ""),
+         "watch_text 传成字符串没被拒（契约要求数组）", reds)
+
+    # ── 对照：认得的声明照常通过（别把规则做成「一声明就拒」）
+    r8, d8 = call(core, top=500, watch_text=["剩余 00:"])
+    ev["⑧认得的声明"] = {"ok": r8.get("ok"), "watch_校验": 校验(r8)}
+    need(r8.get("ok") is True and 校验(r8).get("matched") == ["剩余 00:"],
+         "认得的声明没能正常通过", reds)
+    return "S3 未命中必拒", reds, ev
+
+
 
 # ======================================================================
 # --live：真开一个自己的 tkinter 窗口（用完立刻关）
@@ -1289,7 +1631,10 @@ def main():
                      ("(7) 属性级置信度", lambda: check_conf_attrs(core, fx)),
                      ("(8) uid 三档", lambda: check_uid_state(core, fx)),
                      ("(9) R2 的 name_trust 门槛", lambda: check_r2_name_trust_gate(core, fx)),
-                     ("(10) since 的版本应答", lambda: check_since_version_reply(core, fx))):
+                     ("(10) since 的版本应答", lambda: check_since_version_reply(core, fx)),
+                     ("S1 声明即不豁免", lambda: check_watch_declared(core, fx)),
+                     ("S2 未声明不进位", lambda: check_watch_undeclared(core, fx)),
+                     ("S3 未命中必拒", lambda: check_watch_unmatched(core, fx))):
         title, reds, ev = fn()
         res[title] = reds
         print("")
@@ -1369,7 +1714,10 @@ def main():
               "(7)置信度按 {bbox,text,existence} 分档、聚合=min(existence,text) 且 bbox 不被 text 拖低；"
               "(8)uid 三档 OK/TEXT_CHANGED/STALE 逐档对得上；"
               "(9)offset-suspect ⇒ R2 不成立 ⇒ 落到 VLM；"
-              "(10)给了 since 带回 since_echo/version_match/新 screen_version。")
+              "(10)给了 since 带回 since_echo/version_match/新 screen_version；"
+              "S1声明过的 volatile 节点改了必 TEXT_CHANGED、进位恰好归因到它；"
+              "S2未声明的倒计时不进位（uid 恒 skey@~，风暴没回流）；"
+              "S3声明匹配不到的东西必拒（rc≠0 + unmatched 逐条），挂起须显式。")
     print("退出前 AgentCtlCtrlBorder* 窗 = %s（%s）" % count_border_windows())
     print("=" * 100)
     shutil.rmtree(tmp, ignore_errors=True)
