@@ -118,6 +118,33 @@ SYNCHRONIZE = 0x00100000                   # OpenProcess 权限：只等不等
 WAIT_OBJECT_0 = 0
 ERROR_ALREADY_EXISTS = 183
 
+# ★ 窗Y（2026-10-17 孤儿边框）新增：Job Object + 进程创建时间。
+#   为什么要有这套：--follow 原来只拿 OpenProcess(SYNCHRONIZE) 盯**父的 pid**，
+#   而 pid 是**会被系统回收再利用**的。父死之后、pid 被分给别的活进程时，
+#   子进程就永远盯着一台**跟自己无关**的进程，父进程监护等于没有 ⇒
+#   屏幕上留下 8 个 AgentCtlCtrlBorder* 孤儿窗口（2026-10-17 11:48 pid 16400 现场）。
+#   取证与复现见 work\_孤儿取证_改前.py / work\_孤儿取证_改前_输出.txt。
+#   现在**两条腿一起上**：
+#     ① 内核腿（主）：start_follow 建一个带 JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE 的
+#        Job，把子进程 Assign 进去 ⇒ **父进程一死，OS 自己收掉子进程**，
+#        不靠任何轮询/猜测。
+#     ② 身份腿（辅）：开口那一刻记下父的**创建时间**（GetProcessTimes）；
+#        对不上（pid 已被复用 = 换了人）⇒ 认亲失败 ⇒ 收摊并留日志，不静默。
+JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
+JobObjectExtendedLimitInformation = 9        # winbase.h 的 JobObjectInformationClass
+JOB_OBJECT_QUERY = 0x0004
+PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+ERROR_INVALID_PARAMETER = 87                 # OpenProcess：pid 在进程表里不存在
+QS_ALLINPUT = 0x04FF                         # MsgWaitForMultipleObjects 的等待条件
+WAIT_FAILED = 0xFFFFFFFF
+# 开口（OpenProcess 父句柄）失败时的**宽限期**（秒）：给「父正在退出、句柄还没落地」
+# 留余量。过了还开不到就认「管不了」⇒ 自己收摊。
+#   ⛔ 原来的行为是**永远开、永远返回 False**（fail-open）—— 那就是孤儿边框的老路。
+PARENT_OPEN_GRACE = 3.0
+# 「监护没生效」告警的**重复播报间隔**（秒）：文案一字不改，只是不再每个轮询刷一遍
+#   把日志淹了（原实现 0.5 s 一条，实测 6 s 刷 12 条）。
+PARENT_OPEN_WARN_EVERY = 5.0
+
 # ══════════ 配色 / 厚度 / 反色描边（窗F 2026-10-15 定板）══════════════════
 # ★ 这三个表是**契约级**的：用户 20:41 拍板、DSH 定死五个值。
 #   改任何一个都必须走单独立项 + 用户重新拍板，并同步
@@ -277,6 +304,35 @@ kernel32.OpenProcess.argtypes = [wt.DWORD, wt.BOOL, wt.DWORD]
 kernel32.WaitForSingleObject.argtypes = [wt.HANDLE, wt.DWORD]
 kernel32.CloseHandle.argtypes = [wt.HANDLE]
 kernel32.ReleaseMutex.argtypes = [wt.HANDLE]
+# ★ 窗Y 新增（Job Object / 进程创建时间 / 带等待的取消息）。
+#   同样受本文件开头那条 64 位句柄规矩约束：不声明 restype 就把句柄截成 32 位。
+kernel32.CreateJobObjectW.restype = wt.HANDLE
+kernel32.CreateJobObjectW.argtypes = [ctypes.c_void_p, wt.LPCWSTR]
+kernel32.SetInformationJobObject.restype = wt.BOOL
+kernel32.SetInformationJobObject.argtypes = [wt.HANDLE, ctypes.c_int,
+                                             ctypes.c_void_p, wt.DWORD]
+kernel32.AssignProcessToJobObject.restype = wt.BOOL
+kernel32.AssignProcessToJobObject.argtypes = [wt.HANDLE, wt.HANDLE]
+kernel32.IsProcessInJob.restype = wt.BOOL
+kernel32.IsProcessInJob.argtypes = [wt.HANDLE, wt.HANDLE,
+                                    ctypes.POINTER(wt.BOOL)]
+kernel32.OpenJobObjectW.restype = wt.HANDLE
+kernel32.OpenJobObjectW.argtypes = [wt.DWORD, wt.BOOL, wt.LPCWSTR]
+kernel32.QueryInformationJobObject.restype = wt.BOOL
+kernel32.QueryInformationJobObject.argtypes = [wt.HANDLE, ctypes.c_int,
+                                               ctypes.c_void_p, wt.DWORD,
+                                               ctypes.POINTER(wt.DWORD)]
+kernel32.GetProcessTimes.restype = wt.BOOL
+kernel32.GetProcessTimes.argtypes = [wt.HANDLE,
+                                     ctypes.POINTER(wt.FILETIME),
+                                     ctypes.POINTER(wt.FILETIME),
+                                     ctypes.POINTER(wt.FILETIME),
+                                     ctypes.POINTER(wt.FILETIME)]
+kernel32.GetCurrentProcess.restype = wt.HANDLE
+user32.MsgWaitForMultipleObjects.restype = wt.DWORD
+user32.MsgWaitForMultipleObjects.argtypes = [wt.DWORD,
+                                             ctypes.POINTER(wt.HANDLE),
+                                             wt.BOOL, wt.DWORD, wt.DWORD]
 
 # WndProc 是模块级函数，靠这个列表找到要销毁的窗口（--duration 到点退出用）
 _ALL_HWNDS = []
@@ -522,6 +578,166 @@ def _release_singleton(h):
         kernel32.CloseHandle(h)
 
 
+class _JobBasicLimit(ctypes.Structure):
+    """JOBOBJECT_BASIC_LIMIT_INFORMATION（winbase.h）。
+
+    ★ 为什么自己定义：ctypes.wintypes 里没有；字段顺序与大小必须与 Windows
+      结构体逐字节一致，否则 SetInformationJobObject 会写坏栈。
+    """
+    _fields_ = [("PerProcessUserTimeLimit", ctypes.c_longlong),
+                ("PerJobUserTimeLimit", ctypes.c_longlong),
+                ("LimitFlags", wt.DWORD),
+                ("MinimumWorkingSetSize", ctypes.c_size_t),
+                ("MaximumWorkingSetSize", ctypes.c_size_t),
+                ("ActiveProcessLimit", wt.DWORD),
+                ("Affinity", ctypes.c_size_t),
+                ("PriorityClass", wt.DWORD),
+                ("SchedulingClass", wt.DWORD)]
+
+
+class _IOCounters(ctypes.Structure):
+    """IO_COUNTERS（winbase.h）—— Job 扩展限额结构里的坑位，本单不用它，但要占位。"""
+    _fields_ = [("ReadOperationCount", ctypes.c_ulonglong),
+                ("WriteOperationCount", ctypes.c_ulonglong),
+                ("OtherOperationCount", ctypes.c_ulonglong),
+                ("ReadTransferCount", ctypes.c_ulonglong),
+                ("WriteTransferCount", ctypes.c_ulonglong),
+                ("OtherTransferCount", ctypes.c_ulonglong)]
+
+
+class _JobExtendedLimit(ctypes.Structure):
+    """JOBOBJECT_EXTENDED_LIMIT_INFORMATION（winbase.h）。"""
+    _fields_ = [("BasicLimitInformation", _JobBasicLimit),
+                ("IoInfo", _IOCounters),
+                ("ProcessMemoryLimit", ctypes.c_size_t),
+                ("JobMemoryLimit", ctypes.c_size_t),
+                ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                ("PeakJobMemoryUsed", ctypes.c_size_t)]
+
+
+def _filetime_to_unix(ct):
+    """Win32 FILETIME（100 ns 自 1601-01-01 起）⇒ Unix 秒。"""
+    return (float(ct) / 1e7) - 11644473600.0
+
+
+def _ct_text(ct):
+    """创建时间（FILETIME）⇒ 人能读的本地时间串，只为日志用。"""
+    if not ct:
+        return "(取不到)"
+    try:
+        return time.strftime("%Y-%m-%d %H:%M:%S",
+                             time.localtime(_filetime_to_unix(ct)))
+    except Exception:
+        return "FILETIME=%d" % ct
+
+
+def _process_create_time(pid):
+    """pid 上那个进程的创建时间（FILETIME 整数）；取不到返回 0。
+
+    ★ 这就是**身份**：pid 会回收再利用，创建时间不会。
+      「同一个 pid、在同一时刻，只能是同一个创建时间」—— 对不上就是换了人。
+    ★ 用 PROCESS_QUERY_LIMITED_INFORMATION：一样能问创建时间，权限要求低得多。
+    """
+    h = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid))
+    if not h:
+        return 0
+    # ★ 四个出参**都给真缓冲**，不许给 None。MSDN 说后三个可以传 NULL，
+    #   但本机实测（Win11 26100）传 NULL 直接 access violation writing 0x0
+    #   —— 判据 D1 的 traceback 就是这么炸的。别拿"文档说可以"去赌系统实现。
+    ct, ex, kn, us = wt.FILETIME(), wt.FILETIME(), wt.FILETIME(), wt.FILETIME()
+    try:
+        ok = kernel32.GetProcessTimes(h, ctypes.byref(ct), ctypes.byref(ex),
+                                      ctypes.byref(kn), ctypes.byref(us))
+    finally:
+        kernel32.CloseHandle(h)
+    if not ok:
+        return 0
+    return (int(ct.dwHighDateTime) << 32) | int(ct.dwLowDateTime)
+
+
+def _make_kill_on_close_job():
+    """建一个「最后一个句柄一关，就把里面所有进程杀掉」的 Job。返回 (句柄, 错误码)。
+
+    ★ 为什么这才是真保证：KILL_ON_JOB_CLOSE 是**内核**语义 —— 谁攥着 Job 句柄，
+      谁死或谁关句柄，内核就把 Job 里剩下的进程全杀掉。父进程被 TerminateProcess
+      崩掉那一刻 OS 直接收摊：不需要子进程还活着、不需要它在轮询、
+      不需要它的代码走到哪一行。（对比：OpenProcess+WaitForSingleObject 是
+      **用户态**轮询 —— 子进程只要卡住、认错人、或压根没走到那行，就留下孤儿。）
+    ★ 句柄**不可继承**（CreateJobObject 第一参数传 None）⇒ 子进程拿不到它，
+      Job 的寿命只跟父进程绑死。否则子进程自己攥着句柄，Job 永远不空，父死了也杀不掉。
+    """
+    h = kernel32.CreateJobObjectW(None, None)
+    if not h:
+        return None, kernel32.GetLastError()
+    info = _JobExtendedLimit()
+    info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+    ok = kernel32.SetInformationJobObject(h, JobObjectExtendedLimitInformation,
+                                          ctypes.byref(info), ctypes.sizeof(info))
+    if not ok:
+        err = kernel32.GetLastError()
+        kernel32.CloseHandle(h)
+        return None, err
+    return h, 0
+
+
+def _assign_to_job(job, process_handle):
+    """把一个进程塞进 Job。返回 (成功?, 错误码)。"""
+    if not job or not process_handle:
+        return False, 0
+    if kernel32.AssignProcessToJobObject(job, process_handle):
+        return True, 0
+    return False, kernel32.GetLastError()
+
+
+def _job_kill_on_close_state():
+    """本进程是不是正被一个「关句柄即杀」的 Job 罩着。
+    返回 (在 Job 里?, 带 KILL_ON_JOB_CLOSE?, 说明文字)。
+
+    ★ 这只是**如实汇报**，不是判据：查不到 Job 也能跑（下面还有 pid 腿）。
+      它的用处是让日志能回答「这一次到底是谁在兜底」—— 否则只能靠猜。
+    """
+    in_job = wt.BOOL()
+    if not kernel32.IsProcessInJob(kernel32.GetCurrentProcess(), None,
+                                   ctypes.byref(in_job)):
+        return (False, False, "IsProcessInJob 失败（GetLastError=%d）"
+                % kernel32.GetLastError())
+    if not in_job.value:
+        return False, False, "不在任何 Job 里（命令行直起/单跑，本就是正常情形）"
+    j = kernel32.OpenJobObjectW(JOB_OBJECT_QUERY, False, None)
+    if not j:
+        return (True, False,
+                "在 Job 里，但 OpenJobObject 查不到明细（GetLastError=%d）"
+                % kernel32.GetLastError())
+    try:
+        info = _JobExtendedLimit()
+        n = wt.DWORD()
+        ok = kernel32.QueryInformationJobObject(
+            j, JobObjectExtendedLimitInformation, ctypes.byref(info),
+            ctypes.sizeof(info), ctypes.byref(n))
+    finally:
+        kernel32.CloseHandle(j)
+    if not ok:
+        return (True, False,
+                "在 Job 里，但 QueryInformationJobObject 失败（GetLastError=%d）"
+                % kernel32.GetLastError())
+    flags = int(info.BasicLimitInformation.LimitFlags)
+    return (True, bool(flags & JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE),
+            "LimitFlags=0x%X" % flags)
+
+
+def _border_parent_pid():
+    """拉起 --follow 时写进 --parent-pid 的那个 pid。
+
+    ★ AGENTCTL_BORDER_PARENT_PID 是**仅测试**的口子（与 AGENTCTL_BORDER_MUTEX
+      同一类）：判据要复现「父 pid 已被复用给别的活进程」这个终局，就得能指定一个
+      **不是**我爹的 pid 进去。生产留空 ⇒ 就是 os.getpid()，行为一字不变。
+    """
+    v = (os.environ.get("AGENTCTL_BORDER_PARENT_PID") or "").strip()
+    if v.isdigit() and int(v) > 0:
+        return int(v)
+    return os.getpid()
+
+
 def _log_excepthook(etype, value, tb):
     """未捕获异常 => 落进日志文件。
 
@@ -544,10 +760,39 @@ def _log_excepthook(etype, value, tb):
 _FOLLOW_PROC = None
 
 
+# ★ 窗Y：Job 句柄由**父进程**攥着。它活着 ⇒ Job 不空 ⇒ 没人被杀；
+#   它一死（进程没了 ⇒ 内核自动关掉它的全部句柄）⇒ Job 空 ⇒ 成员全被杀。
+_FOLLOW_JOB = None
+
+
+def _proc_handle(p):
+    """Popen 的进程句柄（子进程刚起来、要往 Job 里塞的那一下用）。"""
+    try:
+        return int(p._handle)
+    except Exception:
+        return 0
+
+
+def _close_job_holder():
+    """放掉本进程攥着的 Job 句柄 ⇒ 内核立刻杀掉 Job 里的所有进程。
+
+    ★ 这是 stop_follow 的**保险**：terminate/wait 都没收干净时，闭句柄是最后一道。
+    ★ 这个句柄本来就该跟着本进程活到最后一刻，所以只在「要收摊 / 要换一个新的」
+      时才闭 —— 闭早了会把自己的边框先杀掉。
+    """
+    global _FOLLOW_JOB
+    j = _FOLLOW_JOB
+    _FOLLOW_JOB = None
+    if j:
+        kernel32.CloseHandle(j)
+
+
 def start_follow(reason=""):
     """拉起 --follow 子进程。返回 pid；没拉起来返回 0。**从不抛异常** ——
     边框是可见性提示，不该把服务本体带崩。"""
-    global _FOLLOW_PROC
+    # ★ 窗Y：_FOLLOW_JOB 也得 global —— 不然这里赋的是个函数局部变量，
+    #   模块级那份永远不更新 ⇒ stop_follow 的 _close_job_holder() 闭不到它。
+    global _FOLLOW_PROC, _FOLLOW_JOB
     try:
         if os.environ.get("AGENTCTL_BORDER") == "0":
             _emit("[跳过] AGENTCTL_BORDER=0 ⇒ 本次不拉边框（%s）" % (reason or ""))
@@ -574,8 +819,17 @@ def start_follow(reason=""):
         env = dict(os.environ)
         env["PYTHONPATH"] = pkg_parent + (
             os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+        # ★ 窗Y：pid 之外再报一份**创建时间**。pid 会被回收再利用，创建时间不会 ——
+        #   子进程靠「pid + 创建时间」认亲，光看 pid 会认错人（2026-10-17 孤儿边框）。
+        ppid = _border_parent_pid()
         cmd = [sys.executable, "-X", "utf8", "-m", "agentctl.ctrl_border",
-               "--follow", "--parent-pid", str(os.getpid())]
+               "--follow", "--parent-pid", str(ppid)]
+        pct = _process_create_time(ppid)
+        if pct:
+            cmd += ["--parent-create-time", str(pct)]
+        elif ppid:
+            _emit("[X] 取不到父 pid=%s 的创建时间 ⇒ 子进程只能靠「自己的创建时间」"
+                  "兜底认亲。如实报告，不静默。" % ppid)
         # ★ stdout/stderr **必须**重定向到文件：
         #   ① 没人读的 PIPE 写满会把子进程卡死；
         #   ② mcp.py 的 stdout 是 JSON-RPC 协议专用，边框写进去当场破坏协议。
@@ -589,14 +843,41 @@ def start_follow(reason=""):
         #   _emit() 用**本进程新开的 open(log,"a")** 追加 —— 一个时刻只有一个写者，
         #   append 语义就是对的。DEVNULL 同时保证 mcp.py 的 stdout 协议一个字节都不碰。
         #   （子进程万一崩了，traceback 由下面的 excepthook 补进日志，不会静默。）
+        # ★ 窗Y 内核腿：先建一个「最后一个句柄一关就杀掉全部成员」的 Job，
+        #   拉起后立刻把子进程 Assign 进去 ⇒ 父进程被 TerminateProcess 崩掉的
+        #   那一刻，**OS 自己收摊**，不靠子进程轮询、不靠子进程代码走到哪一行。
+        #   ★ close_fds=True 已保证子进程**继承不到**这个 Job 句柄 ⇒ Job 不会因为
+        #     子进程还活着而永远不空（那等于白建：内核永远等不到「最后一个句柄」）。
+        _close_job_holder()          # 先放掉上一个（正常路径上这里本来就是空的）
+        job, jerr = _make_kill_on_close_job()
+        if not job:
+            _emit("[X] 建 KILL_ON_JOB_CLOSE 的 Job 失败（GetLastError=%d）⇒ "
+                  "内核腿没了，只剩 pid+创建时间校验那条腿。如实报告，不静默。"
+                  % jerr)
+        else:
+            # ★ 先攥进模块级那份再拉子进程：这样下面 Popen 一抛异常，
+            #   except 里的 _close_job_holder() 才收得到它（否则每次起失败漏一个句柄）。
+            _FOLLOW_JOB = job
         _FOLLOW_PROC = subprocess.Popen(
             cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             stdin=subprocess.DEVNULL, env=env, close_fds=True,
             cwd=pkg_parent, creationflags=CREATE_NO_WINDOW)
-        _emit("边框已启动 pid=%s（%s）→ 日志 %s"
-              % (_FOLLOW_PROC.pid, reason or "启动", log))
+        if job:
+            ok, aerr = _assign_to_job(job, _proc_handle(_FOLLOW_PROC))
+            if ok:
+                _emit("[内核腿] 边框 pid=%s 已入 KILL_ON_JOB_CLOSE 的 Job ⇒ "
+                      "父进程一死，OS 直接收掉它（不靠轮询）" % _FOLLOW_PROC.pid)
+            else:
+                # 关掉这个**空** Job（子进程没进去）不影响它，只是不留句柄。
+                _close_job_holder()
+                _emit("[X] AssignProcessToJobObject 失败（GetLastError=%d）⇒ "
+                      "内核腿没接上，只剩 pid+创建时间校验那条腿。"
+                      "如实报告，不静默。" % aerr)
+        _emit("边框已启动 pid=%s（%s，父 pid=%s 创建时间=%s）→ 日志 %s"
+              % (_FOLLOW_PROC.pid, reason or "启动", ppid, _ct_text(pct), log))
         return _FOLLOW_PROC.pid
     except Exception as e:
+        _close_job_holder()          # ★ 别把刚建的 Job 句柄漏在服务里
         _emit("[X] 拉起 --follow 失败：%r ⇒ 这次没有边框。如实报告，不静默。" % (e,))
         return 0
 
@@ -608,9 +889,11 @@ def stop_follow(timeout=5.0):
     p = _FOLLOW_PROC
     _FOLLOW_PROC = None
     if p is None:
+        _close_job_holder()          # 没有子进程可等，但 Job 句柄也别攥着
         return 0
     try:
         if p.poll() is not None:
+            _close_job_holder()
             return 0
         p.terminate()
         p.wait(timeout=timeout)
@@ -621,6 +904,10 @@ def stop_follow(timeout=5.0):
         except Exception:
             pass
         _emit("[X] 收边框失败：%r（已尝试 kill）" % (e,))
+    finally:
+        # ★ 窗Y：无论上面收没收干净，最后都放掉 Job 句柄 ——
+        #   闭句柄 = 内核把 Job 里所有成员杀掉 = 最后一道保险（孤儿边框的兜底）。
+        _close_job_holder()
     return 0
 
 
@@ -695,7 +982,7 @@ def unregister_border_classes():
 class _BorderApp:
     def __init__(self, color, thickness, no_wda, duration,
                  idle="hide", pass_file=None, brake_flag=None,
-                 poll=0.5, parent_pid=0):
+                 poll=0.5, parent_pid=0, parent_create_time=0):
         # ★ 窗F：thickness 允许是 None（= 按档取厚度）。显式给了就一直是它，
         #   改色（--follow 跟证换档）时也不许被按档厚度顶掉 —— 显式压得住一切。
         self.thickness_override = None if thickness is None else int(thickness)
@@ -710,6 +997,12 @@ class _BorderApp:
         self.brake_flag = brake_flag
         self.poll = max(0.05, float(poll or 0.5))
         self.parent_pid = int(parent_pid or 0)
+        # ★ 窗Y：拉起我的人报上来的自己的创建时间（FILETIME）。开口认亲时对不上
+        #   ⇒ 这个 pid 上已经换成别人了（pid 被回收再利用）⇒ 收摊。
+        self.parent_create_time = int(parent_create_time or 0)
+        self._parent_dead = False          # 判定了「父没了/换了人/管不了」⇒ 收摊
+        self._parent_open_deadline = 0.0   # 开不到父句柄时的宽限截止（monotonic）
+        self._parent_open_warn_at = 0.0    # 上次播报「监护没生效」的时刻
         self.visible = None            # 当前边框显示与否（None=还没建）
         # 老用法（run）走 print，输出照旧打在终端；--follow 走 _emit（stderr+日志）。
         self.sink = print
@@ -911,23 +1204,104 @@ class _BorderApp:
 
     # -- --follow：盯档位（W3-B）------------------------------
     def _parent_gone(self):
-        """父进程没了？⇒ 自己收摊。
+        """父进程没了（或已经不是父了）？⇒ 自己收摊。返回 True = 该收摊。
 
         为什么非做不可：父进程被 kill/崩溃后子进程会被 reparent 成孤儿，
         **一条橙/红边框就永久留在用户屏幕上挡视野** —— 比不做还坏。
+
+        ★ 窗Y（2026-10-17 孤儿边框事故）之后这里有四道：
+          ① 内核 Job（start_follow 建的 JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE）：
+             父一死 OS 直接杀本进程，**根本轮不到这里** —— 不靠轮询猜测。
+          ② 本函数盯的是**句柄**。句柄只认人、不认 pid ⇒ pid 被回收再利用对它无效。
+             （原来盯的其实也已经是句柄；问题是句柄是「开口那一刻」才抓的，
+               抓晚了就认错了人 —— 那才是 2026-10-17 那条孤儿的真死法。）
+          ③ 开口那一刻核对**创建时间**：pid 上的人换了 ⇒ 收摊并留日志，不静默。
+          ④ 开不到句柄（父已彻底消失 / 权限不足）⇒ **不许无限开下去**：
+             宽限期一过就认「管不了」⇒ 收摊。
+             ⛔ 原实现永远返回 False（fail-open）—— 那正是孤儿边框的老路。实测
+               （work\\_孤儿取证_改前_输出.txt）：父彻底消失后 6 s，子进程仍活着、
+               屏幕上 8 个边框窗、日志刷了 12 条告警。
         """
         if not self.parent_pid:
             return False
+        if self._parent_dead:
+            return True
         if self._parent_h is None:
             h = kernel32.OpenProcess(SYNCHRONIZE, False, int(self.parent_pid))
-            self._parent_h = (h if h else None)
-            if not self._parent_h:
-                _emit("[X] OpenProcess(父 pid=%s) 失败 ⇒ **父进程监护没生效**，"
-                      "父进程若被杀会留下孤儿边框。如实报告，不静默。"
-                      % self.parent_pid)
-        if not self._parent_h:
-            return False
+            if not h:
+                return self._parent_open_failed(kernel32.GetLastError())
+            self._parent_h = h
+            self._parent_open_deadline = 0.0
+            self._parent_open_warn_at = 0.0
+            if self._verify_parent_identity():
+                self._parent_dead = True
+                return True
         return kernel32.WaitForSingleObject(self._parent_h, 0) == WAIT_OBJECT_0
+
+    def _parent_open_failed(self, err):
+        """开口（OpenProcess 父句柄）失败怎么判。返回「该不该收摊」。
+
+        ★ 两种错、两种判法：
+          · 87（ERROR_INVALID_PARAMETER）＝ 这个 pid 在进程表里**根本不存在**
+            ⇒ 父已经彻底没了（典型场景：父在我们开口之前就死了）⇒ 立刻收摊，不等。
+          · 其它错（拒绝访问等）＝ 现在还说不准 ⇒ 给 PARENT_OPEN_GRACE 秒宽限，
+            期间照常播报告警；宽限一过还开不到 ⇒ 判「管不了」⇒ 收摊。
+            ⛔ 原来的行为是**永远等下去**（每 0.5 s 重试、永不放弃）⇒ 孤儿边框。
+        """
+        now = time.monotonic()
+        if not self._parent_open_deadline:
+            self._parent_open_deadline = now + PARENT_OPEN_GRACE
+        if err == ERROR_INVALID_PARAMETER:
+            self._parent_dead = True
+            _emit("[--follow] 父 pid=%s 在进程表里不存在（OpenProcess 报 %d）"
+                  " ⇒ 父已彻底退出，自己收摊（防孤儿边框永久挡屏）"
+                  % (self.parent_pid, err))
+            return True
+        if now >= self._parent_open_deadline:
+            self._parent_dead = True
+            _emit("[--follow] 连续 %.1fs 开不到父 pid=%s 的句柄（GetLastError=%d）"
+                  " ⇒ 判定「父已经管不了」，自己收摊：没人监护的边框留在屏幕上"
+                  "就是孤儿边框。如实报告，不静默。"
+                  % (PARENT_OPEN_GRACE, self.parent_pid, err))
+            return True
+        # 宽限期内：照播那条老告警（**文案一字未改**），只是不再每个轮询刷一遍 ——
+        # 原实现 0.5 s 一条，实测 6 s 就刷了 12 条，把真出事的那行埋掉了。
+        if not self._parent_open_warn_at or \
+                now - self._parent_open_warn_at >= PARENT_OPEN_WARN_EVERY:
+            self._parent_open_warn_at = now
+            _emit("[X] OpenProcess(父 pid=%s) 失败 ⇒ **父进程监护没生效**，"
+                  "父进程若被杀会留下孤儿边框。如实报告，不静默。"
+                  % self.parent_pid)
+        return False
+
+    def _verify_parent_identity(self):
+        """句柄抓到了 ⇒ 再认一次亲：**这个 pid 上的进程到底是不是我爹**。
+        返回 True = 换了人（该收摊）。
+
+        两条独立证据（都来自内核，不是猜的）：
+          ① 拉起我的人报上来的 --parent-create-time。对不上 ⇒ pid 已被复用。
+          ② 对比**我自己**的创建时间：我爹生我之前就在了。若这个 pid 上的进程
+             比我还晚 ⇒ 它不可能是我爹 ⇒ 一定是复用了别人的 pid。
+        ★ 为什么只在开口那一刻判一次、后续轮询不再判：
+          句柄只认人 —— pid 回收对**已经握住**的句柄完全无效。判一次之后这个
+          句柄就锁死是我爹，再判一万次也不会多出任何保证，只白花 GetProcessTimes。
+        """
+        ct = _process_create_time(self.parent_pid)
+        mine = _process_create_time(os.getpid())
+        if self.parent_create_time and ct and ct != self.parent_create_time:
+            _emit("[--follow] ★ 父进程已换人：pid=%s 上的进程创建于 %s，"
+                  "而拉起我的人报上来的是 %s ⇒ 这个 pid 已被系统复用给别人了"
+                  " ⇒ 自己收摊。如实报告，不静默。"
+                  % (self.parent_pid, _ct_text(ct),
+                     _ct_text(self.parent_create_time)))
+            return True
+        if mine and ct and ct > mine:
+            _emit("[--follow] ★ 父进程已换人：pid=%s 上的进程创建于 %s，"
+                  "**比我（%s）还晚** ⇒ 它不可能是我爹（我爹生我之前就在了）"
+                  " ⇒ 这个 pid 已被复用 ⇒ 自己收摊。如实报告，不静默。"
+                  % (self.parent_pid, _ct_text(ct), _ct_text(mine)))
+            return True
+        return False
 
     def _pump(self, seconds):
         """边转消息边等。★ 不用 SetTimer：GetMessage 会阻塞，而 --follow 要的是
@@ -939,12 +1313,27 @@ class _BorderApp:
             left = end - time.monotonic()
             if left <= 0:
                 return
+            # ★ 窗Y：**手里有父句柄就把等待交给内核**（MsgWaitForMultipleObjects）：
+            #   「有窗口消息」或「父进程没了」任一发生就醒。原实现只 PeekMessage +
+            #   sleep(0.05)，父死了最多要等一整个 poll（默认 0.5 s）才被发现 ——
+            #   那半秒里子进程还在建/拆窗口。内核等待把这块盲区砍成 0。
+            #   万一这条 API 在别的机器上抽风（WAIT_FAILED）⇒ 落回原来那条老路，
+            #   绝不因为一条优化把整个 --follow 搞死。
+            handles = (wt.HANDLE * 1)(self._parent_h) if self._parent_h else None
+            if handles is not None:
+                r = user32.MsgWaitForMultipleObjects(1, handles, False,
+                                                     int(left * 1000), QS_ALLINPUT)
+                if r == WAIT_OBJECT_0:      # 父进程没了 ⇒ 立刻回去让调用者收摊
+                    return
+                if r == WAIT_FAILED:
+                    handles = None          # 落回老路（见上面的说明）
             while user32.PeekMessageW(ctypes.byref(msg), None, 0, 0, PM_REMOVE):
                 if msg.message == WM_QUIT:
                     raise SystemExit(0)
                 user32.TranslateMessage(ctypes.byref(msg))
                 user32.DispatchMessageW(ctypes.byref(msg))
-            time.sleep(min(0.05, max(0.0, left)))
+            if handles is None:
+                time.sleep(min(0.05, max(0.0, left)))
 
     def run_follow(self):
         # ★ --follow 的每一条诊断都必须落进日志（stderr 在被 spawn 时是 DEVNULL），
@@ -966,12 +1355,30 @@ class _BorderApp:
               % (self.poll, self.parent_pid or "无", self.idle,
                  ("显式 %d" % self.thickness) if self.thickness_override is not None
                  else "按档 %d" % self.thickness))
+        # ★ 窗Y：把「这一次到底是谁在兜底」写进日志。以前这条只写 pid，事后没人
+        #   说得清孤儿是怎么活下来的 —— 而孤儿边框的事故复盘全靠日志。
+        if self.parent_pid:
+            in_job, armed, why = _job_kill_on_close_state()
+            _emit("[--follow] 父进程监护：内核腿=%s；pid 腿=pid=%s + 创建时间=%s"
+                  "（句柄只认人不认 pid；pid 被复用由创建时间戳穿）"
+                  % ("已入 KILL_ON_JOB_CLOSE Job（父一死 OS 直接收摊本进程）"
+                     if armed else ("在 Job 里但没带 KILL_ON_JOB_CLOSE（%s）" % why
+                                    if in_job else why),
+                     self.parent_pid, _ct_text(self.parent_create_time)))
         last = None
         try:
             # ★ 必须**在 try 里面**：原来放在 try 外面，建窗一失败异常就直接飞出去，
             #   底下的 finally（销毁窗口 + 释放单例互斥量）压根跑不到
             #   ⇒ 互斥量被一个**没有边框的进程**长期占着，之后每个 --follow 都秒退
             #   「已有一个在跑」，现场就是"服务在跑但屏幕上什么边框都没有"。
+            # ★ 窗Y：**先认亲，再画窗**。原来第一次 _parent_gone() 在建完 8 个
+            #   窗口、进了轮询之后才发生 —— 子进程冷启动那一小段（满载时几百毫秒）
+            #   里父死了、pid 又被系统复用，就认错了人，然后永远盯着别人活。
+            #   现在认错了 ⇒ **一张窗都不画**。
+            if self.parent_pid and self._parent_gone():
+                _emit("[--follow] 父进程（或它占用的 pid）已经没了 "
+                      "⇒ 还没画窗口就收摊")
+                return 0
             n = self._create_all()
             _emit("[--follow] 已建 %d 个边框窗口（主色 %d + 1px 反色描边 %d；"
                   "初始隐藏，等判定）" % (n, self.n_body, self.n_edge))
@@ -1057,6 +1464,11 @@ def main(argv=None):
                     help="没有通行证时：hide 隐藏（默认）/ red 常红")
     ap.add_argument("--parent-pid", type=int, default=0,
                     help="父进程 pid，没了就自杀（防孤儿边框永久挡屏）")
+    ap.add_argument("--parent-create-time", type=int, default=0,
+                    help="父进程创建时间（Win32 FILETIME 整数）。start_follow 会自动"
+                         "带上；手工拉起不给也能跑。与 --parent-pid 对不上 ⇒ 这个 "
+                         "pid 已被系统复用给别人 ⇒ 自行收摊"
+                         "（★ 2026-10-17 孤儿边框修复）")
     a = ap.parse_args(argv)
 
     if a.list_monitors:
@@ -1077,7 +1489,8 @@ def main(argv=None):
         app = _BorderApp(TIERS["A"][0], a.thickness, a.no_wda, 0,
                          idle=a.idle, pass_file=a.pass_file,
                          brake_flag=a.brake_flag, poll=a.poll,
-                         parent_pid=a.parent_pid)
+                         parent_pid=a.parent_pid,
+                         parent_create_time=a.parent_create_time)
         return app.run_follow()
     if a.brake:
         color, desc = BRAKE_COLOR

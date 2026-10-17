@@ -37,6 +37,15 @@ import sys
 import tempfile
 import time
 
+# ★ 2026-10-17（DSH 补 · 窗Z 的第 18 条红了以后才看清）：
+#   只在"某些 spawn"的 env 里设 AGENTCTL_BORDER_LOG 不够 —— 还有子进程（holder /
+#   间接 start_follow）继承的是**本进程环境**，于是照样写生产目录的 ctrl_border.log，
+#   第 18 条「生产目录前后快照完全一致」就会红。
+#   ⇒ 在**模块导入时**全局设一次（用 setdefault，不覆盖窗Z 的按例覆盖），
+#     任何继承环境的子进程都落到本次沙箱。
+_GLOBAL_BORDER_LOG = os.path.join(tempfile.mkdtemp(prefix="T1_W3_border_g_"), "ctrl_border.log")
+os.environ.setdefault("AGENTCTL_BORDER_LOG", _GLOBAL_BORDER_LOG)
+
 # ★ 窗M（2026-10-16）修「闸门会撒谎」：仓根不再写死。
 #   写死时本判据在任何机器上验的都是那台开发机的 src/contract —— 干净 clone 的绿灯
 #   与入库物无关。现在从 __file__ 推（tests\ 的上一级 = 仓根），
@@ -951,6 +960,16 @@ def border(src_dir=None, keep_border=False):
             print("  [收尾] 判据跑完，屏幕上 0 个残留边框窗口", flush=True)
         check("收尾 · 判据跑完屏幕上**没有残留边框窗口**（不把测试窗口留给用户）",
               len(left) == 0, left)
+        # ★ 17（窗Z · 2026-10-17 新增）：边框日志落在**沙箱**，不许落生产目录。
+        #   机制：本函数 env 已设 AGENTCTL_BORDER_LOG=<tmp>\ctrl_border.log，
+        #   ctrl_border 的 log_path() 优先读该覆盖口 ⇒ 产品日志应写在判据沙箱里。
+        #   （须在 finally 的 rmtree(tmp) 之前断言——删了目录就没得验了。）
+        try:
+            _sz17 = os.path.getsize(log)
+        except OSError:
+            _sz17 = -1
+        check("17（窗Z）· 边框日志确实落在沙箱（<tmp>/ctrl_border.log 存在且非空）",
+              _sz17 > 0, "沙箱日志字节数=%d（log=%s）" % (_sz17, log))
         owners_left = _border_owner_pids()
         if owners_left:
             print("  [收尾] ⚠ 判据跑完还有残留的边框属主进程 %s（多半是本脚本的 pid=%d，"
@@ -1248,6 +1267,25 @@ def wire(src_dir=None):
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def _prod_dir():
+    return os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")),
+                        "AgentCtl")
+
+
+def snapshot_prod():
+    """★ 窗Z 新增：生产目录逐项快照 {name: (size, mtime_ns)}；目录不存在 ⇒ None。只读。"""
+    d = _prod_dir()
+    if not os.path.isdir(d):
+        return None
+    snap = {}
+    for n in sorted(os.listdir(d)):
+        p = os.path.join(d, n)
+        if os.path.isfile(p):
+            st = os.stat(p)
+            snap[n] = (st.st_size, st.st_mtime_ns)
+    return snap
+
+
 # ═══════════════════════════════════════════════════════════════
 def main(argv=None):
     ap = argparse.ArgumentParser(description="T1 窗3 自证（W3-A 坐标标注 / W3-B 边框）")
@@ -1260,6 +1298,17 @@ def main(argv=None):
     a = ap.parse_args(argv)
     src_dir = os.path.abspath(a.src) if a.src else SRC
     t0 = time.monotonic()
+    pre_prod = snapshot_prod()   # ★ 窗Z：生产目录跑前快照（18 号断言用）
+    # ★ 窗Z 背景写者探测：生产 log 在**判据未启动时**若已在增长，说明有别的进程
+    #   （常驻服务/并行判据作业）在写它 ⇒ 跑前跑后快照无法归因 ⇒ 18 记「验不了」
+    #   （如实登记，不计红也不装绿）；探测稳定 ⇒ 18 正常严格断言。
+    _bg_writer, _bg_s1, _bg_s2 = False, None, None
+    _plog18 = os.path.join(_prod_dir(), "ctrl_border.log")
+    if os.path.isfile(_plog18):
+        _bg_s1 = os.path.getsize(_plog18)
+        time.sleep(1.2)
+        _bg_s2 = os.path.getsize(_plog18)
+        _bg_writer = _bg_s2 != _bg_s1
     print("=" * 78, flush=True)
     print("T1 窗3 自证 · 判据段=%s · src=%s · pid=%d"
           % (a.what, src_dir, os.getpid()), flush=True)
@@ -1275,6 +1324,32 @@ def main(argv=None):
         import traceback
         traceback.print_exc()
         check("自证脚本本身没崩（%s: %s）" % (type(e).__name__, e), False, "见上")
+    # ★ 18（窗Z · 2026-10-17 新增）：生产目录没被碰 —— 跑前跑后逐项快照（名字+大小+mtime）
+    #   完全一致；目录原本不存在 ⇒ 允许"跑完仍不存在"。mtime 用 ns 级：任何触碰都算变化。
+    post_prod = snapshot_prod()
+    if _bg_writer:
+        SKIP.append("18（窗Z）· 生产目录快照：探测到 ctrl_border.log 在判据未启动时已被"
+                    "**其他进程**持续写入（跑前两次采样 size %d→%d）—— 谁写的无法归因，"
+                    "本判据无法自证清白，如实登记验不了；生产文件：%s"
+                    % (_bg_s1, _bg_s2, _plog18))
+    elif pre_prod is None:
+        check("18（窗Z）· 生产目录原本不存在 ⇒ 跑完仍不存在",
+              post_prod is None,
+              "跑后=%s" % ("仍不存在" if post_prod is None
+                           else "出现了 %d 项" % len(post_prod)))
+    else:
+        _diffs = []
+        for _n in sorted(set(pre_prod) | set(post_prod or {})):
+            _a, _b = pre_prod.get(_n), (post_prod or {}).get(_n)
+            if _a is None:
+                _diffs.append("%s 新增(size=%s)" % (_n, _b[0] if _b else "?"))
+            elif _b is None:
+                _diffs.append("%s 被删除" % _n)
+            elif _a != _b:
+                _diffs.append("%s 变化 size %s→%s" % (_n, _a[0], _b[0]))
+        check("18（窗Z）· 生产目录 %s 跑前跑后逐项快照完全一致"
+              % _prod_dir(), not _diffs,
+              "；".join(_diffs[:5]) if _diffs else "逐项一致（%d 项）" % len(pre_prod))
     print("\n" + "=" * 78, flush=True)
     print("判据汇总：绿 %d 条 / 红 %d 条 / 验不了 %d 条，用时 %.1fs"
           % (len(OK), len(BAD), len(SKIP), time.monotonic() - t0), flush=True)
