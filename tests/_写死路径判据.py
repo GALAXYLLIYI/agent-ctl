@@ -190,9 +190,13 @@ def run_inject():
     with open(dst, "a", encoding="utf-8") as f:
         f.write('\nx_injected = "F:\\\\SomeMachine\\\\x"\n')
     h1 = scan(INJECT_DIR)
-    named = any("F:\\SomeMachine\\x" in s for v in h1.values() for _ln, s in v)
+    # ★ 2026-10-17 修（ZCode 自测发现）：named 原来匹配 "F:\SomeMachine\x"（单反斜杠），
+    #   而写进副本的是源码转义后的双反斜杠形态 ⇒ 字符串永不相等、注入明明被抓却判红。
+    #   改按稳定子串 "SomeMachine" 匹配，并在 detail 里打印命中原文。
+    named = [(rel, ln, s) for rel, v in h1.items() for ln, s in v if "SomeMachine" in s]
     rec("I2", "注入后被判红并点名 F:\\SomeMachine\\x", "绿" if (h1 and named) else "红",
-        "命中 %d 文件 / %d 行" % (len(h1), sum(len(v) for v in h1.values())))
+        ("命中 %s" % ("；".join("%s:%d %s" % (r, l, s) for r, l, s in named[:3]))) if named
+        else "命中 %d 文件 / %d 行" % (len(h1), sum(len(v) for v in h1.values())))
 
     shutil.rmtree(INJECT_DIR, ignore_errors=True)
     print("  [收尾] 注入副本已清（%s）" % INJECT_DIR)
