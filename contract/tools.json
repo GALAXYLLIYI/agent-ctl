@@ -394,7 +394,7 @@
     {
       "name": "ctl_screen",
       "title": "语义屏（裁剪后的这一屏）",
-      "description": "★ **一次调用给 agent 一段裁剪过、带身份、带新鲜度的屏幕**，而不是一整棵树。在 ctl_find 找不到、但你确信东西在屏幕上时用它。\n\n★ 返回 screen_version（**服务端签发**）+ window + viewport + objects[] + texts[] + channels + omitted。每个对象带 id / uid / label / role / rect / in_view / interactive / actions / source / source_confidence / name_trust / volatile / score。\n\n★ **uid = struct_key@text_key**（结构路径@规范化文本）。volatile=true 的节点（时间/计数类）**不参与 text_key 比对** —— 否则计时器每帧换字都会变成「新对象」，STALE 判据会被刷爆。\n\n★ **score 口径**（见返回的「打分口径」段，可解释可调）：0.35·看得见 + 0.25·可交互 + 0.20·query 命中 + 0.10·面积占比 + 0.10·相对上次是新面孔。\n★ **必进保证**：`interactive 且看得见` 的节点**永不裁掉**，哪怕超过 top —— 裁掉一个现在能点的按钮，agent 只会以为「界面上没有它」。因此 returned 可以 > top。\n\n★ **source_confidence 没有裸 confidence**：多来源证据**取 min**（有弱证据就别当强证据）。\n★ **name_trust**：网页/Chromium 类窗口一律 low —— 网页的无障碍 name 不可信（超星选择题字母与实际选项错位就是实例），别把它当权威文本。\n\n★ **channels 段**给出 must_vlm = not R1 and not R2 and not R3（R1=CDP 可达且 DOM 命中 / R2=UIA 可交互≥5 且目标命中 / R3=OCR 命中且 bbox 可当锚）。**本版 R1、R3 只判定不接线**，未接线一律报 false。\n\n★ **screen_version 只能回传、不能指定**：想对照上一次就把上次拿到的值放进 since。传 version / screen_version 会被忽略并在 blind_spots 里明说。\n\n★ ⚠ objects[].id **不是** ctl_click 的 eid（编号口径不同，见 T1 窗2）。**本版语义屏不接动作侧** —— 要点请用 ctl_find 拿 eid。\n\n★ 只读属性，不 Invoke、不点击。",
+      "description": "★ **一次调用给 agent 一段裁剪过、带身份、带新鲜度的屏幕**，而不是一整棵树。在 ctl_find 找不到、但你确信东西在屏幕上时用它。\n\n★ 返回 screen_version（**服务端签发**）+ window + viewport + objects[] + texts[] + channels + omitted。每个对象带 id / uid / label / role / rect / in_view / interactive / actions / source / source_confidence / conf_bbox / conf_text / conf_existence / name_trust / volatile / score；**给了 since** 时还带 uid_state（OK / TEXT_CHANGED / STALE）。\n\n★ **uid = struct_key@text_key**（结构路径@规范化文本）。volatile=true 的节点（时间/计数类）**不参与 text_key 比对** —— 否则计时器每帧换字都会变成「新对象」，STALE 判据会被刷爆。\n\n★ **uid_state 三档**（**给了 since 才有**，逐对象产出）：struct_key 变 ⇒ **STALE**（可能压根不是同一对象，寻址**拒绝**）；struct_key 同而 text_key 变 ⇒ **TEXT_CHANGED**（同一对象内容变了 —— **动作核验期待这一档**，别当成过期）；两者都同 ⇒ **OK**。\n\n★ **score 口径**（见返回的「打分口径」段，可解释可调）：0.35·看得见 + 0.25·可交互 + 0.20·query 命中 + 0.10·面积占比 + 0.10·相对上次是新面孔。\n★ **必进保证**：`interactive 且看得见` 的节点**永不裁掉**，哪怕超过 top —— 裁掉一个现在能点的按钮，agent 只会以为「界面上没有它」。因此 returned 可以 > top。\n\n★ **属性级置信度**（没有裸 confidence）：每个来源按 {bbox, text, existence} **三档分开报**；对象上给 conf_bbox / conf_text / conf_existence，聚合口径 source_confidence = min(conf_existence, conf_text)（「读得准不准」）。**conf_bbox 单列**（「点得准不准」）—— 不会被低分 OCR 文本把 UIA 的精确坐标一起拖低。\n★ **name_trust 三档**：high = 原生窗口；low = 网页/Chromium（无障碍 name 来自 DOM/ARIA 映射，不是像素事实，判不出来也按 low）；**offset-suspect** = 网页且选项字母疑似与它在屏幕上的位置错位（超星选择题就是实例）—— 这一档**直接关掉 R2**，这种页面必须落到 VLM，别让 UIA 的自述一手遮天。判定依据见返回里的 name_trust_依据。\n\n★ **channels 段**给出 must_vlm = not R1 and not R2 and not R3（R1=CDP 可达且 DOM 命中 / **R2=UIA 可交互≥5 ∧ 目标命中 ∧ name_trust ≠ offset-suspect** / R3=OCR 命中且 bbox 可当锚）。**本版 R1、R3 只判定不接线**，未接线一律报 false。\n\n★ **screen_version 只能回传、不能指定**（版本由**服务端签发**）：想对照上一次就把上次拿到的值原样放进 since。给了 since，返回里就有 **since_echo（原样回传）/ version_match（你回传的值本进程见过没有）/ screen_version_新值（本次新签发的）** —— 版本号是「这屏到底变没变」的凭据，version_match 为 true 且新值与回传值相同就说明这屏没动，**别拿同一个 uid 盲扫**。传 version / screen_version 会被忽略并在 blind_spots 里明说。\n\n★ ⚠ objects[].id **不是** ctl_click 的 eid（编号口径不同，见 T1 窗2）。**本版语义屏不接动作侧** —— 要点请用 ctl_find 拿 eid。\n\n★ 只读属性，不 Invoke、不点击。",
       "annotations": {
         "readOnlyHint": true,
         "destructiveHint": false,
@@ -429,7 +429,7 @@
           },
           "since": {
             "type": "string",
-            "description": "★ **只能回传**你上次拿到的 screen_version，用于对照。服务端**不会**用这个值拼出新版本 —— 版本永远是服务端签发的。"
+            "description": "★ **只能回传**你上次拿到的 screen_version，用于对照。服务端**不会**用这个值拼出新版本 —— 版本永远是服务端签发的。给了 since 就会带回 since_echo / version_match / screen_version_新值 三件套。"
           },
           "max_nodes": {
             "type": "integer",
@@ -446,7 +446,7 @@
         ],
         "additionalProperties": false
       },
-      "returns": "{ screen_version, window{hwnd,title,cls,pid}, viewport{client,scroll_y,doc_height,scroll_unknown}, objects[{id,uid,label,role,rect,in_view,interactive,actions,source,source_confidence,name_trust,volatile,score}], texts[{id,text,rect}], channels{R1_cdp,R2_uia,R3_ocr,must_vlm}, omitted{total,returned,reason,top,breakdown}, 打分口径, 必进保证, uid_口径, name_trust_口径, [delta], 窗口状态, capture_id }"
+      "returns": "{ screen_version, window{hwnd,title,cls,pid}, viewport{client,scroll_y,doc_height,scroll_unknown}, objects[{id,uid,label,role,rect,in_view,interactive,actions,source,source_confidence,conf_bbox,conf_text,conf_existence,name_trust,volatile,score,[uid_state]}], texts[{id,text,rect}], channels{R1_cdp,R2_uia,R3_ocr,must_vlm}, omitted{total,returned,reason,top,breakdown}, 打分口径, 必进保证, uid_口径, uid_state_口径, conf_口径, name_trust_口径, name_trust_依据, [since_echo,version_match,screen_version_新值,版本口径], [delta{since_echo,version_match,screen_version_新值,新增,消失,uid_state_统计}], 窗口状态, capture_id }"
     },
     {
       "name": "ctl_find",

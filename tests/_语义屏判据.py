@@ -16,6 +16,14 @@ r"""判据 · F4 语义屏 ctl_screen（窗B1 · 2026-10-17）
     ⑤ channels 段：must_vlm = not R1 and not R2 and not R3 逐格对上；
        name_trust 对 Chromium 窗口给 low；返回里**没有裸 confidence 字段**。
     ⑥ 契约与接线：tools.json 有 ctl_screen、JSON 合法、TOOLS 表里有它。
+    ⑦ 属性级置信度：每条证据按 {bbox,text,existence} 分档；对象上三档都在，
+       聚合 = min(existence,text)，且 **conf_bbox 不被 conf_text 拖低**
+       （造一条「UIA 坐标精确 + OCR 字很弱」的证据来验）。
+    ⑧ uid 三档：改文本 ⇒ TEXT_CHANGED（动作核验期待这一档）；挪结构 ⇒ STALE；
+       都不变 ⇒ OK；没有基线 ⇒ STALE。
+    ⑨ must_vlm 的 R2 加 name_trust 门槛：offset-suspect ⇒ **R2 不成立**、
+       must_vlm 转 True；对照组：low 不拦（别把网页一刀切）、原生窗口不报错位。
+    ⑩ 给了 since：since_echo 原样回传 + version_match 正确 + 带回**新** screen_version。
 
 跑法：
     python -X utf8 tests\_语义屏判据.py                # 合成夹具（无桌面也能跑）
@@ -24,6 +32,11 @@ r"""判据 · F4 语义屏 ctl_screen（窗B1 · 2026-10-17）
     python -X utf8 tests\_语义屏判据.py --inject text_key    # 必红③（uid 去掉 text_key）
     python -X utf8 tests\_语义屏判据.py --inject version      # 必红②（screen_version 钉死）
     python -X utf8 tests\_语义屏判据.py --inject all          # 三条一起注，逐条报红
+    python -X utf8 tests\_语义屏判据.py --inject conf        # 必红⑦（退回对象级一个数 ⇒ bbox 被 text 拖低）
+    python -X utf8 tests\_语义屏判据.py --inject uid_state     # 必红⑧（三档塌两档：内容变了也报 STALE）
+    python -X utf8 tests\_语义屏判据.py --inject r2          # 必红⑨（R2 不看 name_trust ⇒ 错位页面假通过）
+    python -X utf8 tests\_语义屏判据.py --inject version_reply  # 必红⑩（since 的版本应答不回）
+★ 名字说明：--inject version 是**修正②**那条（screen_version 钉死），它现在会同时红 (2) 与 (10) —— 两处盯的都是「版本必须是新签发的」，如实报。
 
 ★ 换掉的只有 I/O 边界：uia_tree._lib（怎么拿窗口根）、uia_tree._client_rect（怎么拿客户区）、
   core._screen_window_info（标题/类名从 win32gui 读）。
@@ -63,8 +76,9 @@ EXPECT_TOTAL = N_BTN + N_QTEXT + N_TEXT + 2 + N_OFF      # 63（+2 = 计时器 +
 EXPECT_IN_VIEW = N_BTN + N_QTEXT + N_TEXT + 2             # 53
 
 REQUIRED_OBJ_FIELDS = ("id", "uid", "label", "role", "rect", "in_view", "interactive",
-                       "actions", "source", "source_confidence", "name_trust",
-                       "volatile", "score")
+                       "actions", "source", "source_confidence",
+                       "conf_bbox", "conf_text", "conf_existence",   # ★ 窗C1 属性级三档
+                       "name_trust", "volatile", "score")
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -223,6 +237,12 @@ class Fixture(object):
         self.cls = cls
         self.pid = pid
         self.tick = 0
+        # ★ 窗C1 新增两个旋钮（默认关 ⇒ (1)~(6) 组完全不受影响）
+        #   n_extra_btn >0：在按钮队列**最前面**插 N 个同角色按钮 ⇒ 后面每个按钮的
+        #     struct_key 整体后移（uid 变）⇒ 造「可能压根不是同一对象」那一档。
+        #   web_options："" / "normal" / "scramble" —— 网页选项字母正序 / 乱序。
+        self.n_extra_btn = 0
+        self.web_options = ""
 
     def set_title(self, t):
         self.title = t
@@ -250,7 +270,12 @@ class Fixture(object):
             rid[0] += 1
             inner.append(_Ctrl("PaneControl", [20, 40, 1260, 860],
                                "题干第%d段：下列说法正确的是" % (i + 1), rid=list(rid)))
-        # (2) 视口内可交互按钮（小）
+        # (2) 视口内可交互按钮（小）。★ 插在最前面的额外按钮动的是**同角色兄弟编号**，
+        #     后面每个按钮的 struct_key 都会变 —— 这就是 STALE 那一档。
+        for i in range(int(self.n_extra_btn or 0)):
+            rid[0] += 1
+            inner.append(_Ctrl("ButtonControl", [100, 40 + 20 * i, 180, 58 + 20 * i],
+                               "插入按钮%02d" % (i + 1), rid=list(rid)))
         for i, lab in enumerate(self.button_labels()):
             rid[0] += 1
             inner.append(_Ctrl("ButtonControl", [100, 100 + 20 * i, 180, 118 + 20 * i],
@@ -265,6 +290,15 @@ class Fixture(object):
         inner.append(_Ctrl("TextControl", [20, 870, 220, 890], self.timer_label, rid=list(rid)))
         rid[0] += 1
         inner.append(_Ctrl("TextControl", [300, 870, 600, 890], self.status_label, rid=list(rid)))
+
+        # (5) ★ 窗C1：网页选项（RadioButtonControl）。字母正序 = 没问题；
+        #     乱序 = 「控件自称的字母与它在屏幕上的位置对不上」= 疑似错位。
+        if self.web_options:
+            order = [0, 1, 2, 3] if self.web_options == "normal" else [3, 2, 1, 0]
+            for k, i in enumerate(order):
+                rid[0] += 1
+                inner.append(_Ctrl("RadioButtonControl", [100, 300 + 100 * k, 700, 330 + 100 * k],
+                                   "%s. 选项%s" % ("ABCD"[i], "甲乙丙丁"[i]), rid=list(rid)))
 
         offscreen = []
         for i in range(N_OFF):
@@ -351,10 +385,82 @@ def _screen_build(hwnd, args):                         # noqa: F811  故意覆�
     return out
 """
 
+# ===== 以下为 窗C1 注入段（跑红自证专用，勿入产品代码）=====================
+INJECT_CONF = """
+
+# ===== 以下为 窗C1 注入段（跑红自证专用，勿入产品代码）=====
+_real_conf_attrs = _agg_source_conf_attrs
+
+
+def _agg_source_conf_attrs(items):                       # noqa: F811  故意覆盖真版
+    # 注入的缺陷：退回**对象级一个数**（三档一起取 min）
+    #   ⇒ bbox 被 text 一起拖低，正是 Z2 指出的「误伤定位」。
+    a = _real_conf_attrs(items)
+    m = min([a["bbox"], a["text"], a["existence"], a["agg"]])
+    out = {k: m for k in SCREEN_CONF_ATTRS}
+    out["agg"] = m
+    out["sources"] = a["sources"]
+    return out
+"""
+
+INJECT_UID_STATE = """
+
+# ===== 以下为 窗C1 注入段（跑红自证专用，勿入产品代码）=====
+_real_uid_state = screen_uid_state
+
+
+def screen_uid_state(prev_uid, cur_uid):                 # noqa: F811  故意覆盖真版
+    # 注入的缺陷：三档塌成两档 —— 同对象改了字也报 STALE
+    #   ⇒ 「动作成功了」被判成「过期」，agent 只好反复重扫。
+    s = _real_uid_state(prev_uid, cur_uid)
+    return "STALE" if s == "TEXT_CHANGED" else s
+"""
+
+INJECT_R2 = """
+
+# ===== 以下为 窗C1 注入段（跑红自证专用，勿入产品代码）=====
+_real_channels_c1 = screen_channels
+
+
+def screen_channels(*, interactive_count, target_hit, name_trust="high",  # noqa: F811
+                    **kw):
+    # 注入的缺陷：R2 不看 name_trust（退回修正⑤的老口径）
+    #   ⇒ 网页选项错位页面「错位命中」，R2 假通过。
+    return _real_channels_c1(interactive_count=interactive_count,
+                             target_hit=target_hit, name_trust="high", **kw)
+"""
+
+INJECT_VERSION_REPLY = """
+
+# ===== 以下为 窗C1 注入段（跑红自证专用，勿入产品代码）=====
+_real_build_reply = _screen_build
+
+
+def _screen_build(hwnd, args):                            # noqa: F811  故意覆盖真版
+    # 注入的缺陷：since 的版本应答三件套**不回**（还把 version_match 写死成 True）
+    #   ⇒ agent 拿不到「这屏到底变没变」的凭据，只能盲扫。
+    out = _real_build_reply(hwnd, args)
+    if args.get("since"):
+        for k in ("since_echo", "version_match", "screen_version_新值"):
+            out.pop(k, None)
+        out["版本口径"] = ""
+        d = out.get("delta")
+        if isinstance(d, dict):
+            for k in ("since_echo", "version_match", "screen_version_新值"):
+                d.pop(k, None)
+            d["version_match"] = True
+    return out
+"""
+
 INJECT = {
     "guarantee": ("拿掉必进保证（纯按分取前 top）", "append", INJECT_GUARANTEE),
     "text_key": ("uid 里去掉 text_key（只剩结构路径）", "append", INJECT_TEXT_KEY),
     "version": ("screen_version 钉死不变", "append", INJECT_VERSION),
+    # ★ 窗C1 的四个新注入（每个只红自己那一组）
+    "conf": ("置信度退回对象级一个数（bbox 被 text 拖低）", "append", INJECT_CONF),
+    "uid_state": ("uid 三档塌成两档（内容变了也报 STALE）", "append", INJECT_UID_STATE),
+    "r2": ("R2 不看 name_trust（错位页面假通过）", "append", INJECT_R2),
+    "version_reply": ("since 的版本应答三件套不回", "append", INJECT_VERSION_REPLY),
 }
 
 
@@ -707,6 +813,338 @@ def check_contract(core):
     ev["契约gate"] = ent.get("gate")
     return "(6) 契约与接线", reds, ev
 
+def check_conf_attrs(core, fx):
+    """(7) 属性级置信度：三档都在、聚合=min(existence,text)、**bbox 不被 text 拖低**。"""
+    reds = []
+    core._screen_forget(0)
+    _, sc = call(core, query=QUERY, top=500)
+    objs = sc.get("objects") or []
+    ev = {"对象数": len(objs)}
+    if not need(objs, "夹具这一屏空了", reds):
+        return "(7) 属性级置信度", reds, ev
+
+    # ── 纯函数直验：UIA 坐标精确（1.00）+ OCR 框还行（0.90）但**认字很弱**（0.30）
+    items = [{"source": "uia",
+              "source_confidence": {"bbox": 1.00, "text": 1.00, "existence": 1.00}},
+             {"source": "ocr",
+              "source_confidence": {"bbox": 0.90, "text": 0.30, "existence": 0.80}}]
+    a = core._agg_source_conf_attrs(items)
+    ev["uia精确+ocr弱文本"] = a
+    need(isinstance(a, dict), "_agg_source_conf_attrs 应返回逐字段的 dict，实得 %r" % type(a), reds)
+    for k, want in (("bbox", 0.90), ("text", 0.30), ("existence", 0.80)):
+        need(abs(float((a or {}).get(k, -1)) - want) < 1e-9,
+             "属性级聚合 %s 应=min(各来源)=%r，实得 %r" % (k, want, (a or {}).get(k)), reds)
+    need(abs(float((a or {}).get("agg", -1)) - 0.30) < 1e-9,
+         "聚合口径 agg 应=min(existence,text)=0.30，实得 %r" % (a or {}).get("agg"), reds)
+    # ★ 本组的命门：bbox 严格高于 text —— 一旦退回「对象级取 min」，这两个数必然相等。
+    need(float((a or {}).get("bbox", 0)) > float((a or {}).get("text", 0)) + 1e-9,
+         "bbox 被 text 拖平了（退回对象级取 min）：bbox=%r text=%r"
+         % ((a or {}).get("bbox"), (a or {}).get("text")), reds)
+    z = core._agg_source_conf_attrs([])
+    need(all(abs(float((z or {}).get(k, -1))) < 1e-9
+             for k in ("bbox", "text", "existence", "agg")),
+         "空证据表三档都该报 0.0，实得 %r" % z, reds)
+
+    # ── 对象上三档都在；只有 UIA 时恒为 1.0；聚合值 = min(conf_existence, conf_text)
+    need(all(all(k in o for k in ("conf_bbox", "conf_text", "conf_existence",
+                                  "source_confidence")) for o in objs),
+         "有对象缺 conf_bbox / conf_text / conf_existence / source_confidence", reds)
+    need(all(abs(o["conf_bbox"] - 1.0) < 1e-9 and abs(o["conf_text"] - 1.0) < 1e-9
+             and abs(o["conf_existence"] - 1.0) < 1e-9
+             and abs(o["source_confidence"] - 1.0) < 1e-9 for o in objs),
+         "只有 UIA 一条来源时三档与聚合值都该是 1.0", reds)
+    need(all(abs(o["source_confidence"] - min(o["conf_existence"], o["conf_text"])) < 1e-9
+             for o in objs),
+         "source_confidence 与 min(conf_existence, conf_text) 对不上", reds)
+    need("conf_口径" in sc, "返回里没把 conf 的口径讲出来", reds)
+
+    # ── 端到端：给状态行混进一条**属性级** OCR 证据（框还行、字很弱、存在性中等）
+    target = by_label(objs, "当前状态")
+    if not need(len(target) == 1, "夹具里没找着状态行", reds):
+        return "(7) 属性级置信度", reds, ev
+    tkey = target[0]["uid"]
+    real = core._screen_extra_evidence
+
+    def fake_extra(uid, node, _t=tkey):
+        if uid == _t:
+            return [{"source": "ocr",
+                     "source_confidence": {"bbox": 0.90, "text": 0.30, "existence": 0.80}}]
+        return []
+
+    core._screen_extra_evidence = fake_extra
+    try:
+        _, sc2 = call(core, query=QUERY, top=500)
+        hits = by_label(sc2.get("objects") or [], "当前状态")
+        if not need(len(hits) == 1, "混证据后状态行不见了", reds):
+            return "(7) 属性级置信度", reds, ev
+        hit = hits[0]
+        others = [o for o in (sc2.get("objects") or []) if o["uid"] != tkey]
+        ev["混入OCR后"] = {k: hit.get(k) for k in ("source", "conf_bbox", "conf_text",
+                                                 "conf_existence", "source_confidence")}
+        need(hit.get("source") == "uia+ocr",
+             "混入 OCR 后 source 应是 uia+ocr，实得 %r" % hit.get("source"), reds)
+        need(abs(hit["conf_bbox"] - 0.90) < 1e-9,
+             "conf_bbox 应=0.90（UIA 的 1.00 与 OCR 的 0.90 取 min），实得 %r" % hit["conf_bbox"], reds)
+        need(abs(hit["conf_text"] - 0.30) < 1e-9,
+             "conf_text 应=0.30，实得 %r" % hit["conf_text"], reds)
+        need(abs(hit["conf_existence"] - 0.80) < 1e-9,
+             "conf_existence 应=0.80，实得 %r" % hit["conf_existence"], reds)
+        need(abs(hit["source_confidence"] - 0.30) < 1e-9,
+             "source_confidence 应=min(0.80,0.30)=0.30，实得 %r" % hit["source_confidence"], reds)
+        # ★「bbox 不被 text 拉低」的端到端版
+        need(hit["conf_bbox"] > hit["conf_text"] + 1e-9,
+             "端到端也没挡住：conf_bbox=%r 被 conf_text=%r 拖平了"
+             % (hit["conf_bbox"], hit["conf_text"]), reds)
+        need(hit["conf_bbox"] > hit["source_confidence"] + 1e-9,
+             "conf_bbox 被聚合值压平了（bbox 该单列，不进聚合）", reds)
+        need(all(abs(o["conf_bbox"] - 1.0) < 1e-9 and abs(o["conf_text"] - 1.0) < 1e-9
+                 for o in others), "没混证据的对象被连坐了（不该取它们的 min）", reds)
+    finally:
+        core._screen_extra_evidence = real
+    return "(7) 属性级置信度", reds, ev
+
+
+def check_uid_state(core, fx):
+    """(8) uid 三档：改文本⇒TEXT_CHANGED；挪结构⇒STALE；都不变⇒OK；没基线⇒STALE。"""
+    reds = []
+    ev = {}
+    core._screen_forget(0)
+    fx.tick = 0
+    fx.n_extra_btn = 0
+
+    # ── 纯函数：三档各自的口径（含「没有基线」与「uid 拆不开」）
+    st = core.screen_uid_state
+    cases = [("完全一样", "PaneControl/TextControl@tAAA", "PaneControl/TextControl@tAAA", "OK"),
+             ("只改文本", "PaneControl/TextControl@tAAA", "PaneControl/TextControl@tBBB", "TEXT_CHANGED"),
+             ("结构变了", "PaneControl/TextControl@tAAA", "PaneControl/ButtonControl@tAAA", "STALE"),
+             ("没有基线", "", "PaneControl/TextControl@tAAA", "STALE"),
+             ("uid拆不开", "这不是一个uid", "PaneControl/TextControl@tAAA", "STALE")]
+    ev["纯函数三档"] = {}
+    for name, p, c, want in cases:
+        got = st(p, c)
+        ev["纯函数三档"][name] = "%s（应 %s）" % (got, want)
+        need(got == want,
+             "screen_uid_state 的「%s」档 = %r，应为 %r" % (name, got, want), reds)
+    states = sorted(getattr(core, "SCREEN_UID_STATES", ()) or ())
+    ev["SCREEN_UID_STATES"] = states
+    need(states == ["OK", "STALE", "TEXT_CHANGED"],
+         "SCREEN_UID_STATES 应恰好是 OK / TEXT_CHANGED / STALE 三档，实得 %r" % states, reds)
+
+    # ── 没给 since 就没有 uid_state（没有基线就没有「变没变」可判）
+    _, sc1 = call(core, top=500)
+    objs1 = sc1.get("objects") or []
+    if not need(objs1, "夹具第一屏空了", reds):
+        return "(8) uid 三档", reds, ev
+    need(all("uid_state" not in o for o in objs1),
+         "没给 since 却发了 uid_state（没有基线可比）", reds)
+    v1 = sc1.get("screen_version")
+    s1 = by_label(objs1, "当前状态")
+    b1 = by_label(objs1, "选项格01")
+    if not need(len(s1) == 1 and len(b1) == 1, "夹具里没找着状态行/按钮01", reds):
+        return "(8) uid 三档", reds, ev
+    s1, b1 = s1[0], b1[0]
+
+    # ── ① 什么都不变 ⇒ 全 OK
+    _, sc2 = call(core, top=500, since=v1)
+    states2 = (sc2.get("delta") or {}).get("uid_state_统计") or {}
+    ev["不变时的uid_state_统计"] = states2
+    need(all(o.get("uid_state") == "OK" for o in (sc2.get("objects") or [])),
+         "什么都没变却不是全 OK：%r" % sorted(set(o.get("uid_state")
+                                            for o in (sc2.get("objects") or []))), reds)
+    need(int(states2.get("OK") or 0) == len(sc2.get("objects") or []),
+         "统计里 OK 的条数 %r 与返回对象数 %d 对不上" % (states2.get("OK"),
+                                                len(sc2.get("objects") or [])), reds)
+
+    # ── ② 只改文本（同对象）⇒ TEXT_CHANGED（**动作核验就期待这一档**）
+    fx.advance()
+    _, sc3 = call(core, top=500, since=sc2.get("screen_version"))
+    s3 = by_label(sc3.get("objects") or [], "当前状态")
+    if not need(len(s3) == 1, "第二次调用后状态行不见了", reds):
+        fx.tick = 0
+        return "(8) uid 三档", reds, ev
+    s3 = s3[0]
+    ev["状态行uid前后"] = [s1.get("uid"), s3.get("uid")]
+    ev["状态行uid_state"] = s3.get("uid_state")
+    need(s1.get("uid") != s3.get("uid"), "状态行换了字 uid 却没变（这条断言就是空的）", reds)
+    need(str(s1["uid"]).split("@")[0] == str(s3["uid"]).split("@")[0],
+         "这一步只该改 text_key，struct_key 不该变", reds)
+    need(s3.get("uid_state") == "TEXT_CHANGED",
+         "同对象改了字应报 TEXT_CHANGED（动作核验期待这一档），实得 %r" % s3.get("uid_state"), reds)
+    t3 = by_label(sc3.get("objects") or [], "剩余")
+    if t3:
+        ev["计时器uid_state（volatile换了字）"] = t3[0].get("uid_state")
+        need(t3[0].get("uid_state") == "OK",
+             "volatile 节点换了字（uid 不变）却不是 OK：%r" % t3[0].get("uid_state"), reds)
+    states3 = (sc3.get("delta") or {}).get("uid_state_统计") or {}
+    ev["改文本后的uid_state_统计"] = states3
+    need(int(states3.get("TEXT_CHANGED") or 0) >= 1,
+         "统计里一条 TEXT_CHANGED 都没有：%r" % states3, reds)
+
+    # ── ③ 挪结构（多插一个同角色按钮 ⇒ 兄弟编号后移）⇒ STALE
+    fx.n_extra_btn = 1
+    try:
+        _, sc4 = call(core, top=500, since=sc3.get("screen_version"))
+        b4 = by_label(sc4.get("objects") or [], "选项格01")
+        if need(len(b4) == 1, "插了按钮之后找不着「选项格01」了", reds):
+            ev["按钮uid前后"] = [b1.get("uid"), b4[0].get("uid")]
+            ev["按钮uid_state"] = b4[0].get("uid_state")
+            need(str(b1["uid"]).split("@")[0] != str(b4[0]["uid"]).split("@")[0],
+                 "插了一个同角色按钮之后 struct_key 竟没变（这条断言就是空的）", reds)
+            need(b4[0].get("uid_state") == "STALE",
+                 "struct_key 变了 ⇒ 应报 STALE（寻址拒绝），实得 %r" % b4[0].get("uid_state"), reds)
+            states4 = (sc4.get("delta") or {}).get("uid_state_统计") or {}
+            ev["挪结构后的uid_state_统计"] = states4
+            need(int(states4.get("STALE") or 0) >= 1, "统计里一条 STALE 都没有：%r" % states4, reds)
+        need("uid_state_口径" in sc4, "返回里没把 uid_state 的口径讲出来", reds)
+    finally:
+        fx.n_extra_btn = 0
+        fx.tick = 0
+    return "(8) uid 三档", reds, ev
+
+
+def check_r2_name_trust_gate(core, fx):
+    """(9) R2 的 name_trust 门槛：offset-suspect ⇒ R2 不成立 ⇒ 这一屏必须落到 VLM。"""
+    reds = []
+    ev = {}
+
+    # ── 纯函数：门槛只拦 offset-suspect（low ≠ 不许寻址）
+    hi = core.screen_channels(interactive_count=38, target_hit=True, name_trust="high")
+    lo = core.screen_channels(interactive_count=38, target_hit=True, name_trust="low")
+    bad = core.screen_channels(interactive_count=38, target_hit=True,
+                               name_trust="offset-suspect")
+    ev["name_trust=high"] = {"R2": hi["R2_uia"]["hit"], "must_vlm": hi["must_vlm"]}
+    ev["name_trust=low"] = {"R2": lo["R2_uia"]["hit"], "must_vlm": lo["must_vlm"]}
+    ev["name_trust=offset-suspect"] = {"R2": bad["R2_uia"]["hit"],
+                                        "must_vlm": bad["must_vlm"],
+                                        "why": bad.get("must_vlm_why")}
+    need(hi["R2_uia"]["hit"] is True and hi["must_vlm"] is False,
+         "name_trust=high 时 R2 应成立、must_vlm=False", reds)
+    need(lo["R2_uia"]["hit"] is True and lo["must_vlm"] is False,
+         "name_trust=low 时 R2 仍应成立（门槛只拦 offset-suspect，别把网页一刀切）", reds)
+    need(bad["R2_uia"]["hit"] is False,
+         "offset-suspect 时 R2 **不成立**（错位命中就是假通过），实得 hit=%r"
+         % bad["R2_uia"]["hit"], reds)
+    need(bad["must_vlm"] is True,
+         "R2 被门槛关掉后 must_vlm 必须为 True（这一屏得用眼睛看）", reds)
+    need(bad["R2_uia"].get("name_trust_门槛通过") is False,
+         "R2 段没有如实报「门槛是否通过」", reds)
+    need("offset-suspect" in str(bad.get("must_vlm_why") or ""),
+         "must_vlm_why 没说明是被 offset-suspect 门槛拦下的：%r" % bad.get("must_vlm_why"), reds)
+    need(core.screen_channels(interactive_count=1, target_hit=True,
+                              name_trust="offset-suspect")["R2_uia"]["hit"] is False,
+         "可交互数不足时 R2 本就不该成立", reds)
+
+    # ── 端到端：网页窗口 + 选项字母错位
+    core._screen_forget(0)
+    fx.cls = "Chrome_WidgetWin_1"
+    try:
+        fx.web_options = "normal"
+        _, scn = call(core, query=QUERY, top=500)
+        trusts = sorted(set(o.get("name_trust") for o in (scn.get("objects") or [])))
+        ev["网页+字母正序（对照组）"] = {"name_trust": trusts,
+                                 "R2": (scn.get("channels") or {}).get("R2_uia", {}).get("hit")}
+        need(trusts == ["low"],
+             "网页但字母正序时只该到 low，实得 %s" % trusts, reds)
+        need((scn.get("channels") or {}).get("R2_uia", {}).get("hit") is True,
+             "字母没乱时不该关掉 R2（别过度触发）", reds)
+
+        fx.web_options = "scramble"
+        _, scw = call(core, query=QUERY, top=500)
+        trusts = sorted(set(o.get("name_trust") for o in (scw.get("objects") or [])))
+        chw = scw.get("channels") or {}
+        ev["网页+字母错位"] = {"name_trust": trusts,
+                           "R2_uia": chw.get("R2_uia"), "must_vlm": chw.get("must_vlm"),
+                           "name_trust_依据": scw.get("name_trust_依据")}
+        need(trusts == ["offset-suspect"],
+             "网页 + 选项字母错位应报 offset-suspect，实得 %s" % trusts, reds)
+        need(chw.get("R2_uia", {}).get("hit") is False,
+             "错位页面 R2 竟还成立（那就是假通过）", reds)
+        need(chw.get("must_vlm") is True, "错位页面 must_vlm 必须是 True", reds)
+        need("错位" in str(scw.get("name_trust_依据") or ""),
+             "没把错位判据讲出来：%r" % scw.get("name_trust_依据"), reds)
+
+        # 对照组：同样的错位放在**原生**窗口 ⇒ 不报 offset-suspect（错位判定只对网页生效）
+        fx.cls = "TkTopLevel"
+        _, sct = call(core, query=QUERY, top=500)
+        trusts = sorted(set(o.get("name_trust") for o in (sct.get("objects") or [])))
+        ev["原生窗口+同样错位（对照组）"] = {
+            "name_trust": trusts,
+            "R2": (sct.get("channels") or {}).get("R2_uia", {}).get("hit")}
+        need(trusts == ["high"],
+             "原生窗口不该报 offset-suspect（字母乱序多半是排版），实得 %s" % trusts, reds)
+        need((sct.get("channels") or {}).get("R2_uia", {}).get("hit") is True,
+             "原生窗口的 R2 不该被这道门槛关掉", reds)
+    finally:
+        fx.web_options = ""
+        fx.cls = "TkTopLevel"
+    return "(9) R2 的 name_trust 门槛", reds, ev
+
+
+def check_since_version_reply(core, fx):
+    """(10) 给了 since：since_echo 原样回传 + version_match 正确 + 带回**新** screen_version。"""
+    reds = []
+    ev = {}
+    core._screen_forget(0)
+    fx.tick = 0
+    _, sc1 = call(core, top=500)
+    v1 = sc1.get("screen_version")
+    need(all(k not in sc1 for k in ("since_echo", "version_match", "screen_version_新值")),
+         "没给 since 却凭空回了版本应答三件套", reds)
+
+    # ── ① 屏没变：回传上次的版本 ⇒ 对得上；新签发的值与上次相同（这屏真没动）
+    _, sc2 = call(core, top=500, since=v1)
+    ev["①没变时"] = {"since_echo": sc2.get("since_echo"),
+                     "version_match": sc2.get("version_match"),
+                     "screen_version_新值": sc2.get("screen_version_新值")}
+    need(sc2.get("since_echo") == v1,
+         "since_echo 没原样回传上次版本：%r（应 %r）" % (sc2.get("since_echo"), v1), reds)
+    need(sc2.get("version_match") is True,
+         "回传真版本时 version_match 应为 True，实得 %r" % sc2.get("version_match"), reds)
+    need(sc2.get("screen_version_新值") == sc2.get("screen_version") == v1,
+         "屏没变时新签发的版本应与上次相同（%r），实得 %r" % (v1, sc2.get("screen_version_新值")), reds)
+
+    # ── ② 屏变了：带回**新**版本号（防「盲扫准风暴」就靠这个凭据）
+    fx.advance()
+    _, sc3 = call(core, top=500, since=v1)
+    v3 = sc3.get("screen_version")
+    ev["②变了时"] = {"since_echo": sc3.get("since_echo"),
+                     "version_match": sc3.get("version_match"),
+                     "screen_version_新值": sc3.get("screen_version_新值")}
+    need(sc3.get("since_echo") == v1, "since_echo 被改写了：%r" % sc3.get("since_echo"), reds)
+    need(sc3.get("version_match") is True,
+         "回传真版本时 version_match 应仍是 True，实得 %r" % sc3.get("version_match"), reds)
+    need(v3 != v1,
+         "内容变了 screen_version 却没变（那就没有「变没变」的凭据）", reds)
+    need(sc3.get("screen_version_新值") == v3,
+         "screen_version_新值 应等于本次签发的 screen_version=%r，实得 %r"
+         % (v3, sc3.get("screen_version_新值")), reds)
+    d3 = sc3.get("delta") or {}
+    need(d3.get("since_echo") == v1 and d3.get("version_match") is True
+         and d3.get("screen_version_新值") == v3,
+         "delta 段里的版本应答与顶层不一致：%r" % {k: d3.get(k) for k in
+                                             ("since_echo", "version_match", "screen_version_新值")}, reds)
+
+    # ── ③ 瞎编的 since：照样原样回传，但对不上 ⇒ version_match 必须 False
+    _, sc4 = call(core, top=500, since="sv1-我瞎编的版本")
+    ev["③瞎编since"] = {"since_echo": sc4.get("since_echo"),
+                      "version_match": sc4.get("version_match"),
+                      "screen_version": sc4.get("screen_version")}
+    need(sc4.get("since_echo") == "sv1-我瞎编的版本", "瞎编的 since 也要原样回传", reds)
+    need(sc4.get("version_match") is False,
+         "瞎编的 since 被当成本进程签发过的版本了（version_match 应为 False），实得 %r"
+         % sc4.get("version_match"), reds)
+    need(sc4.get("screen_version") != "sv1-我瞎编的版本",
+         "签发值竟等于调用方传进来的字符串", reds)
+
+    # ── ④ 明写「版本由服务端签发，客户端只能回传」
+    ko = str(sc4.get("版本口径") or "")
+    ev["版本口径"] = ko[:160]
+    need("服务端签发" in ko and "回传" in ko,
+         "返回里没明写「版本由服务端签发、客户端只能回传」：%r" % ko[:120], reds)
+    fx.tick = 0
+    return "(10) since 的版本应答", reds, ev
+
+
 # ======================================================================
 # --live：真开一个自己的 tkinter 窗口（用完立刻关）
 # ======================================================================
@@ -847,7 +1285,11 @@ def main():
                      ("(3) volatile 豁免", lambda: check_volatile(core, fx)),
                      ("(4) source_confidence 取 min", lambda: check_confidence_min(core, fx)),
                      ("(5) channels / name_trust / 字段", lambda: check_channels_and_trust(core, fx)),
-                     ("(6) 契约与接线", lambda: check_contract(core))):
+                     ("(6) 契约与接线", lambda: check_contract(core)),
+                     ("(7) 属性级置信度", lambda: check_conf_attrs(core, fx)),
+                     ("(8) uid 三档", lambda: check_uid_state(core, fx)),
+                     ("(9) R2 的 name_trust 门槛", lambda: check_r2_name_trust_gate(core, fx)),
+                     ("(10) since 的版本应答", lambda: check_since_version_reply(core, fx))):
         title, reds, ev = fn()
         res[title] = reds
         print("")
@@ -871,6 +1313,24 @@ def main():
             print("   %s" % line)
         if len(txt) > args.dump_lines:
             print("   ……【截断：还有 %d 行】" % (len(txt) - args.dump_lines))
+        # ★ 窗C1：再打一份**给了 since** 的返回（版本应答三件套 + 逐对象 uid_state）
+        core._screen_forget(0)
+        _, base = call(core, query=QUERY)
+        _, s2 = call(core, query=QUERY, since=base.get("screen_version"))
+        d2 = s2.get("delta") or {}
+        sample = {"screen_version": s2.get("screen_version"),
+                  "since_echo": s2.get("since_echo"),
+                  "version_match": s2.get("version_match"),
+                  "screen_version_新值": s2.get("screen_version_新值"),
+                  "版本口径": s2.get("版本口径"),
+                  "delta": {k: d2.get(k) for k in ("since_echo", "version_match",
+                                                "screen_version_新值", "uid_state_统计")},
+                  "channels_R2_uia": (s2.get("channels") or {}).get("R2_uia"),
+                  "第一个对象": (s2.get("objects") or [{}])[0]}
+        print("")
+        print("-- 给了 since 时的版本应答与 uid_state --")
+        for line in json.dumps(sample, ensure_ascii=False, indent=2).splitlines():
+            print("   %s" % line)
 
     if args.live:
         print("")
@@ -905,7 +1365,11 @@ def main():
               "(3)计时器换字 uid 不变（不爆 STALE）、状态行换字 uid 会变；"
               "(4)source_confidence 多来源取 min；"
               "(5)must_vlm=¬R1∧¬R2∧¬R3 逐格对上、Chromium 窗口 name_trust=low；"
-              "(6)契约合法且接线完整。")
+              "(6)契约合法且接线完整；"
+              "(7)置信度按 {bbox,text,existence} 分档、聚合=min(existence,text) 且 bbox 不被 text 拖低；"
+              "(8)uid 三档 OK/TEXT_CHANGED/STALE 逐档对得上；"
+              "(9)offset-suspect ⇒ R2 不成立 ⇒ 落到 VLM；"
+              "(10)给了 since 带回 since_echo/version_match/新 screen_version。")
     print("退出前 AgentCtlCtrlBorder* 窗 = %s（%s）" % count_border_windows())
     print("=" * 100)
     shutil.rmtree(tmp, ignore_errors=True)

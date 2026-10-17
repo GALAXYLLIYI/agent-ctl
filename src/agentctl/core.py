@@ -2568,12 +2568,21 @@ SCREEN_SCORE_WEIGHTS = {
     "delta": 0.10,        # 相对上次快照是新面孔
 }
 
-# ★ 修正③：每个来源自己的置信度。**没有「总 confidence」这一档** ——
-#   多来源的合成值一律由 _agg_source_confidence() 现算（取 min），不许预乘、不许写死。
+# ★ 修正③（**Z2 二次修正：拆属性级**）：每个来源的置信度**按属性分档**，不是一个数。
+#   bbox = 「点得准不准」（点哪儿）  text = 「读得准不准」（读到什么）  existence = 「在不在」
+#   三者**错误后果不同级**：bbox 错会点错地方（事故），text 错会读错内容（幻觉），
+#   existence 错会凭空多一个或少一个对象。合成一个数就会掩盖这个差别。
+# ★ 为什么 bbox **不进**聚合：对象级取 min 会让 UIA 的精确坐标被 OCR 的低分文本拖低
+#   ⇒ 一个「坐标很准、只是字没认全」的对象被说成「定位也不准」⇒ 误伤定位（Z2 的原话）。
+#   所以聚合口径 = min(existence, text)（「读得准不准」），**bbox 单列**。
+SCREEN_CONF_ATTRS = ("bbox", "text", "existence")
 SCREEN_SOURCE_CONF = {
-    "uia": 1.00,    # 无障碍树：控件自己的自述，最强
-    "cdp": 0.90,    # DOM 结构（本版未接线）
-    "ocr": 0.55,    # 像素猜出来的文本，最弱（本版未接线）
+    #               bbox   text   existence
+    "uia": {"bbox": 1.00, "text": 1.00, "existence": 1.00},  # 无障碍树：控件自己的自述，最强
+    "cdp": {"bbox": 0.90, "text": 0.90, "existence": 0.90},  # DOM 结构（本版未接线）
+    # OCR：像素只证明「那儿有块墨」，**证明不了那是个可点的控件** ⇒ existence 单独压低；
+    # 而它给的框是像素框（点下去大概率偏）⇒ bbox 也不高，但**与 text 分开记**。
+    "ocr": {"bbox": 0.55, "text": 0.55, "existence": 0.40},
 }
 
 # ★ 时间/计数类节点的识别。命中 ⇒ volatile=true ⇒ **不参与 text_key 比对**（修正①）。
@@ -2620,23 +2629,33 @@ def screen_must_vlm(r1: bool, r2: bool, r3: bool) -> bool:
     return (not r1) and (not r2) and (not r3)
 
 def screen_channels(*, interactive_count: int, target_hit: bool,
+                    name_trust: str = "high",
                     cdp_wired: bool = False, cdp_reachable: bool = False,
                     ocr_wired: bool = False, ocr_hit: bool = False,
                     ocr_bbox_usable: bool = False) -> dict:
-    """三条通道各自的命中情况 + must_vlm 判定（修正⑤）。
+    """三条通道各自的命中情况 + must_vlm 判定（修正⑤ + **Z2 二次修正：R2 加门槛**）。
 
     ★ 本单**只判定、不接线**：R1(CDP) 与 R3(OCR) 的 wired 恒为 false，
       于是 reachable/hit 也恒为 false —— 没接线的通道**不许报命中**，
       否则 agent 会以为「DOM 已经查过了，没有」而漏掉真正存在的东西。
+
+    ★ **R2 = 可交互数 ≥ 阈值 ∧ 目标命中 ∧ name_trust ≠ "offset-suspect"**。
+      最后那半截是 Z2 加的门槛：网页选项「疑似错位」（控件自称的字母与它在屏幕上的位置
+      对不上；超星选择题就是实例）时，R2 会**错位命中**从而假通过 ——
+      而这种页面本来就该落到 R3/VLM 去用眼睛看，别让 UIA 的自述一手遮天。
     """
+    trust = str(name_trust or "high")
+    trust_ok = (trust != "offset-suspect")
     r1 = bool(cdp_wired and cdp_reachable and target_hit)
-    r2 = bool(int(interactive_count) >= SCREEN_R2_MIN_INTERACTIVE and target_hit)
+    r2 = bool(int(interactive_count) >= SCREEN_R2_MIN_INTERACTIVE
+              and target_hit and trust_ok)
     r3 = bool(ocr_wired and ocr_hit and ocr_bbox_usable)
     why = ["R1(CDP+DOM)=%s%s" % ("命中" if r1 else "不成立",
                                   "" if cdp_wired else "（本版未接线）"),
-          "R2(UIA)=%s（可交互 %d，阈值 %d，目标%s）"
+          "R2(UIA)=%s（可交互 %d，阈值 %d，目标%s，name_trust=%s%s）"
           % ("命中" if r2 else "不成立", int(interactive_count),
-             SCREEN_R2_MIN_INTERACTIVE, "命中" if target_hit else "未命中"),
+             SCREEN_R2_MIN_INTERACTIVE, "命中" if target_hit else "未命中",
+             trust, "" if trust_ok else "⇒offset-suspect 门槛不通过"),
           "R3(OCR+bbox)=%s%s" % ("命中" if r3 else "不成立",
                                   "" if ocr_wired else "（本版未接线）")]
     return {
@@ -2646,7 +2665,10 @@ def screen_channels(*, interactive_count: int, target_hit: bool,
                     "hit": r1},
         "R2_uia": {"wired": True, "interactive_count": int(interactive_count),
                     "threshold": SCREEN_R2_MIN_INTERACTIVE,
-                    "target_hit": bool(target_hit), "hit": r2},
+                    "target_hit": bool(target_hit),
+                    "name_trust": trust,
+                    "name_trust_门槛通过": bool(trust_ok),
+                    "hit": r2},
         "R3_ocr": {"wired": bool(ocr_wired), "hit": r3,
                     "bbox_usable": bool(ocr_bbox_usable and ocr_wired)},
         "must_vlm": screen_must_vlm(r1, r2, r3),
@@ -2655,31 +2677,64 @@ def screen_channels(*, interactive_count: int, target_hit: bool,
     }
 
 
-def _agg_source_confidence(items) -> tuple:
-    """修正③：多来源置信度**取 min**。返回 (合成值, 来源名列表)。
+def _screen_conf_attrs(value) -> dict:
+    """把一条证据的置信度**归一成属性级三档** {bbox,text,existence}。
 
-    ★ 为什么是 min 不是 mean/max：
-      min = 「只要有一条弱证据，就按弱证据信」—— 对「我看见了，所以可以点」这类断言，
-             这是唯一不会高估的合成法。
-      mean 会把「UIA 说它在、OCR 没看见」平均成一个中间值，把「两条证据打架」抹平。
-      max 则是直接撒谎：一路错认就能把置信度顶满。
-    空证据表返回 (0.0, []) —— **没有来源就说没有**，不报 1.0。
+    兼容三种写法：完整 dict / 部分 dict（缺的按 0.0 补，不许凭空乐观）/ 裸标量（三档同值）。
+    ★ 旧写法（对象级一个数）喂进来不炸，但它天然**丢掉了属性级分辨率** ——
+      想验「bbox 不被 text 拖低」，就必须给出三档分开的值。
     """
-    vals, names = [], []
+    if isinstance(value, dict):
+        out = {}
+        for k in SCREEN_CONF_ATTRS:
+            try:
+                out[k] = float(value.get(k, 0.0))
+            except (TypeError, ValueError):
+                out[k] = 0.0
+        return out
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        v = 0.0
+    return {k: v for k in SCREEN_CONF_ATTRS}
+
+
+def _agg_source_conf_attrs(items) -> dict:
+    """**属性级**聚合：每个属性各自取 min；再算聚合口径 agg = min(existence, text)。
+
+    返回 {bbox, text, existence, agg, sources}。
+    ★ 每个属性取 min 而不是 mean/max：min = 「只要有一条弱证据，就按弱证据信」——
+      对「我看见了，所以可以点」这类断言，这是唯一不会高估的合成法。
+      mean 会把「UIA 说它在、OCR 没看见」平均成一个中间值，把「两条证据打架」抹平；
+      max 则是直接撒谎：一路错认就能把置信度顶满。
+    ★ **bbox 不进 agg**：见 SCREEN_SOURCE_CONF 上方的理由（会误伤定位）。
+    空证据表全报 0.0 —— **没有来源就说没有**，不报 1.0。
+    """
+    vals = {k: [] for k in SCREEN_CONF_ATTRS}
+    names = []
     for it in items or []:
         if not isinstance(it, dict):
             continue
         v = it.get("source_confidence")
         if v is None:
             continue
-        try:
-            vals.append(float(v))
-        except (TypeError, ValueError):
-            continue
+        a = _screen_conf_attrs(v)
+        for k in SCREEN_CONF_ATTRS:
+            vals[k].append(a[k])
         names.append(str(it.get("source") or "?"))
-    if not vals:
-        return 0.0, []
-    return min(vals), names
+    if not names:
+        return {"bbox": 0.0, "text": 0.0, "existence": 0.0,
+                "agg": 0.0, "sources": []}
+    out = {k: min(vals[k]) for k in SCREEN_CONF_ATTRS}
+    out["agg"] = min(out["existence"], out["text"])   # 「读得准不准」
+    out["sources"] = names
+    return out
+
+
+def _agg_source_confidence(items) -> tuple:
+    """旧口径入口：返回 (min(existence, text), 来源名列表)。**保留是为了不打断既有调用方。**"""
+    a = _agg_source_conf_attrs(items)
+    return a["agg"], list(a["sources"])
 
 
 def _screen_extra_evidence(uid: str, node: dict) -> list:
@@ -2692,19 +2747,24 @@ def _screen_extra_evidence(uid: str, node: dict) -> list:
 
 
 def _screen_evidence(uid: str, node: dict) -> list:
-    """一条对象的全部来源证据 = UIA 自述 + 扩展口给的（CDP / OCR …）。"""
-    ev = [{"source": "uia", "source_confidence": SCREEN_SOURCE_CONF["uia"]}]
+    """一条对象的全部来源证据 = UIA 自述 + 扩展口给的（CDP / OCR …）。
+
+    ★ 每条证据的 source_confidence 都是**属性级三档** {bbox,text,existence}。
+      扩展口写标量也行（会被摊成三档同值），但那样就没有属性级分辨率了。
+    """
+    ev = [{"source": "uia", "source_confidence": dict(SCREEN_SOURCE_CONF["uia"])}]
     try:
         extra = _screen_extra_evidence(uid, node)
     except Exception:
         extra = []
     for e in (extra or []):
-        if isinstance(e, dict) and e.get("source"):
-            try:
-                conf = float(e.get("source_confidence", 0.0))
-            except (TypeError, ValueError):
-                continue
-            ev.append({"source": str(e.get("source")), "source_confidence": conf})
+        if not isinstance(e, dict) or not e.get("source"):
+            continue
+        raw = e.get("source_confidence")
+        if raw is None:
+            continue
+        ev.append({"source": str(e.get("source")),
+                   "source_confidence": _screen_conf_attrs(raw)})
     return ev
 
 
@@ -2741,6 +2801,112 @@ def _screen_text_key(label: str, volatile: bool) -> str:
         return "-"                  # 没字：无可比对，靠 struct_key 定位
     import hashlib as _hl
     return "t" + _hl.sha1(norm.encode("utf-8")).hexdigest()[:10]
+
+# ── ② uid 三档（OK / TEXT_CHANGED / STALE）───────────────────────────────
+#   病根：只分「变了 / 没变」一档是错的 —— struct_key 变（可能压根不是同一个对象）
+#   与 text_key 变（同一个对象、内容变了）是**两种方向相反**的事：
+#   前者必须**拒绝寻址**（拿旧坐标去点新控件＝事故），后者恰恰是**动作成功的证据**。
+#   混成一档 STALE ⇒ 点完按钮后「它变了」也被判成过期 ⇒ agent 只好反复重扫（盲扫准风暴）。
+SCREEN_UID_STATES = ("OK", "TEXT_CHANGED", "STALE")
+
+
+def _screen_split_uid(uid) -> tuple:
+    """uid 拆两段：(struct_key, text_key)。拆不开（没有 @ 或某段为空）⇒ (None, None)。"""
+    s = str(uid or "")
+    if s.count("@") != 1:
+        return (None, None)
+    sk, tk = s.split("@", 1)
+    if not sk or not tk:
+        return (None, None)
+    return sk, tk
+
+
+def screen_uid_state(prev_uid, cur_uid) -> str:
+    """uid 三档判定。**写成函数是为了让判据能拿它打红**（写在注释里谁也验不了）。
+
+    - struct_key 变 ⇒ **STALE**：可能压根不是同一个对象，寻址**拒绝**。
+    - struct_key 同、text_key 变 ⇒ **TEXT_CHANGED**：同一个对象、内容变了 ——
+      动作核验**期待**这一档（「点完它变成 X 了」正是成功的证据）。
+    - 两者都同 ⇒ **OK**。
+    - 没有可比基线（prev 空 / uid 拆不开）⇒ **STALE**：认不出身份就别拿它当身份用。
+    """
+    ps, pt = _screen_split_uid(prev_uid)
+    cs, ct = _screen_split_uid(cur_uid)
+    if not (ps and pt and cs and ct):
+        return "STALE"
+    if ps != cs:
+        return "STALE"
+    if pt != ct:
+        return "TEXT_CHANGED"
+    return "OK"
+
+
+def _screen_uid_state_against(prev_rec, cur_uid, cur_meta=None) -> str:
+    """拿上一屏快照判当前 uid 落在哪一档。prev_rec 可以是快照记录，也可以是 uid 集合。
+
+    ★ **配对顺序是关键**：先按 label（控件自述的内容）找前身，再按 struct_key 找。
+      - 同 label、路径变了 ⇒ 它是**同一个对象挪了位置** ⇒ STALE（寻址必须拒绝）。
+        ★ 只按路径配对会判错：在按钮队列前面插入一个之后，「选项格02」正好落在
+          「选项格01」原来的路径上，只看路径会把它说成「同对象改了字」（TEXT_CHANGED），
+          而它其实是另一个对象占了那个位置。判据 (8)③ 就是这么把它逮住的。
+      - 同路径、label 不同、**矩形还重叠** ⇒ 同位置上的同一个东西换了内容 ⇒ TEXT_CHANGED。
+      - 都没有 ⇒ STALE（这是个新来的对象）。
+    """
+    if isinstance(prev_rec, dict):
+        prev_uids = list(prev_rec.get("uids_all") or ())
+        meta = dict(prev_rec.get("meta") or {})
+    else:
+        prev_uids, meta = list(prev_rec or ()), {}
+    if not prev_uids:
+        return "STALE"
+    if cur_uid in set(prev_uids):
+        return "OK"                                  # 同一个 uid ⇒ struct/text 都同
+    cs, _ct = _screen_split_uid(cur_uid)
+    if not cs:
+        return "STALE"
+    cur_meta = cur_meta or {}
+    cl = str(cur_meta.get("label") or "")
+    same_label = sorted(u for u in prev_uids
+                        if cl and str((meta.get(u) or {}).get("label") or "") == cl)
+    if same_label:
+        # 内容一模一样却出现在别的路径 ⇒ 同一个对象挪了位置（uid 变是路径变，不是内容变）
+        return "OK" if cs == _screen_split_uid(same_label[0])[0] else "STALE"
+    best, best_iou = None, -1.0
+    for u in sorted(u for u in prev_uids if _screen_split_uid(u)[0] == cs):
+        iou = _screen_rect_iou(cur_meta.get("rect"), (meta.get(u) or {}).get("rect"))
+        if iou > best_iou:
+            best, best_iou = u, iou
+    if best is not None and best_iou >= SCREEN_SAME_SLOT_IOU:
+        return screen_uid_state(best, cur_uid)        # 同位置同内容线 ⇒ TEXT_CHANGED
+    return "STALE"
+
+
+# 「还是原来那个东西」的最低重叠度（IoU）。同位置 + 内容变 + 还压在同一块地方，
+SCREEN_SAME_SLOT_IOU = 0.5          #   才认「同对象换了内容」；只占同一个路径而地方不同 ⇒ 多半是换了新对象 ⇒ STALE。
+
+
+def _screen_rect_iou(a, b) -> float:
+    """两个 [l,t,r,b] 的交并比。缺坐标/零面积一律 0.0（判不出来就当「不像」）。"""
+    def _norm(x):
+        try:
+            v = [float(i) for i in list(x or [])[:4]]
+        except (TypeError, ValueError):
+            return None
+        return v if len(v) == 4 else None
+
+    ra, rb = _norm(a), _norm(b)
+    if not ra or not rb:
+        return 0.0
+    iw = max(0.0, min(ra[2], rb[2]) - max(ra[0], rb[0]))
+    ih = max(0.0, min(ra[3], rb[3]) - max(ra[1], rb[1]))
+    inter = iw * ih
+    if inter <= 0.0:
+        return 0.0
+    aa = max(0.0, ra[2] - ra[0]) * max(0.0, ra[3] - ra[1])
+    bb = max(0.0, rb[2] - rb[0]) * max(0.0, rb[3] - rb[1])
+    union = aa + bb - inter
+    return (inter / union) if union > 0 else 0.0
+
 
 def _screen_struct_keys(nodes: list) -> list:
     """按 walk 给的 depth 还原祖先链，产出每个节点的**结构路径** struct_key。
@@ -2841,13 +3007,19 @@ def _screen_snap_get(hwnd: int):
     return rec
 
 
-def _screen_snap_put(hwnd: int, version: str, uids, labels):
+def _screen_snap_put(hwnd: int, version: str, uids, meta, uids_all=None):
     now = time.time()
     if len(_SCREEN_SEEN) >= SCREEN_SNAP_MAX_HWNDS:
         for k in sorted(_SCREEN_SEEN, key=lambda x: _SCREEN_SEEN[x].get("t") or 0)[:8]:
             _SCREEN_SEEN.pop(k, None)
     _SCREEN_SEEN[int(hwnd)] = {"t": now, "screen_version": version,
-                               "uids": set(uids), "labels": dict(labels)}
+                               "uids": set(uids),
+                               # ★ uid_state 的基线用**全量**候选 uid（含视口外）：
+                               #   一个对象滑出视口再滑回来，不该被判成「不是上次那个」。
+                               #   delta 仍只用视口内的 uids —— 屏外的东西本来就不算「变了」。
+                               "uids_all": set(uids_all if uids_all is not None else uids),
+                               # ★ 每个 uid 的自述（label/role/rect）：uid_state 配对要用
+                               "meta": dict(meta or {})}
 
 
 def _screen_forget(hwnd: int = 0):
@@ -2903,22 +3075,77 @@ def _screen_window_info(hwnd: int) -> dict:
     return out
 
 
-def _screen_name_trust(win: dict) -> str:
-    """修正④：网页/Chromium 类窗口 → name_trust=**low**。
+# 修正④的第三档（**Z2 二次修正**）：网页选项「疑似错位」。
+#   判据是**可观察的**：把像选项的节点按屏幕 y 排序，看字母序列是不是 A,B,C,… 的规范序；
+#   乱序 / 重复 / 缺号就是**疑似**。它只负责把这一屏**踢去 VLM**（宁可多看一眼），
+#   **不负责断言「一定错位」**。★ 只在网页窗口上生效 —— 原生窗口字母乱序多半是排版。
+SCREEN_OPTION_LETTER_RE = re.compile(r"^[\s（(\[【]*([A-Za-z])\s*[.、)）:：．。]")
+SCREEN_OPTION_ROLES = frozenset({"RadioButtonControl", "CheckBoxControl",
+                                 "ListItemControl", "ComboBoxControl"})
+SCREEN_OFFSET_MIN_OPTIONS = 3
 
-    实例：超星的选择题里，控件报出来的字母与屏幕上真正显示的选项**错位**。
-    网页的 name 来自 DOM/ARIA 映射，不是像素事实 ⇒ 不能当权威文本用。
-    原生 Win32 与多数桌面应用才是 high。**判不出来按 low**（保守）。
-    """
+
+def _screen_is_web_window(win: dict) -> bool:
     cls = str((win or {}).get("cls") or "").lower()
     if cls and any(k in cls for k in SCREEN_WEB_CLS_HINTS):
-        return "low"
+        return True
     proc = _screen_proc_name((win or {}).get("pid") or 0).lower()
-    if proc and any(k in proc for k in SCREEN_WEB_PROC_HINTS):
-        return "low"
-    if not cls and not proc:
-        return "low"
-    return "high"
+    return bool(proc and any(k in proc for k in SCREEN_WEB_PROC_HINTS))
+
+
+def _screen_offset_suspect(cands) -> dict:
+    """网页选项「疑似错位」取证。返回 {suspect, 字母序列, 规范序, 样本, 依据}。"""
+    rows = []
+    for o in (cands or []):
+        lab = str(o.get("label") or "").strip()
+        m = SCREEN_OPTION_LETTER_RE.match(lab) if lab else None
+        if not m:
+            continue
+        if (str(o.get("role") or "") not in SCREEN_OPTION_ROLES
+                and not o.get("interactive")):
+            continue
+        rect = list(o.get("rect") or [0, 0, 0, 0])
+        rows.append((int(rect[1]), m.group(1).upper(), lab))
+    if len(rows) < SCREEN_OFFSET_MIN_OPTIONS:
+        return {"suspect": False,
+                "字母序列": [r[1] for r in rows],
+                "依据": "像选项的节点只有 %d 个（< %d），够不上错位判据"
+                        % (len(rows), SCREEN_OFFSET_MIN_OPTIONS)}
+    rows.sort(key=lambda t: (t[0], t[1]))
+    letters = [r[1] for r in rows]
+    canon = [chr(ord("A") + i) for i in range(len(letters))]
+    if letters == canon:
+        return {"suspect": False, "字母序列": letters, "规范序": canon,
+                "样本": [r[2][:24] for r in rows[:8]],
+                "依据": "选项字母按屏幕顺序是 %s，与规范序一致" % "".join(letters)}
+    return {"suspect": True, "字母序列": letters, "规范序": canon,
+            "样本": [r[2][:24] for r in rows[:8]],
+            "依据": "选项字母按屏幕顺序是 %s，规范序应为 %s（疑似 label 与位置错位）"
+                    % ("".join(letters), "".join(canon))}
+
+
+def _screen_name_trust_detail(win: dict, cands=None) -> tuple:
+    """返回 (name_trust, 依据)。三档：**offset-suspect** / low / high。
+
+    ★ 修正④的老口径一字未改（网页 low、原生 high、判不出来 low），
+      **Z2 加的是第三档**：网页 + 选项疑似错位 ⇒ offset-suspect。
+      它比 low 更重 —— low 只是「别当权威文本」，offset-suspect 是「**连寻址都不许信**」：
+      于是 R2 门槛不通过，这一屏**必须**落到 R3/VLM（错位页面用 UIA 自述会假通过）。
+    """
+    win = win or {}
+    if not str(win.get("cls") or "") and not _screen_proc_name(win.get("pid") or 0):
+        return "low", "窗口身份读不到（cls/pid 都空）：判不出来按 low（保守）"
+    if not _screen_is_web_window(win):
+        return "high", "原生窗口（非网页/Chromium 类）：控件 name 可当权威文本用"
+    off = _screen_offset_suspect(cands)
+    if off.get("suspect"):
+        return "offset-suspect", off.get("依据") or "网页选项疑似错位"
+    return "low", "网页/Chromium 类窗口：name 来自 DOM/ARIA 映射，不是像素事实"
+
+
+def _screen_name_trust(win: dict, cands=None) -> str:
+    """name_trust 三档（只要判定那一半；依据那一半走 _screen_name_trust_detail）。"""
+    return _screen_name_trust_detail(win, cands)[0]
 
 
 def _screen_max_nodes(args: dict) -> int:
@@ -2939,7 +3166,8 @@ def _screen_build(hwnd: int, args: dict) -> dict:
     since = args.get("since")
 
     win = _screen_window_info(hwnd)
-    trust = _screen_name_trust(win)
+    # ★ name_trust 改成**建完候选之后再算**：offset-suspect 那档得看着一屏的选项才判得出来
+    #   （见 _screen_offset_suspect）。
 
     stats = {}
     max_nodes = _screen_max_nodes(args)
@@ -2991,9 +3219,9 @@ def _screen_build(hwnd: int, args: dict) -> dict:
         used_ids.add(oid)
         area = max(0, rect[2] - rect[0]) * max(0, rect[3] - rect[1])
         area_ratio = (float(area) / float(base_area)) if base_area else 0.0
-        conf, src_names = _agg_source_confidence(_screen_evidence(uid, n))   # ← 修正③
+        cf = _agg_source_conf_attrs(_screen_evidence(uid, n))    # ← 修正③（属性级）
         is_new = bool(prev_uids) and uid not in prev_uids
-        cands.append({
+        obj = {
             "id": oid,
             "uid": uid,
             "label": label[:120],
@@ -3004,15 +3232,29 @@ def _screen_build(hwnd: int, args: dict) -> dict:
             # ★ 不可交互的节点**不承诺任何动作**：它是题干/备注这类文字，
             #   报 actions=["click"] 等于凭空许一个承诺（实测踩过：模型照着去点文字）。
             "actions": list(SCREEN_ACTIONS.get(role, ["click"])) if interactive else [],
-            "source": "+".join(src_names) if src_names else "none",
-            "source_confidence": conf,                     # ← 修正③：没有裸 confidence
-            "name_trust": trust,                            # ← 修正④
+            "source": "+".join(cf["sources"]) if cf["sources"] else "none",
+            # ★ 修正③（属性级）：聚合口径 = min(existence, text)（「读得准不准」），
+            #   **bbox 单列** —— UIA 的精确坐标不会被 OCR 的低分文本拖低。
+            "source_confidence": cf["agg"],
+            "conf_bbox": cf["bbox"],
+            "conf_text": cf["text"],
+            "conf_existence": cf["existence"],
             "volatile": bool(volatile),
             "score": _screen_score(in_view=in_view is not False,
                                    interactive=interactive,
                                    query_hit=_screen_query_hit(query, label),
                                    area_ratio=area_ratio, delta=is_new),
-        })
+        }
+        # ★ ② uid 三档：**只有给了 since 才产出** —— 没有可比基线就没有「变没变」可判。
+        if since:
+            obj["uid_state"] = _screen_uid_state_against(
+                prev, uid, {"label": label, "role": role, "rect": rect})
+        cands.append(obj)
+
+    # ★ 修正④第三档要**看着一屏的选项**才判得出来 ⇒ name_trust 在这里算，然后逐个盖上。
+    trust, trust_ev = _screen_name_trust_detail(win, cands)
+    for o in cands:
+        o["name_trust"] = trust
 
     total_cands = n_all_cands
     keep, n_topn_dropped = _screen_select(cands, top, guarantee=True)     # ← 必进保证
@@ -3036,7 +3278,9 @@ def _screen_build(hwnd: int, args: dict) -> dict:
     # 新鲜度只在**视口内**的对象之间比：屏外的东西本来就不算「变了」。
     in_view_now = set(o["uid"] for o in cands if o["in_view"])
     _screen_snap_put(hwnd, screen_version, in_view_now,
-                     {o["uid"]: o["label"] for o in cands})
+                     {o["uid"]: {"label": o["label"], "role": o["role"],
+                                  "rect": list(o["rect"])} for o in cands},
+                     uids_all=set(o["uid"] for o in cands))
 
     texts = [{"id": "t%d" % k, "text": o["label"], "rect": o["rect"]}
              for k, o in enumerate(objects) if o["label"]]
@@ -3044,7 +3288,8 @@ def _screen_build(hwnd: int, args: dict) -> dict:
     n_interactive = sum(1 for o in cands if o["interactive"] and o["in_view"])
     hit_labels = " ".join(o["label"] for o in cands if o["in_view"])
     channels = screen_channels(interactive_count=n_interactive,
-                               target_hit=bool(_screen_query_hit(query, hit_labels)))
+                               target_hit=bool(_screen_query_hit(query, hit_labels)),
+                               name_trust=trust)      # ← ③ R2 的 name_trust 门槛
 
     out = {
         "screen_version": screen_version,                 # ← 修正②
@@ -3073,19 +3318,34 @@ def _screen_build(hwnd: int, args: dict) -> dict:
         },
         "打分口径": dict(SCREEN_SCORE_WEIGHTS),
         "必进保证": "interactive 且看得见的节点永不裁掉；因此 returned 可以超过 top。",
-        "name_trust_口径": "low = 网页/Chromium 类窗口，控件 name 不可信（判不出来按 low）",
+        "conf_口径": "source_confidence = min(conf_existence, conf_text)（「读得准不准」）；"
+                     "conf_bbox 单列（「点得准不准」），**不被 conf_text 拖低**",
+        "name_trust_口径": "high = 原生窗口；low = 网页/Chromium（name 来自 DOM/ARIA 映射，"
+                           "判不出来也按 low）；offset-suspect = 网页且选项字母疑似与位置错位 "
+                           "⇒ R2 门槛不通过、这一屏必须落到 VLM",
+        "name_trust_依据": trust_ev,
         "uid_口径": "uid = struct_key@text_key；volatile 节点的 text_key 恒为 ~（不参与比对）",
+        "uid_state_口径": "uid_state ∈ OK / TEXT_CHANGED / STALE（**只有给了 since 才有**）："
+                          "struct_key 变 ⇒ STALE（可能不是同一对象，寻址拒绝）；"
+                          "struct_key 同而 text_key 变 ⇒ TEXT_CHANGED（同对象内容变，"
+                          "动作核验期待这一档）；两者都同 ⇒ OK。★ 配对顺序：先按 label "
+                          "找前身（内容一样却换了路径 ⇒ 挪了位置 ⇒ STALE），再按 "
+                          "struct_key 找同位置的且要矩形重叠（同位置同内容线才算换了内容）。",
         "actions_口径": "按角色推；interactive=false 的节点 actions 为空（不承诺它能点）",
     }
 
     # since / watch：**只用于对照**。回显 + 差分，绝不回写进 screen_version。
+    prev_sv = str((prev or {}).get("screen_version") or "")
     if since or bool(args.get("watch")):
         new = sorted(in_view_now - set(prev_uids)) if prev else []
         gone = sorted(set(prev_uids) - in_view_now) if prev else []
         out["delta"] = {
+            # ★ ④ 版本应答三件套：原样回传 / 对不对得上 / **本次新签发的**。
+            "since_echo": str(since) if since else "",
+            "version_match": bool(since) and bool(prev_sv) and str(since) == prev_sv,
+            "screen_version_新值": screen_version,
             "since_回显": str(since) if since else "",
-            "since_是本进程签发的": bool(since) and str(since) == str(
-                (prev or {}).get("screen_version") or "__never__"),
+            "since_是本进程签发的": bool(since) and str(since) == prev_sv,
             "有基线": bool(prev),
             "稳定": bool(prev and prev.get("screen_version") == screen_version),
             "新增": new[:SCREEN_DELTA_LIST_CAP], "新增数": len(new),
@@ -3093,6 +3353,22 @@ def _screen_build(hwnd: int, args: dict) -> dict:
             "口径": "基线 = 本进程对该窗口的上一屏快照（%d 秒内）；换进程重新计基线"
                     % int(SCREEN_SNAP_TTL_SEC),
         }
+    if since:
+        # ★ ④ 顶层也放一份（同一个值，不另算）：agent 不用钻进 delta 才看得到版本应答。
+        out["since_echo"] = out["delta"]["since_echo"]
+        out["version_match"] = out["delta"]["version_match"]
+        out["screen_version_新值"] = screen_version
+        out["版本口径"] = ("screen_version 由**服务端签发**，客户端只能把上次见到的值"
+                      "**原样回传**到 since（仅用于对照），**永远不能指定**；本次新签发的值见 "
+                      "screen_version / screen_version_新值。version_match=false 说明你回传的 "
+                      "since 本进程没见过（换过进程或值被改过）—— 那就当没有基线，"
+                      "别拿旧 uid 盲扫。")
+        st = {"OK": 0, "TEXT_CHANGED": 0, "STALE": 0}
+        for o in objects:
+            k = str(o.get("uid_state") or "STALE")
+            st[k] = st.get(k, 0) + 1
+        out["delta"]["uid_state_统计"] = st
+        out["delta"]["uid_state_统计_口径"] = "只数本次**返回**的 objects（被 top-N 裁掉的没数进去）"
     return out
 
 
