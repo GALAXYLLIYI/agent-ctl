@@ -20,6 +20,7 @@ T14 阶段 2。设计要点：
     python -X utf8 gen_legacy.py --out <目录> --verify <现有 legacy_tools 目录>
     python -X utf8 gen_legacy.py --out <目录> --dry-run
     python -X utf8 gen_legacy.py --out legacy_tools        # 刷新仓内产物（带防误改闸）
+    python -X utf8 gen_legacy.py --out legacy_tools --chk-a  # 只对账（产物 vs A₀、真源 vs T₀），不生成
 
 ★ D1（2026-10-12，按 G3 追加节）：覆盖前**双基线**防误改 —— 详见「防误改」一节注释。
 """
@@ -452,6 +453,152 @@ def dir_entries(ledger, out_dir):
     return (ledger or {}).get("dirs", {}).get(ledger_key(out_dir), {}).get("files", {})
 
 
+# ── CHK-A（窗U · 2026-10-16）：产物台账对账 ────────────────────────────────
+# ★ 为什么要有这第三道（ZCode 点名的台账盲区）：双基线台账**只在生成时**更新，D1 的
+#   guard_dir 也**只在有人跑生成时**才判别。⇒ 平时没有任何人在拿「现产物 vs A₀」对账，
+#   产物被手改就永远没人报；等下一次生成才炸，那时手改内容已经被备份/覆盖过去了。
+#   CHK-A 把这条对账装成**两处必经门禁**：本文件的生成前 + 生成后，
+#   以及 tests\run_all.py 挂的 tests\_legacy台账对账.py。
+#   ★ 两处共用**这一份实现**（tests 侧 import 本模块）—— 「判据存在 ≠ 判据在跑」
+#     正是本单要治的病；复制第二份实现等于自己给自己开同一个洞。
+#
+# ★ 判据两条腿，缺一不可：
+#   ① 产物 == A₀：现产物的规范化 md5 == 台账里「上次写盘时」的 md5
+#   ② 真源 == T₀：现真源的规范化 md5 == 台账里「上次生成时真源」的 md5
+# ★ **不是** T₀ == A₀：被 RULES 净化的文件（cdp / coord / option_locator / perceive /
+#   selftest）两者**合法地不等**（产物里写死的本机路径已换成环境变量），拿它们互相比
+#   会把一个正常的仓判红。实测 35 个登记文件里 5 个 A₀≠T₀、30 个相等。
+# ★ 规范化口径与 D1 逐字一致：去 BOM、CRLF/CR→LF（_norm）—— 两处口径不同 = 改个换行
+#   就能骗过其中一处，等于没有闸。
+
+def _ledger_src_dir(ent):
+    """台账条目里记的真源目录（相对仓库根）。取不到/不可解析 ⇒ None。"""
+    s = (ent or {}).get("src")
+    if not s:
+        return None
+    return s if os.path.isabs(s) else os.path.join(ROOT, *str(s).split("/"))
+
+
+def chk_a(out_dir, ledger, src_dir=None, tag=""):
+    """CHK-A 的**事实收集器**：逐文件对账，一个字节都不写、不改权限。
+
+    只收集事实、不下判决 —— 「真源不一致」在生成前是合法的（真源更新正是来刷它的理由），
+    在审计口径下是红的（产物已经过期）。这个差别由 report_chk_a(hard_src=...) 决定。
+
+    返回 dict：
+      baseline         该产物目录在台账里有没有基线（False ⇒ 边界①：首次生成，无可保护基线）
+      n                台账里登记的文件数
+      prod_red         [(file, A0, 实测, why)]：产物被手改 / 台账有登记但仓里缺件 / 读不出来
+      no_baseline      [file]：台账里没有该文件的 A₀
+      src_red          [(file, T0, 实测, why)]：真源与 T₀ 不一致 / 真源缺件 / 读不出来
+      src_unreachable  str｜None：真源**不可达的原因**（非 None ⇒ T₀ 那条腿没验，不是绿）
+    """
+    key = ledger_key(out_dir)
+    ent = (ledger or {}).get("dirs", {}).get(key, {}) or {}
+    ents = ent.get("files", {}) or {}
+    v = {"tag": tag, "product_dir": os.path.abspath(out_dir),
+         "src_key": ent.get("src"), "updated": ent.get("updated"),
+         "baseline": bool(ents), "n": len(ents),
+         "prod_red": [], "no_baseline": [], "src_red": [], "src_unreachable": None}
+    if src_dir is None:
+        src_dir = _ledger_src_dir(ent)
+    v["src_dir"] = src_dir
+
+    # ── 腿①：产物 vs A₀ ────────────────────────────────────────────────
+    for name, e in sorted(ents.items()):
+        a0 = (e or {}).get("A0")
+        if not a0:
+            v["no_baseline"].append(name)
+            continue
+        p = os.path.join(out_dir, name)
+        if not os.path.isfile(p):
+            v["prod_red"].append((name, a0, None, "产物缺件（台账有登记、仓里没有）"))
+            continue
+        try:
+            now = md5n(open(p, "rb").read())
+        except OSError as e:
+            v["prod_red"].append((name, a0, None, "产物读不出来：%s" % e))
+            continue
+        if now != a0:
+            v["prod_red"].append((name, a0, now, "产物被手改"))
+
+    # ── 腿②：真源 vs T₀ ────────────────────────────────────────────────
+    if not src_dir:
+        v["src_unreachable"] = "台账里没记真源目录（src 字段缺失）"
+    elif not os.path.isdir(src_dir):
+        v["src_unreachable"] = "真源目录不存在：%s" % src_dir
+    else:
+        for name, e in sorted(ents.items()):
+            t0 = (e or {}).get("T0")
+            if not t0:
+                continue              # 台账没记 T₀（老台账）⇒ 这一项跳过，不假装验过
+            sp = os.path.join(src_dir, name)
+            if not os.path.isfile(sp):
+                v["src_red"].append((name, t0, None, "真源缺件（台账有登记、真源里没有）"))
+                continue
+            try:
+                now = md5n(open(sp, "rb").read())
+            except OSError as e:
+                v["src_red"].append((name, t0, None, "真源读不出来：%s" % e))
+                continue
+            if now != t0:
+                v["src_red"].append((name, t0, now, "真源自上次生成后被改过（产物已过期）"))
+    return v
+
+
+def report_chk_a(v, hard_src=False):
+    """打印 CHK-A 的逐文件对账。返回 True = 有红。
+
+    hard_src=False（生成前口径）：真源不一致**不算红** —— 「真源已更新、产物待刷」
+      恰恰是跑这次生成的合法理由（D1 判别表里明写「不误伤」），标成【待刷】。
+    hard_src=True（审计/验收口径，也是生成后的口径）：两条腿都算红。
+    ★ 真源不可达时**一律不标绿**：单独立一条【未验】，明说「这条腿没跑」。
+      （必要条件 4c：环境错误不许读成绿。）
+    """
+    print()
+    print("== CHK-A 产物台账对账 · %s · %s =="
+          % (v["tag"] or "对账", time.strftime("%Y-%m-%d %H:%M:%S")))
+    print("产物目录：%s" % v["product_dir"])
+    print("真源目录：%s" % (v["src_dir"] or "（台账未记）"))
+    print("台账基线：%s（src=%s）" % (v["updated"] or "无", v["src_key"] or "无"))
+    if not v["baseline"]:
+        print("★ 台账里没有这个产物目录的基线 —— 首次生成，无可保护的基线（D1 边界①）。")
+    print("--- 腿① 产物 vs A₀（%d 项）---" % v["n"])
+    for name in v["no_baseline"]:
+        print("  [黄] %-24s 台账无该文件基线（不算手改，也不算验过）" % name)
+    for name, a0, now, why in v["prod_red"]:
+        print("  [红] %-24s %s：期望A0=%s 实测=%s"
+              % (name, why, (a0 or "N/A")[:8], (now or "N/A")[:8]))
+    p_red = len(v["prod_red"])
+    print("  小计：%d 项对齐，%d 项漂移" % (v["n"] - p_red - len(v["no_baseline"]), p_red))
+    print("--- 腿② 真源 vs T₀（%d 项）---" % v["n"])
+    if v["src_unreachable"]:
+        print("  [未验] 真源不可达：%s" % v["src_unreachable"])
+        print("          ⇒ T₀ 那条腿**没有跑**，本项不构成「绿」。")
+    for name, t0, now, why in v["src_red"]:
+        print("  [%s] %-24s %s：期望T0=%s 实测=%s"
+              % ("红" if hard_src else "待刷", name, why,
+                 (t0 or "N/A")[:8], (now or "N/A")[:8]))
+    s_red = len(v["src_red"])
+    if not v["src_unreachable"]:
+        print("  小计：%d 项对齐，%d 项不一致%s"
+              % (v["n"] - s_red, s_red,
+                 "（真源已更新 ⇒ 本次生成就是来刷它们的）" if (s_red and not hard_src) else ""))
+    print("--- 结论 ---")
+    if p_red:
+        print("【红】腿①：%d 个产物与台账 A₀ 不一致（有未登记的手改）。" % p_red)
+        print("     ⇒ 处置：回灌真源后重跑生成，或回滚产物。手改没进真源的，下次重生成会洗掉它。")
+    if s_red and hard_src:
+        print("【红】腿②：%d 个真源与 T₀ 不一致 —— 产物相对真源已过期，该重生成了。" % s_red)
+    elif s_red:
+        print("【待刷】真源已更新 %d 项：不是手改，是这次生成要做的事（生成后 T₀ 会刷新）。" % s_red)
+    if v["src_unreachable"]:
+        print("【未验】腿②没跑（真源不可达）—— 上面只验了腿①，**不算两条腿都对齐**。")
+    elif not p_red and not (hard_src and s_red):
+        print("【绿】两条腿都对齐：产物 = A₀、真源 = T₀ ⇒ 无未登记手改、无过期产物。")
+    return bool(p_red or (hard_src and s_red))
+
+
 def guard_dir(out_dir, made, src_dir, ledger):
     """覆盖前逐文件双基线判别。返回漂移记录列表（空表 = 没有真手改）。
 
@@ -561,6 +708,10 @@ def main():
                     help="逃逸口：手改产物照样覆盖（仍先做时间戳备份）")
     ap.add_argument("--strict", action="store_true",
                     help="有人值守：发现漂移拒绝执行、一字节不写（默认=无人值守处置）")
+    ap.add_argument("--chk-a", action="store_true",
+                    help="只跑 CHK-A 台账对账（产物 vs A0 + 真源 vs T0），不生成")
+    ap.add_argument("--require-src", action="store_true",
+                    help="--chk-a 用：真源不可达也判红（验收口径：两条腿都得真验过）")
     a = ap.parse_args()
 
     src_dir = a.src
@@ -568,6 +719,18 @@ def main():
     print("输出          : %s" % a.out)
     print("台账          : %s" % a.ledger)
     print()
+
+    # ★ CHK-A 落位一·前门（窗U 2026-10-16，DSH 补接线）：--chk-a 只对账、不生成。
+    #   退出码：0=两条腿都对齐；1=有红（或 --require-src 下真源不可达 ⇒ 也算红，
+    #   「两条腿都得真验过」，必要条件 4c：环境错误不许读成绿）。
+    if a.chk_a:
+        ledger = load_ledger(a.ledger)
+        v = chk_a(a.out, ledger, src_dir=src_dir, tag="--chk-a 台账对账")
+        red = report_chk_a(v, hard_src=True)
+        if v["src_unreachable"] and a.require_src:
+            print("【红】--require-src：真源不可达 ⇒ 腿②没验过，按规定判红（4c）。")
+            return 1
+        return 1 if red else 0
 
     # ★ C3：反平行副本检查（生成前第一道闸）
     dup = check_parallel_copies()
@@ -619,6 +782,16 @@ def main():
     # ── D1 主防线：覆盖前双基线判别（G3 追加节）──
     ts = time.strftime("%Y%m%d_%H%M%S")
     ledger = load_ledger(a.ledger)
+
+    # ★ CHK-A 落位一·生成前（窗U 2026-10-16，DSH 补接线）：第三方 Step5 必要条件 1 ——
+    #   「产物重生一致」要有真实运行输出。这里取**生成前口径**（hard_src=False）：
+    #   腿② 不一致＝「真源已更新、产物待刷」，正是跑这次生成的合法理由 ⇒ 只标【待刷】。
+    #   腿① 有红＝有未登记手改，仍由下面的 D1 `guard_dir` 负责拦（strict 拒写）。
+    #   ★ 与 tests\_legacy台账对账.py **共用这一份实现**（那边 import 本模块）——
+    #     「判据存在 ≠ 判据在跑」正是本单要治的病，复制第二份实现等于自己再开同一个洞。
+    v_pre = chk_a(a.out, ledger, src_dir=src_dir, tag="生成前")
+    report_chk_a(v_pre, hard_src=False)
+
     drifts = guard_dir(a.out, made, src_dir, ledger)
     if drifts:
         mode = ("strict(拒绝)" if a.strict else
@@ -675,6 +848,17 @@ def main():
     with open(a.ledger, "w", encoding="utf-8") as fh:
         json.dump(ledger, fh, ensure_ascii=False, indent=1)
 
+    # ★ CHK-A 落位一·生成后（窗U 2026-10-16，DSH 补接线）：**审计口径**（hard_src=True）。
+    #   台账刚写完，两条腿都必须对齐：产物 = A₀、真源 = T₀。
+    #   对不上＝生成过程本身有漏（或台账写不全）⇒ 一律非零退出，不许把这种黑读成绿。
+    v_post = chk_a(a.out, load_ledger(a.ledger), src_dir=src_dir, tag="生成后（审计口径）")
+    post_red = report_chk_a(v_post, hard_src=True)
+    if v_post["src_unreachable"]:
+        # 4c：真源不可达 ⇒ 腿②没验过。生成场景下这不是「验不了就放过」，而是必须报红
+        #     （真源不可达时本次产物也不可能来自真源，`[缺失]` 那条已经在 problems 里）。
+        post_red = True
+        print("【红】生成后真源不可达 ⇒ 腿②没有验过（4c：环境错误不许当绿）。")
+
     if drifts:
         rep = write_drift_report(a.out, src_dir, drifts,
                                  ("force" if a.force else "无人值守"), ts)
@@ -715,7 +899,8 @@ def main():
         print("  逐字节相同 %d / 不同 %d / 仅生成 %d / 仅现有 %d" % (same, diff, only_new, only_old))
 
     # D1：漂移未走 --force ⇒ 非零退出（牙二：报告 + 非零 = 等价于"强制人看"）
-    return 1 if (problems or (drifts and not a.force)) else 0
+    # ★ CHK-A 生成后对账有红（post_red）同样非零：产物与台账名不副实，不能当成功。
+    return 1 if (problems or (drifts and not a.force) or post_red) else 0
 
 
 def main_for_pack(out_dir):

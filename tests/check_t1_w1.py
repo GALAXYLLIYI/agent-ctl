@@ -9,16 +9,25 @@
     python -X utf8 tests\check_t1_w1.py                       # 查仓库现状
     python -X utf8 tests\check_t1_w1.py --md 旧版.md --js 旧版.json ...   # 查任意副本（跑红对照用）
 
+★ 仓根从哪来（2026-10-16 窗M 修「闸门会撒谎」）：
+    以前这里写死 ROOT = Path(r'<开发机本仓的盘符绝对路径>')，
+    于是在**任何**机器上（包括干净 clone）它验的都是那台开发机的仓 ——
+    闸门拿到的绿灯与入库物无关。现在改成「**从 __file__ 推**：tests\ 的上一级 = 仓根」，
+    并保留显式覆盖口 AGENTCTL_ROOT（要指红基线仓时就用它指过去）。
+    ⛔ 断言一条没删、也没放宽。
+
 退出码：0 = 全绿；1 = 有条目红（逐条打印 ❌ 与原因）。
 """
 import argparse
 import json
+import os
 import re
 import sys
 from pathlib import Path
 
 sys.stdout.reconfigure(encoding='utf-8', errors='replace')
-ROOT = Path(r'<工作区>\Documents\agent-ctl')
+ROOT = Path(os.environ.get('AGENTCTL_ROOT') or
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 ap = argparse.ArgumentParser()
 ap.add_argument('--md', default=str(ROOT / 'docs/AGENT接口.md'))

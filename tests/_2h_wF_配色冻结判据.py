@@ -452,7 +452,16 @@ def main(argv=None):
                     help="契约路径（颜色名同步面）")
     ap.add_argument("--skip-contract", action="store_true",
                     help="只验代码里的配色，不验契约")
+    ap.add_argument("--inject", action="store_true",
+                    help="自证跑红（窗M）：把现役 ctrl_border.py 复制一份到 %%TEMP%% 并把 C 档"
+                         "配色漂移一格，同一套断言跑那份副本 ⇒ 必红。产品代码不动。")
     a = ap.parse_args(argv)
+
+    if a.inject:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import _inject                                   # noqa: E402  本地小助手
+        a.target = _inject.shadow_ctrl_border(
+            _inject.tmpdir("_wF_注入红_"), _inject.BORDER_COLOR_DRIFT)
 
     for s in (sys.stdout, sys.stderr):
         if s and hasattr(s, "reconfigure"):

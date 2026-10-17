@@ -400,7 +400,18 @@ def main():
     ap.add_argument("--target",
                     default=os.path.join(ROOT, "src", "agentctl", "ctrl_border.py"),
                     help="被测的 ctrl_border.py 路径（指向旧版即可跑红）")
+    ap.add_argument("--inject", action="store_true",
+                    help="自证跑红（窗M）：把现役 ctrl_border.py 复制一份到 %%TEMP%% 并注入"
+                         "「首字母陷阱」，同一套断言跑那份副本 ⇒ 必红。产品代码不动。")
     args = ap.parse_args()
+
+    if args.inject:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import _inject                                   # noqa: E402  本地小助手
+        args.target = _inject.shadow_ctrl_border(
+            _inject.tmpdir("_wA_注入红_"), _inject.BORDER_TIER_TRAP)
+        print("★ 自证跑红模式：被测件已换成**注入了缺陷的副本**（产品代码一个字节没动）")
+        print("  注入内容：闸门认不出的 scope 也猜成最高档 D（旧版首字母陷阱）")
 
     # 冻结表与用例对不上 ⇒ 判据自己不可信 ⇒ 退出码 2（**不是**红，也不是绿）。
     # 宁可跑不起来，也不要一张半表说绿 —— 那正是本单要治的病。

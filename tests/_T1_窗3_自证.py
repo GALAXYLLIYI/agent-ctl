@@ -16,6 +16,11 @@ r"""_T1_窗3_自证.py —— W3-A（uia_tree 坐标系标注）＋ W3-B（ctrl_
     python -X utf8 tests\_T1_窗3_自证.py wire             # 接线（server.py / mcp.py）
     python -X utf8 tests\_T1_窗3_自证.py all
     python -X utf8 tests\_T1_窗3_自证.py coords --src <旧版src目录>
+
+★ 仓根（窗M 2026-10-16 改）：**从 __file__ 推**（tests\ 的上一级 = 仓根），
+  在干净 clone / 别的机器上跑，验的都是**它自己所在的那份仓**；
+  要显式指到别处用环境变量覆盖口：
+      AGENTCTL_ROOT=<另一份仓> python -X utf8 tests\_T1_窗3_自证.py all
 """
 from __future__ import annotations
 
@@ -32,7 +37,12 @@ import sys
 import tempfile
 import time
 
-REPO = r"<工作区>\Documents\agent-ctl"
+# ★ 窗M（2026-10-16）修「闸门会撒谎」：仓根不再写死。
+#   写死时本判据在任何机器上验的都是那台开发机的 src/contract —— 干净 clone 的绿灯
+#   与入库物无关。现在从 __file__ 推（tests\ 的上一级 = 仓根），
+#   AGENTCTL_ROOT 仍可显式指到别处（指红基线仓跑红）。断言一条没删、也没放宽。
+REPO = os.path.abspath(os.environ.get("AGENTCTL_ROOT") or
+                       os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 SRC = os.path.join(REPO, "src")
 CONTRACT = os.path.join(REPO, "contract", "tools.json")
 BORDER_CLS = "AgentCtlCtrlBorder"

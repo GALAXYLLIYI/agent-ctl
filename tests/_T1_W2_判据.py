@@ -5,6 +5,11 @@ r"""T1 窗2 判据（Codex）—— D1 治本 / W2-B / W2-C / W2-D + bench b11 �
     python -X utf8 tests\_T1_W2_判据.py --new    # 跑现役 src\agentctl
     python -X utf8 tests\_T1_W2_判据.py --old    # 跑 git show HEAD:... 导出的旧版
 
+★ 仓根（窗M 2026-10-16 改）：**从 __file__ 推**（tests\ 的上一级 = 仓根），
+  所以在干净 clone / 别的机器上跑，验的都是**它自己所在的那份仓**；
+  要显式指到别处（例如某份归档红基线仓）用环境变量覆盖口：
+      AGENTCTL_ROOT=<另一份仓> python -X utf8 tests\_T1_W2_判据.py --new
+
 ★ 为什么这套判据**不依赖动态页面、不依赖两次快照**：
    uia_tree 的 walk/tree/find 全部换成脚本内的假实现（FakeTree），
    而假实现是**按 roles 口径分表**的 —— 这正是 D1 的机制本身：
@@ -25,7 +30,12 @@ import shutil
 import sys
 import time
 
-REPO = r"<工作区>\Documents\agent-ctl"
+# ★ 窗M（2026-10-16）修「闸门会撒谎」：仓根不再写死。
+#   写死时本判据在任何机器上都 import **那台开发机**的 src（含未提交改动）
+#   ⇒ 干净 clone 跑出来的绿，与入库物无关。现在从 __file__ 推（tests\ 的上一级 = 仓根），
+#   AGENTCTL_ROOT 仍可显式指到别处（指红基线仓跑红）。断言一条没删、也没放宽。
+REPO = os.path.abspath(os.environ.get("AGENTCTL_ROOT") or
+                       os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 SANDBOX = os.path.join(REPO, "work", "_T1_W2_沙箱")
 MODE = sys.argv[1] if len(sys.argv) > 1 else "--new"
 

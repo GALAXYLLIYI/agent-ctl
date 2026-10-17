@@ -17,6 +17,18 @@ r"""tests\run_all.py —— 判据总入口（窗C · 2026-10-15）
     「少一条判据」绝不能被读成「全绿」（这正是退回单
     work\_T1_退回_W2_判据退出码.md 记的那个教训）。
 
+★ 边界（**这不是缺陷，但必须知道**，窗M 2026-10-16 补）：
+    本入口**只在「Windows + 有交互桌面会话」的机器上成立**。
+      · w3 要真画边框窗口、真抓屏、真断言前台窗口不变 —— 无头会话 / 服务 / CI 跑不了；
+      · wI（急停弹窗）同理要真弹一个置顶窗口出来（窗P2 又让它起 5 个真 daemon、
+        逐个抢一次全局热键 —— 这一条现在要占约 2 分钟桌面，别在赶时间的时候跑它）；
+      · 若干判据要 UIA（UI Automation）能枚举控件树。
+    ⇒ **别把它当 CI 判据使**。要在无人值守环境里跑，先把 w3 / wI 这类
+      「要桌面」的判据拆出去单列；本入口只负责「有桌面的 Windows 上把闸门跑齐」。
+    ★ 另有一条更硬的可移植性约束：**每条判据都必须验「它自己所在的那份仓」**。
+      把仓根写死在本机路径上的判据，在别的机器上会给出一份**与入库物无关的绿灯**
+      —— 闸门会撒谎，这比没有闸门更坏。这条由 tests\_M_可移植性判据.py 守着。
+
 判据清单（原散落处 → 现居处）：
     work\_T1_W2_判据.py         → tests\_T1_W2_判据.py
     docs\证据\check_t1_w1.py    → tests\check_t1_w1.py
@@ -26,15 +38,26 @@ r"""tests\run_all.py —— 判据总入口（窗C · 2026-10-15）
     work\_2h_wB_D级绊线判据.py  → tests\_2h_wB_D级绊线判据.py
     （窗F 新增，就地落在 tests）    → tests\_2h_wF_配色冻结判据.py
     （P4 新增，就地落在 tests）     → tests\_P4_定位器夹具判据.py（配 tests\fixtures\ 两张固定图）
+    （P1 新增，就地落在 tests）     → tests\_P1_租约吊销判据.py（第三方强制吊销单张租约）
+    （P2 新增，就地落在 tests）     → tests\_P2_动作面刹车判据.py（动作面连续 N 次阈值刹车）
+    （P0 新增，就地落在 tests）     → tests\_P0_自指保护判据.py（自指保护：终端按**身份**拦 /
+                                      标题兜底仍拦 / 普通应用放行 / 终端 30 分钟临时放行 + 过期再拦）
+    （窗U 落位，DSH 接线 2026-10-17）→ tests\_legacy台账对账.py（CHK-A：产物 vs A₀、真源 vs T₀；
+                                      实现在 tools\gen_legacy.py，两处共用一份）
 
 跑红（不需要改任何判据、不需要 git 写）：
   · 少一条：把 tests\ 下任一判据临时挪走再跑 ⇒ 该条报「判据文件不在」⇒ 退 1。
-  · 指向陈旧副本：wB 那条自带 AGENTCTL_ROOT 覆盖口（它自己的用法里写了），
-    指向归档的红基线仓就能让整条入口变红：
-        $env:AGENTCTL_ROOT="$PWD\work\_wD_红基线_repo"; python -X utf8 tests\run_all.py
+  · 注入式自证（★ 2026-10-16 窗M 起，**不再依赖 work\ 里那份红基线仓**）：
+        python -X utf8 tests\run_all.py --inject
+    逐条给「支持注入的判据」喂一份**注入了缺陷的副本**（落 %TEMP%，产品代码不动），
+    **期望它们全部变红**；哪一条注入后还绿，就说明那条判据是死的。
+    （接缝判据的 --inject 早就有了，wA / wB / wF 是本单补上的。）
+  · 指向陈旧副本：wB 那条仍留 AGENTCTL_ROOT 覆盖口，可指到任意一份旧仓：
+        $env:AGENTCTL_ROOT="<别的一份仓>"; python -X utf8 tests\run_all.py
 
 参数：
     --list      只打印判据清单，不跑
+    --inject    跑红自证模式（见上；期望可注入的判据全红，rc=0 表示「判据都是活的」）
     --timeout N 单条判据的秒数上限（默认 900；超时算红）
 """
 from __future__ import annotations
@@ -66,7 +89,37 @@ CRITERIA = (
      "窗F：边框配色/按档厚度/1px 反色描边**冻结钉子**（五个 RGB 写死）+ 契约颜色名同步"),
     ("P4", "_P4_定位器夹具判据.py", (),
      "P4：定位器**固定图夹具**（正向必须找到 4 个 + ★反向必须返回空）——堵 selftest.py:95-98 的盲区"),
+    ("P1", "_P1_租约吊销判据.py", (),
+     "P1：revoke_lease 第三方强制吊销单张租约（立刻拦/只影响目标/幂等/防手滑/"
+     "急停联动/★模型无入口/留痕/renew 不许复活）"),
+    ("P2", "_P2_动作面刹车判据.py", (),
+     "P2：动作面异常刹车（连点同坐标/连续失败两级响应：★第 1 次只写事件不拉闸/"
+     "第 2 次才拉闸 + ★防误报 + 阈值可配 + 接线 + 留痕 + 面板提示）"),
+    ("wI", "_急停弹窗判据.py", (),
+     "窗I+N+P2：急停**桌面置顶弹窗**（真出现/真置顶/无改状态控件/解除后消失/agent 碰不到它）"
+     " + 窗P2 **三条入口**（退役线响亮拒绝 / 真·文档入口弹窗 / 模块入口不许秒退）"
+     " + 抢占显式 + 收尾自证（flag 无 / 可见弹窗 0 / daemon 进程 0）"),
+    ("P0", "_P0_自指保护判据.py", (),
+     "P0：**唯一的防自授权闸门**——身份优先三重匹配（属主进程名 / 窗口类名 / 标题兜底）"
+     "+ 终端默认拦但可人确认 30 分钟临时放行"),
+    ("wM", "_M_可移植性判据.py", (),
+     "窗M：**闸门不许验错对象** —— 仓根不许写死（源码面/文档面静态查 + "
+     "复制一份仓到 %TEMP% 从副本实跑 w1/w2/w3，输出必须指向副本、不许出现真仓路径）"),
+    ("台账", "_legacy台账对账.py", (),
+     "窗U（Step5 必要条件 1）：CHK-A **产物重生一致** —— 产物 vs 台账 A₀（抓手改/缺件）"
+     "+ 真源 vs 台账 T₀（抓真源更新后产物未刷）；★ 不许拿 T₀==A₀ 当口径（净化文件本该不等）"),
 )
+
+# ★ 窗M（2026-10-16）：哪些判据自带「注入式跑红」口。
+#   --inject 模式只跑这些，**期望它们变红**；没登记的判据在那一栏里如实列成
+#   「无注入口」，不计入通过 —— 免得「没跑」被读成「跑过了」。
+INJECTABLE = {
+    "接缝": ("--inject",),
+    "wA": ("--inject",),
+    "wB": ("--inject",),
+    "wF": ("--inject",),
+    "台账": ("--inject",),
+}
 
 
 def out(msg=""):
@@ -106,6 +159,8 @@ def run_one(key, script, args, timeout):
 def main(argv=None):
     ap = argparse.ArgumentParser(description="tests\\ 判据总入口")
     ap.add_argument("--list", action="store_true", help="只打印清单，不跑")
+    ap.add_argument("--inject", action="store_true",
+                    help="跑红自证：给支持注入的判据喂注入了缺陷的副本，期望它们全红")
     ap.add_argument("--timeout", type=float, default=900.0,
                     help="单条判据秒数上限（默认 900；超时算红）")
     a = ap.parse_args(argv)
@@ -126,6 +181,9 @@ def main(argv=None):
     if a.list:
         return 0
     out("")
+
+    if a.inject:
+        return run_inject(a.timeout)
 
     results = []
     for key, script, args, _desc in CRITERIA:
@@ -151,6 +209,49 @@ def main(argv=None):
     out("结论：【绿】全部判据全绿。")
     return 0
 
+
+def run_inject(timeout):
+    """--inject：把「注入了缺陷的副本」喂给判据，**期望它们变红**。
+
+    这条模式的语义与常规模式**相反**：常规模式里 rc=0 是好成绩；
+    这里 rc=0（对每条可注入判据而言）恰恰说明「注入真把它打红了」＝ 判据是活的。
+    所以本模式自己的 rc=0 ＝ 每条可注入判据都如期变红。
+    没登记 --inject 的判据如实列成「无注入口（未参与）」，**不计入通过**。
+    """
+    out("=" * 78)
+    out("跑红自证模式 · 注入的是**临时副本**，产品代码一个字节不动")
+    out("=" * 78)
+    results = []
+    skipped = []
+    for key, script, args, desc in CRITERIA:
+
+        inj = INJECTABLE.get(key)
+        if inj is None:
+            skipped.append(key)
+            continue
+        rc, dt, _note = run_one(key, script, args + inj, timeout)
+        # 注入后必须是红的：rc != 0 才算「判据被注入打红」（= 它是活的）
+        results.append((key, script, rc, dt, "如期变红" if rc != 0 else "★注入后仍全绿（判据是死的）"))
+    out("")
+    out("=" * 78)
+    out("注入自证汇总")
+    out("=" * 78)
+    for key, script, rc, dt, note in results:
+        out("  [%s] %-4s %-24s %6.1fs  %s"
+            % ("红" if rc != 0 else "绿", key, script, dt, note))
+    out("-" * 78)
+    out("可注入判据 %d 条：如期变红 %d，注入后仍绿 %d"
+        % (len(results), len([r for r in results if r[2] != 0]),
+           len([r for r in results if r[2] == 0])))
+    out("无注入口（未参与跑红自证，不计入通过）：%s" % "、".join(skipped))
+    still_green = [r[0] for r in results if r[2] == 0]
+    if still_green:
+        out("结论：【红】—— %s 注入缺陷后仍全绿 ⇒ 这些判据是死的，不能拿来发成绩"
+            % "、".join(still_green))
+        return 1
+    out("结论：【绿】每条可注入判据都被注入打红 ⇒ 判据是活的（本次总用时 %.1fs）"
+        % sum(r[3] for r in results))
+    return 0
 
 if __name__ == "__main__":
     sys.exit(main())

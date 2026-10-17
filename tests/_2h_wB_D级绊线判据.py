@@ -44,9 +44,24 @@ import tempfile
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+# ★ 窗M（2026-10-16）：--inject = 自证跑红。
+#   从前红基线是 work\_wD_红基线_repo（不进仓 ⇒ 新机器复现不了「能跑红」）。
+#   现在改成注入式：现役 src/ + contract/ 复制成**影子仓**落 %TEMP%，
+#   再往影子仓的契约副本里塞一个可调用的 ctl_drag ⇒ A1 必然报红。
+#   ★ 必须发生在 ROOT 计算**之前**（ROOT 一旦定下就驱动全部被测路径）。
+_INJECT = "--inject" in sys.argv
+if _INJECT:
+    sys.path.insert(0, HERE)
+    import _inject                                       # noqa: E402  本地小助手
+    os.environ["AGENTCTL_ROOT"] = _inject.shadow_repo(_inject.tmpdir("_wB_注入红_"))
 ROOT = os.path.abspath(os.environ.get("AGENTCTL_ROOT") or os.path.dirname(HERE))
 PKG = os.path.join(ROOT, "src", "agentctl")
 CONTRACT = os.path.join(ROOT, "contract", "tools.json")
+
+if _INJECT:
+    _inject.inject_drag_tool(CONTRACT)
+    print("★ 自证跑红模式：被测仓 = **注入了缺陷的影子仓**（产品代码一个字节没动）")
+    print("  注入内容：契约 tools 数组里塞进一个可调用的 ctl_drag ⇒ A1 必须红")
 
 FAILS = []            # [(断言号, 为什么红)]
 
