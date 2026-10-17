@@ -1054,7 +1054,7 @@ def t_find(args: dict) -> dict:
     ))
 
 
-def _uia_gate(args: dict, tool: str, fn):
+def _uia_gate(args: dict, tool: str, fn, walk_override: dict | None = None):
     """UIA 读取走 A 级闸门（只读感知），进程内，不 spawn。"""
     h = int(args.get("hwnd") or 0)
     if not h:
@@ -1086,12 +1086,15 @@ def _uia_gate(args: dict, tool: str, fn):
     # ★ T15：res 是 **dict**（uia_tree.tree/find 的返回值）⇒ 走元素指纹版
     # ★ T1 窗2：把**签发那次的遍历口径**一起记进去。点击侧要按同一口径重走做身份复核 ——
     #   口径必须来自签发侧（core.py 里 t_tree/t_find 各自的默认值），不能现场重算一遍。
-    _walk = {"roles": list(args.get("roles") or (("interactive", "text")
-                                                  if tool == "ctl_tree" else ("all",))),
-             "max_nodes": int(args.get("max_nodes") or
-                              (uia_tree.DEFAULT_MAX_NODES if tool == "ctl_tree"
-                               else uia_tree.FIND_MAX_NODES)),
-             "max_depth": int(args.get("max_depth") or uia_tree.DEFAULT_MAX_DEPTH)}
+    # ★ F4（窗B1）：walk_override 让 ctl_screen 把**自己那趟遍历的真实口径**记进去。
+    #   旁表里的 walk 是点击侧重走时用来对坐标的；口径不同就等于拿不同的坐标系比坐标。
+    _walk = walk_override or {
+        "roles": list(args.get("roles") or (("interactive", "text")
+                                              if tool == "ctl_tree" else ("all",))),
+        "max_nodes": int(args.get("max_nodes") or
+                         (uia_tree.DEFAULT_MAX_NODES if tool == "ctl_tree"
+                          else uia_tree.FIND_MAX_NODES)),
+        "max_depth": int(args.get("max_depth") or uia_tree.DEFAULT_MAX_DEPTH)}
     tok = _issue_capture_from_tree(h, res, _walk)
     if tok:
         d["capture_id"] = tok
@@ -2527,6 +2530,595 @@ def t_focus(args: dict) -> dict:
     return r
 
 
+# ==========================================================================
+# F4 语义屏 · ctl_screen（窗B1 · 2026-10-17）
+# ==========================================================================
+# 一句话：**一次调用给 agent 一段裁剪过、带身份、带新鲜度的屏幕**，而不是一整棵树。
+#
+# ★ 五条设计修正（GLM 评审，本单必须照做；判据逐条盯着）：
+#   修正① uid 拆两段 —— struct_key（role + 路径）与 text_key（规范化文本）分开；
+#          volatile=true 的节点（时间/计数类）**不参与 text_key 比对**。
+#          病根：计时器每帧都换字，若把文字折进 uid，它每帧都是「新节点」⇒ STALE 风暴。
+#   修正② screen_version **服务端签发**。调用方只能把「上次见过的」原样回传（since）
+#          用于对照；**永远不能指定**。传了 version/screen_version 也一律忽略并明说。
+#   修正③ **不要 confidence 字段**，改 source_confidence；多来源聚合 **取 min**。
+#          病根：取平均/取最大都会高估 —— 有一条弱证据就该被看见。
+#   修正④ name_trust：Chromium/网页类窗口一律 low —— 网页的无障碍 name 不可信
+#          （超星选择题字母与实际选项错位就是实例），别让 agent 把它当权威文本。
+#   修正⑤ channels 段把 must_vlm = ¬R1 ∧ ¬R2 ∧ ¬R3 写成**真判定**而不是注释。
+#          本版 R1(CDP)/R3(OCR) **只判定不接线** —— 没接线就报 false，不许假装有。
+#
+# ★ 注意力打分**必须可解释、可调**：见 SCREEN_SCORE_WEIGHTS（改那个 dict 就改口径）。
+# ★ **必进保证**：`interactive 且看得见` 的节点**永不裁掉**，哪怕超过 top-N。
+#   这不是「优化」，是**正确性**：裁掉一个当前可点的按钮，agent 只会以为界面上没有它
+#   —— 那比多给几个文本节点坏得多。多给的代价是 token，不是安全。
+
+SCREEN_DEFAULT_TOP = 40
+SCREEN_DEFAULT_MAX_NODES = 1200       # 语义屏要「结构骨架完整」，比 ctl_tree 宽一档
+SCREEN_MAX_NODES_CEIL = 5000
+SCREEN_STRUCT_KEY_SEGS = 6            # struct_key 只留末 6 段：深树前面几段是公共外壳
+SCREEN_DELTA_LIST_CAP = 60            # delta 段最多列多少个 uid（超出只报数，不刷屏）
+
+# ★ 打分权重 —— **可调口径的唯一入口**，调参与判据都改这里。
+SCREEN_SCORE_WEIGHTS = {
+    "in_view": 0.35,      # 在这一屏看得见
+    "interactive": 0.25,  # 能点/能填
+    "query": 0.20,        # 命中调用方给的 query（题干/关键词）
+    "area": 0.10,         # 面积占比（相对客户区，钳到 1.0）
+    "delta": 0.10,        # 相对上次快照是新面孔
+}
+
+# ★ 修正③：每个来源自己的置信度。**没有「总 confidence」这一档** ——
+#   多来源的合成值一律由 _agg_source_confidence() 现算（取 min），不许预乘、不许写死。
+SCREEN_SOURCE_CONF = {
+    "uia": 1.00,    # 无障碍树：控件自己的自述，最强
+    "cdp": 0.90,    # DOM 结构（本版未接线）
+    "ocr": 0.55,    # 像素猜出来的文本，最弱（本版未接线）
+}
+
+# ★ 时间/计数类节点的识别。命中 ⇒ volatile=true ⇒ **不参与 text_key 比对**（修正①）。
+#   只认「时刻」与「带单位的量」，不认裸数字 —— 裸数字可能是订单号/题号，变了就是变了。
+SCREEN_VOLATILE_RE = re.compile(
+    r"(\d{1,3}:\d{1,2}(?::\d{1,2})?)"                              # 12:34 / 01:02:03
+    r"|(\d+(?:\.\d+)?\s*(?:ms|毫秒|秒|分钟|分|fps|hz|kb|mb|gb|%))"   # 3.5s / 60 fps / 42%
+    r"|(剩余|倒计时|已用时|用时|elapsed|remaining|countdown|timer|clock)",
+    re.IGNORECASE)
+SCREEN_VOLATILE_TYPES = frozenset({"ProgressBarControl", "SpinnerControl"})
+
+# 角色 → 可用动作。**按角色推**，不问 Pattern（每节点 8 次 COM 往返买不起）。
+SCREEN_ACTIONS = {
+    "ButtonControl": ["click"],
+    "RadioButtonControl": ["click"],
+    "CheckBoxControl": ["click", "toggle"],
+    "TabItemControl": ["click"],
+    "ListItemControl": ["click"],
+    "TreeItemControl": ["click", "expand"],
+    "MenuItemControl": ["click"],
+    "HyperlinkControl": ["click"],
+    "DataItemControl": ["click"],
+    "EditControl": ["click", "type", "fill"],
+    "ComboBoxControl": ["click", "select"],
+    "SliderControl": ["click", "set"],
+    "SpinnerControl": ["click", "set"],
+}
+
+# 修正④：网页/Chromium 类窗口的 class 名片段与进程名片段。
+SCREEN_WEB_CLS_HINTS = ("chrome_widgetwin", "mozillawindowclass", "electron")
+SCREEN_WEB_PROC_HINTS = ("msedge", "chrome", "firefox", "electron", "iexplore",
+                         "brave", "vivaldi", "opera", "360chrome", "360se")
+
+# R2（UIA 通道）判定阈值：可交互节点数到这个量级，才认为「UIA 认得这个界面」。
+SCREEN_R2_MIN_INTERACTIVE = 5
+
+
+def screen_must_vlm(r1: bool, r2: bool, r3: bool) -> bool:
+    """修正⑤的核心判定式：**must_vlm = not R1 and not R2 and not R3**。
+
+    三条结构化通道（CDP+DOM / UIA / OCR）**没有一条能定位到目标**时，
+    才轮得到视觉模型。写成函数而不是注释，是为了让它**能被判据说打红**。
+    """
+    return (not r1) and (not r2) and (not r3)
+
+def screen_channels(*, interactive_count: int, target_hit: bool,
+                    cdp_wired: bool = False, cdp_reachable: bool = False,
+                    ocr_wired: bool = False, ocr_hit: bool = False,
+                    ocr_bbox_usable: bool = False) -> dict:
+    """三条通道各自的命中情况 + must_vlm 判定（修正⑤）。
+
+    ★ 本单**只判定、不接线**：R1(CDP) 与 R3(OCR) 的 wired 恒为 false，
+      于是 reachable/hit 也恒为 false —— 没接线的通道**不许报命中**，
+      否则 agent 会以为「DOM 已经查过了，没有」而漏掉真正存在的东西。
+    """
+    r1 = bool(cdp_wired and cdp_reachable and target_hit)
+    r2 = bool(int(interactive_count) >= SCREEN_R2_MIN_INTERACTIVE and target_hit)
+    r3 = bool(ocr_wired and ocr_hit and ocr_bbox_usable)
+    why = ["R1(CDP+DOM)=%s%s" % ("命中" if r1 else "不成立",
+                                  "" if cdp_wired else "（本版未接线）"),
+          "R2(UIA)=%s（可交互 %d，阈值 %d，目标%s）"
+          % ("命中" if r2 else "不成立", int(interactive_count),
+             SCREEN_R2_MIN_INTERACTIVE, "命中" if target_hit else "未命中"),
+          "R3(OCR+bbox)=%s%s" % ("命中" if r3 else "不成立",
+                                  "" if ocr_wired else "（本版未接线）")]
+    return {
+        "R1_cdp": {"wired": bool(cdp_wired),
+                    "reachable": bool(cdp_reachable and cdp_wired),
+                    "dom_hit": bool(target_hit and cdp_wired and cdp_reachable),
+                    "hit": r1},
+        "R2_uia": {"wired": True, "interactive_count": int(interactive_count),
+                    "threshold": SCREEN_R2_MIN_INTERACTIVE,
+                    "target_hit": bool(target_hit), "hit": r2},
+        "R3_ocr": {"wired": bool(ocr_wired), "hit": r3,
+                    "bbox_usable": bool(ocr_bbox_usable and ocr_wired)},
+        "must_vlm": screen_must_vlm(r1, r2, r3),
+        "must_vlm_式": "must_vlm = not R1 and not R2 and not R3",
+        "must_vlm_why": "；".join(why),
+    }
+
+
+def _agg_source_confidence(items) -> tuple:
+    """修正③：多来源置信度**取 min**。返回 (合成值, 来源名列表)。
+
+    ★ 为什么是 min 不是 mean/max：
+      min = 「只要有一条弱证据，就按弱证据信」—— 对「我看见了，所以可以点」这类断言，
+             这是唯一不会高估的合成法。
+      mean 会把「UIA 说它在、OCR 没看见」平均成一个中间值，把「两条证据打架」抹平。
+      max 则是直接撒谎：一路错认就能把置信度顶满。
+    空证据表返回 (0.0, []) —— **没有来源就说没有**，不报 1.0。
+    """
+    vals, names = [], []
+    for it in items or []:
+        if not isinstance(it, dict):
+            continue
+        v = it.get("source_confidence")
+        if v is None:
+            continue
+        try:
+            vals.append(float(v))
+        except (TypeError, ValueError):
+            continue
+        names.append(str(it.get("source") or "?"))
+    if not vals:
+        return 0.0, []
+    return min(vals), names
+
+
+def _screen_extra_evidence(uid: str, node: dict) -> list:
+    """**扩展口**：真接上 CDP / OCR 之后，把它们的证据 append 到这里即可。
+
+    本版 **不接线**，恒返回空列表 —— 判据靠替换这个函数造出一条 OCR 证据，
+    来验「聚合取 min」这条规则真的被执行（而不是只写在注释里）。
+    """
+    return []
+
+
+def _screen_evidence(uid: str, node: dict) -> list:
+    """一条对象的全部来源证据 = UIA 自述 + 扩展口给的（CDP / OCR …）。"""
+    ev = [{"source": "uia", "source_confidence": SCREEN_SOURCE_CONF["uia"]}]
+    try:
+        extra = _screen_extra_evidence(uid, node)
+    except Exception:
+        extra = []
+    for e in (extra or []):
+        if isinstance(e, dict) and e.get("source"):
+            try:
+                conf = float(e.get("source_confidence", 0.0))
+            except (TypeError, ValueError):
+                continue
+            ev.append({"source": str(e.get("source")), "source_confidence": conf})
+    return ev
+
+
+def _screen_norm_text(s: str) -> str:
+    """text_key 的规范化：NFKC → 去零宽 → 折叠空白 → casefold。
+
+    NFKC 管全角/半角与兼容字符，casefold 管大小写；两者都只动**写法**不动**词** ——
+    写法变了不该让 uid 变，词变了才该。
+    """
+    if not s:
+        return ""
+    import unicodedata as _ud
+    t = _ud.normalize("NFKC", str(s))
+    t = t.replace("\u200b", "").replace("\ufeff", "").replace("\u00a0", " ")
+    return re.sub(r"\s+", " ", t).strip().casefold()
+
+
+def _screen_is_volatile(role: str, label: str) -> bool:
+    """这个节点是不是「时刻/计数类」（改了字也不该算换了对象）。"""
+    if role in SCREEN_VOLATILE_TYPES:
+        return True
+    return bool(SCREEN_VOLATILE_RE.search(label or ""))
+
+
+def _screen_text_key(label: str, volatile: bool) -> str:
+    """修正①的后半段：volatile 节点的 text_key 恒为 `~`（**不参与比对**）。
+
+    非 volatile 才有 t+哈希。哈希而不是原文：uid 要短、要能安全当 key 传。
+    """
+    if volatile:
+        return "~"
+    norm = _screen_norm_text(label)
+    if not norm:
+        return "-"                  # 没字：无可比对，靠 struct_key 定位
+    import hashlib as _hl
+    return "t" + _hl.sha1(norm.encode("utf-8")).hexdigest()[:10]
+
+def _screen_struct_keys(nodes: list) -> list:
+    """按 walk 给的 depth 还原祖先链，产出每个节点的**结构路径** struct_key。
+
+    为什么能还原：uia_tree.walk 是先序 DFS，被丢掉的中间层**照样往下走、depth 照样加**，
+    所以保留下来的节点里，「depth 小于我且最近的那个」就是我的祖先，一个栈就能还原链。
+
+    ⚠ 口径：祖先链是在**保留下来的骨架**上还原的（被 uia_tree 按角色/零矩形丢掉的
+      中间层不会出现）。骨架口径由 ctl_screen 自己钉死（roles=all、全量遍历），
+      与 top / include_offscreen 无关 ⇒ 同一窗口状态下 uid 稳定。
+    """
+    out = []
+    stack = []            # [(depth, 段名)]，先序 DFS 的祖先链
+    # ★ counts[i] 是 **stack[i] 那个节点的子节点计数表**（同角色已数几个），
+    #   不是「深度 i 的计数表」。差在哪：同父的兄弟必须**接着数**（PaneControl[1]），
+    #   换父了才从头数。按深度建表会把兄弟编号清零 ⇒ 同一父下的同角色节点
+    #   拿到**一模一样的 struct_key**（本机实测：三个并列题干文本的路径全等），
+    #   那样两个同父同角色**同名**的控件 uid 就会撞车 —— 身份直接废了。
+    counts = [{}]         # counts[0] 记「遍历根」的直接子节点
+    for n in nodes:
+        d = int(n.get("depth") or 0)
+        while len(stack) > d:
+            stack.pop()
+            counts.pop()
+        role = str(n.get("type") or "")
+        kids = counts[-1]
+        k = kids.get(role, 0)
+        kids[role] = k + 1
+        seg = role if k == 0 else "%s[%d]" % (role, k)
+        stack.append((d, seg))
+        counts.append({})
+        out.append("/".join([x for _, x in stack[-SCREEN_STRUCT_KEY_SEGS:]]))
+    return out
+
+
+def _screen_query_hit(query: str, label: str) -> float:
+    """query 命中度 ∈ {0.0, 1.0}。整串包含算 1.0；按空白分词后**全中**也算 1.0。"""
+    q = _screen_norm_text(query)
+    lab = _screen_norm_text(label)
+    if not q or not lab:
+        return 0.0
+    if q in lab:
+        return 1.0
+    toks = [t for t in q.split(" ") if t]
+    if toks and all(t in lab for t in toks):
+        return 1.0
+    return 0.0
+
+
+def _screen_score(*, in_view: bool, interactive: bool, query_hit: float,
+                  area_ratio: float, delta: bool) -> float:
+    """**可解释的线性打分**。权重全在 SCREEN_SCORE_WEIGHTS，每一项值多少分一眼看得见。"""
+    w = SCREEN_SCORE_WEIGHTS
+    return round(w.get("in_view", 0.0) * (1.0 if in_view else 0.0)
+                 + w.get("interactive", 0.0) * (1.0 if interactive else 0.0)
+                 + w.get("query", 0.0) * float(query_hit)
+                 + w.get("area", 0.0) * max(0.0, min(1.0, float(area_ratio)))
+                 + w.get("delta", 0.0) * (1.0 if delta else 0.0), 4)
+
+
+def _screen_select(cands: list, top: int, guarantee: bool = True) -> tuple:
+    """注意力裁剪。返回 (保留的 id 集合, 被裁掉的条数)。
+
+    ★ **必进保证**：guarantee=True 时，所有「能交互 且 这一屏看得见」的节点**先进集合**，
+      剩下的名额才按分补 —— 所以返回条数**可以超过 top**。
+      这是刻意的：裁掉一个现在能点的按钮，agent 只会得出「界面上没有它」，
+      而那是个会让它放弃任务的错误结论。宁可多花点 token。
+    ⚠ 判据用 `in_view is not False` 而不是 `is True`：客户区取不到时 in_view 是 None（未知），
+      按 uia_tree 既定口径「判不出来就当看得见」处理，宁可多留。
+    """
+    must = [o for o in cands if o["interactive"] and o["in_view"] is not False]
+    ranked = sorted(cands, key=lambda o: (-o["score"], tuple(o["rect"]), o["id"]))
+    budget = max(int(top), len(must)) if guarantee else max(int(top), 0)
+    keep = set()
+    if guarantee:
+        keep.update(o["id"] for o in must)
+    for o in ranked:
+        if len(keep) >= budget:
+            break
+        keep.add(o["id"])
+    return keep, max(0, len(cands) - len(keep))
+
+
+# ── 新鲜度快照（delta 项 + STALE 判断的地基）────────────────────────────────
+#   服务端内存，按 hwnd 记「上次这屏上都有哪些 uid」。
+#   没有基线时 delta 一律记 0 —— 不假装「全都是新面孔」（那会让每帧凭空多 0.10）。
+SCREEN_SNAP_TTL_SEC = 30.0
+SCREEN_SNAP_MAX_HWNDS = 32
+_SCREEN_SEEN = {}
+
+
+def _screen_snap_get(hwnd: int):
+    rec = _SCREEN_SEEN.get(int(hwnd))
+    if not rec:
+        return None
+    if time.time() - float(rec.get("t") or 0) > SCREEN_SNAP_TTL_SEC:
+        return None
+    return rec
+
+
+def _screen_snap_put(hwnd: int, version: str, uids, labels):
+    now = time.time()
+    if len(_SCREEN_SEEN) >= SCREEN_SNAP_MAX_HWNDS:
+        for k in sorted(_SCREEN_SEEN, key=lambda x: _SCREEN_SEEN[x].get("t") or 0)[:8]:
+            _SCREEN_SEEN.pop(k, None)
+    _SCREEN_SEEN[int(hwnd)] = {"t": now, "screen_version": version,
+                               "uids": set(uids), "labels": dict(labels)}
+
+
+def _screen_forget(hwnd: int = 0):
+    """丢掉快照基线（判据分阶段用；也留给将来「用户说『这屏重算』」）。"""
+    if hwnd:
+        _SCREEN_SEEN.pop(int(hwnd), None)
+    else:
+        _SCREEN_SEEN.clear()
+
+
+def _screen_proc_name(pid: int) -> str:
+    """进程可执行文件名。取不到就返回 ""（**不猜、不编**）。"""
+    try:
+        import ctypes
+        from ctypes import wintypes
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        k32.OpenProcess.restype = wintypes.HANDLE
+        k32.QueryFullProcessImageNameW.argtypes = [wintypes.HANDLE, wintypes.DWORD,
+                                                  wintypes.LPWSTR,
+                                                  ctypes.POINTER(wintypes.DWORD)]
+        k32.QueryFullProcessImageNameW.restype = wintypes.BOOL
+        k32.CloseHandle.argtypes = [wintypes.HANDLE]
+        h = k32.OpenProcess(0x1000, False, int(pid))    # PROCESS_QUERY_LIMITED_INFORMATION
+        if not h:
+            return ""
+        try:
+            buf = ctypes.create_unicode_buffer(1024)
+            n = wintypes.DWORD(1024)
+            if k32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(n)):
+                return os.path.basename(buf.value)
+        finally:
+            k32.CloseHandle(h)
+    except Exception:
+        return ""
+    return ""
+
+
+def _screen_window_info(hwnd: int) -> dict:
+    """窗口身份：hwnd / title / cls / pid。**读不到就留空，不填占位值。**"""
+    out = {"hwnd": int(hwnd), "title": "", "cls": "", "pid": 0}
+    try:
+        import win32gui
+        import win32process
+        out["title"] = win32gui.GetWindowText(int(hwnd)) or ""
+        out["cls"] = win32gui.GetClassName(int(hwnd)) or ""
+        try:
+            out["pid"] = int(win32process.GetWindowThreadProcessId(int(hwnd))[1])
+        except Exception:
+            out["pid"] = 0
+    except Exception:
+        pass
+    return out
+
+
+def _screen_name_trust(win: dict) -> str:
+    """修正④：网页/Chromium 类窗口 → name_trust=**low**。
+
+    实例：超星的选择题里，控件报出来的字母与屏幕上真正显示的选项**错位**。
+    网页的 name 来自 DOM/ARIA 映射，不是像素事实 ⇒ 不能当权威文本用。
+    原生 Win32 与多数桌面应用才是 high。**判不出来按 low**（保守）。
+    """
+    cls = str((win or {}).get("cls") or "").lower()
+    if cls and any(k in cls for k in SCREEN_WEB_CLS_HINTS):
+        return "low"
+    proc = _screen_proc_name((win or {}).get("pid") or 0).lower()
+    if proc and any(k in proc for k in SCREEN_WEB_PROC_HINTS):
+        return "low"
+    if not cls and not proc:
+        return "low"
+    return "high"
+
+
+def _screen_max_nodes(args: dict) -> int:
+    try:
+        n = int(args.get("max_nodes") or SCREEN_DEFAULT_MAX_NODES)
+    except (TypeError, ValueError):
+        n = SCREEN_DEFAULT_MAX_NODES
+    return max(50, min(SCREEN_MAX_NODES_CEIL, n))
+
+def _screen_build(hwnd: int, args: dict) -> dict:
+    """语义屏本体。**只读**：不发点击、不 Invoke、不改窗口。"""
+    import hashlib as _hl
+
+    hwnd = int(hwnd)
+    top = max(1, int(args.get("top") or SCREEN_DEFAULT_TOP))
+    include_offscreen = bool(args.get("include_offscreen") or False)
+    query = str(args.get("query") or "")
+    since = args.get("since")
+
+    win = _screen_window_info(hwnd)
+    trust = _screen_name_trust(win)
+
+    stats = {}
+    max_nodes = _screen_max_nodes(args)
+    max_depth = int(args.get("max_depth") or uia_tree.DEFAULT_MAX_DEPTH)
+    # ★ 固定口径：roles=("all",) + include_offscreen=True。
+    #   语义屏要的是**完整结构骨架**（uid 的路径必须在全树上算才有意义），
+    #   视口过滤与 top-N 放在**之后**做 —— 否则同一控件滚出屏幕就会换 uid。
+    nodes, _trunc = uia_tree.walk(hwnd, max_nodes=max_nodes, max_depth=max_depth,
+                                 roles=("all",), include_offscreen=True, stats=stats)
+    client = stats.get("视口") or None
+    scroll = stats.get("滚动") or {}
+    struct_keys = _screen_struct_keys(nodes)
+
+    prev = _screen_snap_get(hwnd)
+    prev_uids = (prev or {}).get("uids") or set()
+
+    base_area = 0
+    if client and len(client) == 4:
+        base_area = (max(0, int(client[2]) - int(client[0]))
+                     * max(0, int(client[3]) - int(client[1])))
+
+    cands = []
+    n_all_cands = 0
+    n_view_dropped = 0
+    used_ids = set()
+    for i, n in enumerate(nodes):
+        role = str(n.get("type") or "")
+        label = (n.get("name") or "").strip()
+        interactive = role in uia_tree.INTERACTIVE_TYPES
+        if not (interactive or label):
+            continue                      # 无交互也无字：既不是对象，也不进 texts
+        # ★ 真实总数**含屏外**：屏外那些也是这屏上的对象，只是「现在看不见」。
+        #   少算它们会让 total-returned 对不上「到底丢了多少」，那就不叫诚实报数了。
+        n_all_cands += 1
+        in_view = n.get("in_view")
+        if in_view is False and not include_offscreen:
+            n_view_dropped += 1
+            continue
+        rect = list(n.get("rect") or [0, 0, 0, 0])
+        volatile = _screen_is_volatile(role, label)         # ← 修正①
+        skey = struct_keys[i] if i < len(struct_keys) else role
+        uid = "%s@%s" % (skey, _screen_text_key(label, volatile))   # ← 修正①：两段
+        oid = "o" + _hl.sha1(uid.encode("utf-8")).hexdigest()[:6]
+        if oid in used_ids:               # 哈希撞了就加后缀，不许两个对象同号
+            k = 2
+            while "%s-%d" % (oid, k) in used_ids:
+                k += 1
+            oid = "%s-%d" % (oid, k)
+        used_ids.add(oid)
+        area = max(0, rect[2] - rect[0]) * max(0, rect[3] - rect[1])
+        area_ratio = (float(area) / float(base_area)) if base_area else 0.0
+        conf, src_names = _agg_source_confidence(_screen_evidence(uid, n))   # ← 修正③
+        is_new = bool(prev_uids) and uid not in prev_uids
+        cands.append({
+            "id": oid,
+            "uid": uid,
+            "label": label[:120],
+            "role": role,
+            "rect": rect,
+            "in_view": bool(in_view is not False),
+            "interactive": bool(interactive),
+            # ★ 不可交互的节点**不承诺任何动作**：它是题干/备注这类文字，
+            #   报 actions=["click"] 等于凭空许一个承诺（实测踩过：模型照着去点文字）。
+            "actions": list(SCREEN_ACTIONS.get(role, ["click"])) if interactive else [],
+            "source": "+".join(src_names) if src_names else "none",
+            "source_confidence": conf,                     # ← 修正③：没有裸 confidence
+            "name_trust": trust,                            # ← 修正④
+            "volatile": bool(volatile),
+            "score": _screen_score(in_view=in_view is not False,
+                                   interactive=interactive,
+                                   query_hit=_screen_query_hit(query, label),
+                                   area_ratio=area_ratio, delta=is_new),
+        })
+
+    total_cands = n_all_cands
+    keep, n_topn_dropped = _screen_select(cands, top, guarantee=True)     # ← 必进保证
+    ranked = sorted(cands, key=lambda o: (-o["score"], tuple(o["rect"]), o["id"]))
+    objects = [o for o in ranked if o["id"] in keep]
+
+    # ── 修正②：**服务端签发**。这个 blob 里装的全是服务端自己算出来的事实；
+    #    since / version / screen_version 一概**不进来** ⇒ 调用方没有指定版本的入口。
+    viewport = {"client": list(client) if client else None,
+                "scroll_y": scroll.get("scroll_y"),
+                "doc_height": scroll.get("doc_height"),
+                "scroll_unknown": bool(scroll.get("scroll_unknown", True))}
+    version_blob = json.dumps({
+        "hwnd": hwnd, "title": win.get("title"), "cls": win.get("cls"),
+        "pid": win.get("pid"), "client": viewport["client"],
+        "scroll_y": viewport["scroll_y"], "doc_height": viewport["doc_height"],
+        "uids": sorted(o["uid"] for o in cands if o["in_view"]),
+    }, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    screen_version = "sv1-" + _hl.sha256(version_blob).hexdigest()[:16]
+
+    # 新鲜度只在**视口内**的对象之间比：屏外的东西本来就不算「变了」。
+    in_view_now = set(o["uid"] for o in cands if o["in_view"])
+    _screen_snap_put(hwnd, screen_version, in_view_now,
+                     {o["uid"]: o["label"] for o in cands})
+
+    texts = [{"id": "t%d" % k, "text": o["label"], "rect": o["rect"]}
+             for k, o in enumerate(objects) if o["label"]]
+
+    n_interactive = sum(1 for o in cands if o["interactive"] and o["in_view"])
+    hit_labels = " ".join(o["label"] for o in cands if o["in_view"])
+    channels = screen_channels(interactive_count=n_interactive,
+                               target_hit=bool(_screen_query_hit(query, hit_labels)))
+
+    out = {
+        "screen_version": screen_version,                 # ← 修正②
+        "window": {"hwnd": win.get("hwnd"), "title": win.get("title"),
+                   "cls": win.get("cls"), "pid": win.get("pid")},
+        "viewport": viewport,
+        "objects": objects,
+        "texts": texts,
+        "channels": channels,                              # ← 修正⑤
+        "omitted": {
+            "total": total_cands,                          # 真实候选总数（含屏外；视口过滤/top-N 之前）
+            "returned": len(objects),
+            "reason": ("attention_topn" if n_topn_dropped
+                       else ("viewport_filter" if n_view_dropped else "none")),
+            "top": top,
+            "必进节点": sum(1 for o in cands
+                            if o["interactive"] and o["in_view"] is not False),
+            "breakdown": {
+                "attention_topn": n_topn_dropped,
+                "viewport_filter": n_view_dropped,
+                "扫描预算丢弃（下界：树里还剩多少没人知道）": int(stats.get("因上限丢弃") or 0),
+                "扫过节点": int(stats.get("扫过节点") or 0),
+            },
+            "说明": "total 是本口径下的候选对象数；「扫描预算丢弃」>0 时，"
+                    "真实对象数**只可能更多**，这个数是下界。",
+        },
+        "打分口径": dict(SCREEN_SCORE_WEIGHTS),
+        "必进保证": "interactive 且看得见的节点永不裁掉；因此 returned 可以超过 top。",
+        "name_trust_口径": "low = 网页/Chromium 类窗口，控件 name 不可信（判不出来按 low）",
+        "uid_口径": "uid = struct_key@text_key；volatile 节点的 text_key 恒为 ~（不参与比对）",
+        "actions_口径": "按角色推；interactive=false 的节点 actions 为空（不承诺它能点）",
+    }
+
+    # since / watch：**只用于对照**。回显 + 差分，绝不回写进 screen_version。
+    if since or bool(args.get("watch")):
+        new = sorted(in_view_now - set(prev_uids)) if prev else []
+        gone = sorted(set(prev_uids) - in_view_now) if prev else []
+        out["delta"] = {
+            "since_回显": str(since) if since else "",
+            "since_是本进程签发的": bool(since) and str(since) == str(
+                (prev or {}).get("screen_version") or "__never__"),
+            "有基线": bool(prev),
+            "稳定": bool(prev and prev.get("screen_version") == screen_version),
+            "新增": new[:SCREEN_DELTA_LIST_CAP], "新增数": len(new),
+            "消失": gone[:SCREEN_DELTA_LIST_CAP], "消失数": len(gone),
+            "口径": "基线 = 本进程对该窗口的上一屏快照（%d 秒内）；换进程重新计基线"
+                    % int(SCREEN_SNAP_TTL_SEC),
+        }
+    return out
+
+
+def t_screen(args: dict) -> dict:
+    """F4 语义屏（窗B1）。走 A 级只读闸门，与 ctl_tree 同一套。"""
+    max_nodes = _screen_max_nodes(args)
+    max_depth = int(args.get("max_depth") or uia_tree.DEFAULT_MAX_DEPTH)
+    r = _uia_gate(args, "ctl_screen", lambda h: _screen_build(h, args),
+                  walk_override={"tool": "ctl_screen", "roles": ["all"],
+                                 "include_offscreen": True,
+                                 "max_nodes": max_nodes, "max_depth": max_depth})
+    if r.get("ok") and isinstance(r.get("data"), dict):
+        # ★ 照实说：语义屏**交出了对象**，但交的是裁剪+压缩后的 objects，
+        #   编号（id）不是 ctl_click 的 eid（口径不同，见 T1 窗2 的 D1）。
+        #   所以这里不许沿用「本次未采集节点」那句 —— 那会把「有对象但不可点」
+        #   说成「压根没采集」，agent 会由此得出错误的下一步。
+        if r["data"].get("capture_id"):
+            r["data"]["capture_指纹"] = (
+                "语义屏元素指纹（不是图像）；⚠ objects[].id **不是** ctl_click 的 eid，"
+                "本版不接动作侧 —— 要点请用 ctl_find 拿 eid")
+        if args.get("version") or args.get("screen_version"):
+            r["blind_spots"] = list(r.get("blind_spots") or []) + [
+                "screen_version 由服务端签发：你传的 version/screen_version 已被忽略；"
+                "只能通过 since 回传『你上次见过的』用于对照"]
+    return r
+
 def t_not_implemented(name: str):
     def f(args: dict) -> dict:
         return env(code=gate.CODE_NO_CTRL,
@@ -2546,6 +3138,7 @@ TOOLS = {
     "ctl_windows": t_windows,
     "ctl_shot": t_shot,
     "ctl_tree": t_tree,
+    "ctl_screen": t_screen,
     "ctl_find": t_find,
     "ctl_replay": t_replay,
     "ctl_authorize": t_authorize,

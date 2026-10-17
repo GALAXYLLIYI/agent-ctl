@@ -193,12 +193,12 @@
         "type": "object",
         "properties": {
           "verify_expect": {
-           "type": "string",
-           "description": "★可选，闭环验证。动作【前】声明期望谓词（分号分隔，与 legacy_tools/验动作.py 同一套：file-exists: / file-created: / file-changed: / file-contains:路径|子串 / dir-count-up: / proc-exists: / proc-gone: / window-exists: / window-gone: / any-change / no-change）。给了它，动作前后各拍一次快照并由**独立进程**判定；返回包会带 verdict（satisfied/unsatisfied/unknown/snapshots-incomparable）。★verdict 不是 satisfied 时**不会报 ok** —— 「动作发出去了」不等于「事情发生了」。★必须在动作前声明，事后补不算（否则无法归因）。"
+            "type": "string",
+            "description": "★可选，闭环验证。动作【前】声明期望谓词（分号分隔，与 legacy_tools/验动作.py 同一套：file-exists: / file-created: / file-changed: / file-contains:路径|子串 / dir-count-up: / proc-exists: / proc-gone: / window-exists: / window-gone: / any-change / no-change）。给了它，动作前后各拍一次快照并由**独立进程**判定；返回包会带 verdict（satisfied/unsatisfied/unknown/snapshots-incomparable）。★verdict 不是 satisfied 时**不会报 ok** —— 「动作发出去了」不等于「事情发生了」。★必须在动作前声明，事后补不算（否则无法归因）。"
           },
           "verify_watch": {
-           "type": "string",
-           "description": "★可选。快照要盯的路径（分号分隔）。省略则自动从 verify_expect 里的 file-* 谓词抽路径 —— 前后盯防范围必须一致，否则判定器会拒绝判定（判为 snapshots-incomparable）。"
+            "type": "string",
+            "description": "★可选。快照要盯的路径（分号分隔）。省略则自动从 verify_expect 里的 file-* 谓词抽路径 —— 前后盯防范围必须一致，否则判定器会拒绝判定（判为 snapshots-incomparable）。"
           },
           "hwnd": {
             "type": "integer"
@@ -392,6 +392,63 @@
       "returns": "{ 结果: { 句柄, 节点数, 截断, 耗时_ms, 树(紧凑文本) }, 窗口状态, capture_id }"
     },
     {
+      "name": "ctl_screen",
+      "title": "语义屏（裁剪后的这一屏）",
+      "description": "★ **一次调用给 agent 一段裁剪过、带身份、带新鲜度的屏幕**，而不是一整棵树。在 ctl_find 找不到、但你确信东西在屏幕上时用它。\n\n★ 返回 screen_version（**服务端签发**）+ window + viewport + objects[] + texts[] + channels + omitted。每个对象带 id / uid / label / role / rect / in_view / interactive / actions / source / source_confidence / name_trust / volatile / score。\n\n★ **uid = struct_key@text_key**（结构路径@规范化文本）。volatile=true 的节点（时间/计数类）**不参与 text_key 比对** —— 否则计时器每帧换字都会变成「新对象」，STALE 判据会被刷爆。\n\n★ **score 口径**（见返回的「打分口径」段，可解释可调）：0.35·看得见 + 0.25·可交互 + 0.20·query 命中 + 0.10·面积占比 + 0.10·相对上次是新面孔。\n★ **必进保证**：`interactive 且看得见` 的节点**永不裁掉**，哪怕超过 top —— 裁掉一个现在能点的按钮，agent 只会以为「界面上没有它」。因此 returned 可以 > top。\n\n★ **source_confidence 没有裸 confidence**：多来源证据**取 min**（有弱证据就别当强证据）。\n★ **name_trust**：网页/Chromium 类窗口一律 low —— 网页的无障碍 name 不可信（超星选择题字母与实际选项错位就是实例），别把它当权威文本。\n\n★ **channels 段**给出 must_vlm = not R1 and not R2 and not R3（R1=CDP 可达且 DOM 命中 / R2=UIA 可交互≥5 且目标命中 / R3=OCR 命中且 bbox 可当锚）。**本版 R1、R3 只判定不接线**，未接线一律报 false。\n\n★ **screen_version 只能回传、不能指定**：想对照上一次就把上次拿到的值放进 since。传 version / screen_version 会被忽略并在 blind_spots 里明说。\n\n★ ⚠ objects[].id **不是** ctl_click 的 eid（编号口径不同，见 T1 窗2）。**本版语义屏不接动作侧** —— 要点请用 ctl_find 拿 eid。\n\n★ 只读属性，不 Invoke、不点击。",
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false
+      },
+      "gate": "A",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "hwnd": {
+            "type": "integer"
+          },
+          "top": {
+            "type": "integer",
+            "default": 40,
+            "description": "注意力裁剪后最多返回多少个对象。⚠ **可被必进保证顶穿**：视口内可交互节点多于 top 时，returned 会大于 top，这是刻意的。"
+          },
+          "include_offscreen": {
+            "type": "boolean",
+            "default": false,
+            "description": "是否连视口外的节点一起回（它们照标 in_view=false）。默认只回这一屏看得见的。"
+          },
+          "watch": {
+            "type": "boolean",
+            "default": false,
+            "description": "是否附一段 delta（相对本进程上一次快照的 新增/消失/是否稳定）。首次调用没有基线，会如实说「有基线=false」。"
+          },
+          "query": {
+            "type": "string",
+            "description": "任务关键词（题干/要找的东西）。命中 label 的对象在打分里 +0.20，并参与 channels.R2 的「目标命中」判定。"
+          },
+          "since": {
+            "type": "string",
+            "description": "★ **只能回传**你上次拿到的 screen_version，用于对照。服务端**不会**用这个值拼出新版本 —— 版本永远是服务端签发的。"
+          },
+          "max_nodes": {
+            "type": "integer",
+            "default": 1200,
+            "description": "遍历预算。撞到上限时 omitted.breakdown 会如实报「扫描预算丢弃」，此时 omitted.total 只是**下界**。"
+          },
+          "max_depth": {
+            "type": "integer",
+            "default": 25
+          }
+        },
+        "required": [
+          "hwnd"
+        ],
+        "additionalProperties": false
+      },
+      "returns": "{ screen_version, window{hwnd,title,cls,pid}, viewport{client,scroll_y,doc_height,scroll_unknown}, objects[{id,uid,label,role,rect,in_view,interactive,actions,source,source_confidence,name_trust,volatile,score}], texts[{id,text,rect}], channels{R1_cdp,R2_uia,R3_ocr,must_vlm}, omitted{total,returned,reason,top,breakdown}, 打分口径, 必进保证, uid_口径, name_trust_口径, [delta], 窗口状态, capture_id }"
+    },
+    {
       "name": "ctl_find",
       "title": "按名字找元素",
       "description": "★ **先想清楚要什么就用这个，别拉全树。** 按文字/类型/自动化 id 搜 UI 元素，返回带 eid 和坐标的命中列表。实测本机 Edge：搜「订阅」扫 534 节点、命中 7、558 ms，输出只有 7 行 —— 而拉全树是几百行。",
@@ -447,12 +504,12 @@
         "type": "object",
         "properties": {
           "verify_expect": {
-           "type": "string",
-           "description": "★可选，闭环验证。动作【前】声明期望谓词（分号分隔，与 legacy_tools/验动作.py 同一套：file-exists: / file-created: / file-changed: / file-contains:路径|子串 / dir-count-up: / proc-exists: / proc-gone: / window-exists: / window-gone: / any-change / no-change）。给了它，动作前后各拍一次快照并由**独立进程**判定；返回包会带 verdict（satisfied/unsatisfied/unknown/snapshots-incomparable）。★verdict 不是 satisfied 时**不会报 ok** —— 「动作发出去了」不等于「事情发生了」。★必须在动作前声明，事后补不算（否则无法归因）。"
+            "type": "string",
+            "description": "★可选，闭环验证。动作【前】声明期望谓词（分号分隔，与 legacy_tools/验动作.py 同一套：file-exists: / file-created: / file-changed: / file-contains:路径|子串 / dir-count-up: / proc-exists: / proc-gone: / window-exists: / window-gone: / any-change / no-change）。给了它，动作前后各拍一次快照并由**独立进程**判定；返回包会带 verdict（satisfied/unsatisfied/unknown/snapshots-incomparable）。★verdict 不是 satisfied 时**不会报 ok** —— 「动作发出去了」不等于「事情发生了」。★必须在动作前声明，事后补不算（否则无法归因）。"
           },
           "verify_watch": {
-           "type": "string",
-           "description": "★可选。快照要盯的路径（分号分隔）。省略则自动从 verify_expect 里的 file-* 谓词抽路径 —— 前后盯防范围必须一致，否则判定器会拒绝判定（判为 snapshots-incomparable）。"
+            "type": "string",
+            "description": "★可选。快照要盯的路径（分号分隔）。省略则自动从 verify_expect 里的 file-* 谓词抽路径 —— 前后盯防范围必须一致，否则判定器会拒绝判定（判为 snapshots-incomparable）。"
           },
           "hwnd": {
             "type": "integer"
@@ -523,12 +580,12 @@
         "type": "object",
         "properties": {
           "verify_expect": {
-           "type": "string",
-           "description": "★可选，闭环验证。动作【前】声明期望谓词（分号分隔，与 legacy_tools/验动作.py 同一套：file-exists: / file-created: / file-changed: / file-contains:路径|子串 / dir-count-up: / proc-exists: / proc-gone: / window-exists: / window-gone: / any-change / no-change）。给了它，动作前后各拍一次快照并由**独立进程**判定；返回包会带 verdict（satisfied/unsatisfied/unknown/snapshots-incomparable）。★verdict 不是 satisfied 时**不会报 ok** —— 「动作发出去了」不等于「事情发生了」。★必须在动作前声明，事后补不算（否则无法归因）。"
+            "type": "string",
+            "description": "★可选，闭环验证。动作【前】声明期望谓词（分号分隔，与 legacy_tools/验动作.py 同一套：file-exists: / file-created: / file-changed: / file-contains:路径|子串 / dir-count-up: / proc-exists: / proc-gone: / window-exists: / window-gone: / any-change / no-change）。给了它，动作前后各拍一次快照并由**独立进程**判定；返回包会带 verdict（satisfied/unsatisfied/unknown/snapshots-incomparable）。★verdict 不是 satisfied 时**不会报 ok** —— 「动作发出去了」不等于「事情发生了」。★必须在动作前声明，事后补不算（否则无法归因）。"
           },
           "verify_watch": {
-           "type": "string",
-           "description": "★可选。快照要盯的路径（分号分隔）。省略则自动从 verify_expect 里的 file-* 谓词抽路径 —— 前后盯防范围必须一致，否则判定器会拒绝判定（判为 snapshots-incomparable）。"
+            "type": "string",
+            "description": "★可选。快照要盯的路径（分号分隔）。省略则自动从 verify_expect 里的 file-* 谓词抽路径 —— 前后盯防范围必须一致，否则判定器会拒绝判定（判为 snapshots-incomparable）。"
           },
           "hwnd": {
             "type": "integer"
@@ -573,12 +630,12 @@
         "type": "object",
         "properties": {
           "verify_expect": {
-           "type": "string",
-           "description": "★可选，闭环验证。动作【前】声明期望谓词（分号分隔，与 legacy_tools/验动作.py 同一套：file-exists: / file-created: / file-changed: / file-contains:路径|子串 / dir-count-up: / proc-exists: / proc-gone: / window-exists: / window-gone: / any-change / no-change）。给了它，动作前后各拍一次快照并由**独立进程**判定；返回包会带 verdict（satisfied/unsatisfied/unknown/snapshots-incomparable）。★verdict 不是 satisfied 时**不会报 ok** —— 「动作发出去了」不等于「事情发生了」。★必须在动作前声明，事后补不算（否则无法归因）。"
+            "type": "string",
+            "description": "★可选，闭环验证。动作【前】声明期望谓词（分号分隔，与 legacy_tools/验动作.py 同一套：file-exists: / file-created: / file-changed: / file-contains:路径|子串 / dir-count-up: / proc-exists: / proc-gone: / window-exists: / window-gone: / any-change / no-change）。给了它，动作前后各拍一次快照并由**独立进程**判定；返回包会带 verdict（satisfied/unsatisfied/unknown/snapshots-incomparable）。★verdict 不是 satisfied 时**不会报 ok** —— 「动作发出去了」不等于「事情发生了」。★必须在动作前声明，事后补不算（否则无法归因）。"
           },
           "verify_watch": {
-           "type": "string",
-           "description": "★可选。快照要盯的路径（分号分隔）。省略则自动从 verify_expect 里的 file-* 谓词抽路径 —— 前后盯防范围必须一致，否则判定器会拒绝判定（判为 snapshots-incomparable）。"
+            "type": "string",
+            "description": "★可选。快照要盯的路径（分号分隔）。省略则自动从 verify_expect 里的 file-* 谓词抽路径 —— 前后盯防范围必须一致，否则判定器会拒绝判定（判为 snapshots-incomparable）。"
           },
           "hwnd": {
             "type": "integer"
