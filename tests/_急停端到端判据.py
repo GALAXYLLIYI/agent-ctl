@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 r"""窗S 判据：**真急停 ⇒ 一个真实动作真的被拒**（端到端，不是看外观）
 
 ================================ 本单要什么 ================================
@@ -140,28 +140,72 @@ def pump(ms=120):
 
 
 def make_test_window(title="窗S_自起测试靶"):
-    """起**我们自己**的窗：一个 STATIC 容器 + 一个 BS_CHECKBOX。
+    """起靶窗 —— ★ 必须关在**另一个进程**里（DSH 2026-10-17 改）。
 
-    为什么用原生窗而不是 tkinter/Qt：本判据必须能在任何一台装了本项目的机器上跑，
-    不该先栽在「这台机器的 tcl 装没装全」上（窗S 实测 tkinter 直接起不来）。
+    为什么：自指保护（窗K/P0）按**身份**拦「把动作打给自己」。同一个进程自建自点，
+    会被正确地拒绝（code=3 白名单/敏感窗口）—— 那不是缺陷，是设计。
+    ⇒ 靶窗宿主 = `tests\\_wS_靶标进程.py` 子进程，本进程只拿它的句柄。
+
+    ★ 握手用**文件**不用管道：第一版用 stdout.readline，子进程一沉默父进程就永久挂住
+      （2026-10-17 实测挂了 3 分钟，只能强杀）。现在是「子进程写报告文件 → 父进程轮询」。
     """
-    hInst = u32.GetModuleHandleW(None)
-    top = u32.CreateWindowExW(0, "STATIC", title,
-                              WS_OVERLAPPEDWINDOW | WS_VISIBLE,
-                              300, 300, 360, 180, None, None, hInst, None)
-    if not top:
-        raise RuntimeError("CreateWindowExW(STATIC) 失败")
-    btn = u32.CreateWindowExW(0, "BUTTON", "靶：点我（窗S 自起）",
-                              WS_CHILD | WS_VISIBLE | BS_CHECKBOX,
-                              30, 45, 260, 30, top, None, hInst, None)
-    if not btn:
-        raise RuntimeError("CreateWindowExW(BUTTON) 失败")
-    u32.SetForegroundWindow(top)
-    pump(400)
-    return {"top": int(top), "btn": int(btn)}
+    import subprocess
+    import tempfile
+    here = os.path.dirname(os.path.abspath(__file__))
+    host = os.path.join(here, "_wS_靶标进程.py")
+    if not os.path.isfile(host):
+        raise RuntimeError("靶窗宿主不在：%s" % host)
+    box = tempfile.mkdtemp(prefix="agentctl_wS_target_")
+    report = os.path.join(box, "report.json")
+    stop = os.path.join(box, "stop")
+    proc = subprocess.Popen([sys.executable, "-X", "utf8", host, report, stop, "300"],
+                            stdin=subprocess.DEVNULL,
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL)
+    w = None
+    t0 = time.time()
+    while time.time() - t0 < 15:
+        if os.path.isfile(report):
+            try:
+                w = json.load(open(report, encoding="utf-8"))
+                break
+            except Exception:
+                pass
+        if proc.poll() is not None:
+            break
+        time.sleep(0.05)
+    if not w or "top" not in w:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        raise RuntimeError("靶窗宿主没报句柄：%r" % (w,))
+    w["proc"] = proc
+    w["stop"] = stop
+    w["title"] = title
+    pump(200)
+    return w
 
 
 def destroy_test_window(w):
+    p = (w or {}).get("proc")
+    if p is not None:
+        try:
+            open(w["stop"], "w").close()          # 先礼：让它自己关窗退出
+        except Exception:
+            pass
+        try:
+            p.wait(timeout=3)
+        except Exception:
+            try:
+                p.terminate()                     # 后兵
+                p.wait(timeout=3)
+            except Exception:
+                try:
+                    p.kill()
+                except Exception:
+                    pass
+        return
     try:
         u32.DestroyWindow(w["btn"])
         u32.DestroyWindow(w["top"])
@@ -222,7 +266,9 @@ def capture_hwnd(hwnd):
     mem.DeleteDC()
     src.DeleteDC()
     win32gui.ReleaseDC(int(hwnd), hdc)
-    bmp.DeleteObject()
+    # ★ 2026-10-17 修：PyCBitmap 没有 DeleteObject()（窗S 这条也没跑过）——
+    #   pywin32 的规矩是拿句柄交给 win32gui.DeleteObject，否则 GDI 句柄泄漏。
+    win32gui.DeleteObject(bmp.GetHandle())
     if bits is None:
         return None
     return bits, w, h
@@ -494,6 +540,15 @@ def main():
 
     section("2 · 对照组：**不拉**旗子 ⇒ 同一个动作必须成功"
             "（少了这半，前面的拒说明不了任何事）")
+    # ★ 2026-10-17（DSH 补）：实验组拉闸会**联动吊销租约**（by=brake），所以对照组
+    #   必须先重新拿一张租约 —— 否则"对照组失败"其实是"租约没了"，跟急停一点关系都没有。
+    #   （第 1 次真跑就红在这：对照组 code=10 租约已被吊销 by=brake。）
+    _lr = core.dispatch("ctl_lease", {"action": "acquire", "actor": ACTOR,
+                                      "scopes": ["B"], "ttl_sec": 120})
+    print("    （对照组前重新申请租约：%s）"
+          % ("ok" if (_lr or {}).get("ok") else ((_lr or {}).get("warning") or "")[:160]),
+          flush=True)
+    EVID["对照组前租约"] = _lr
     ctl_ok, ctl = assert_experiment_denied(False)
     EVID["对照组"] = ctl
     print("    对照组 ok=%s code=%s 像素差=%s 靶状态 %s→%s"

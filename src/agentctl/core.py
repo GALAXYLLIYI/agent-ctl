@@ -889,6 +889,14 @@ def _perceive_inproc(mode: str, hwnd, limit: int, why: str, look: bool = False):
     try:
         got = gate.require_any(gate.PERCEIVE, why or "ctl_perceive", count=False)
     except gate.GateDenied as e:
+        # ★ 2026-10-17（端到端判据抓出来的）：**刹车优先** —— 不许把"急停拉着"
+        #   说成"去拿通行证"。原来这里把 GateDenied 一律映射成 code=9 + 泛化文案，
+        #   于是真急停下的拒绝理由变成「未获授权 —— 请先 ctl_authorize 拿通行证」，
+        #   看的人会去反复申请授权，真正的原因（刹车已拉下）被吞掉了。
+        if gate.brake_engaged():
+            return env(code=gate.CODE_BRAKE, data={"raw": str(e)[:400]},
+                       warning="刹车已拉下（急停文件存在）—— 一切自动控制停止"
+                               "（原始拒绝：%s）" % str(e)[:200])
         return env(code=gate.CODE_UNAUTH, data={"raw": str(e)[:400]},
                    warning="未获授权 —— 请先 ctl_authorize 拿通行证")
     res = {}
@@ -965,6 +973,11 @@ def _perceive(args: dict, extra: list[str]) -> dict:
             return r
     rc, out, err = _legacy("perceive.py", extra + ["--why", args.get("why") or "ctl_perceive"])
     if rc == 9:
+        # ★ 2026-10-17：同 892 那条 —— 急停拉着时拒绝理由必须点名刹车，不许说成"去拿通行证"。
+        if gate.brake_engaged():
+            return env(code=gate.CODE_BRAKE, data={"raw": out.strip()[:400]},
+                       warning="刹车已拉下（急停文件存在）—— 一切自动控制停止"
+                               "（老脚本 rc=9：%s）" % out.strip()[:160])
         return env(code=gate.CODE_UNAUTH, data={"raw": out.strip()[:400]},
                    warning="未获授权 —— 请先 ctl_authorize 拿通行证")
     if rc == 127:
