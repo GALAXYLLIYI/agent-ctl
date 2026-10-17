@@ -257,6 +257,8 @@ class Fixture(object):
         #   quota：T2「剩余可选 N 项 · 第 7/20 步」那个数 —— 承载任务信息的伪 volatile。
         self.timer_tick = 0
         self.quota = 3
+        # ★ 窗F2：冷窗口期（0 = 不冷）—— 见 start_cold/shell_root。
+        self._cold_until = 0.0
 
     def set_title(self, t):
         self.title = t
@@ -286,7 +288,28 @@ class Fixture(object):
     def button_labels(self):
         return ["选项格%02d" % (i + 1) for i in range(N_BTN)]
 
+    def start_cold(self, ms=300):
+        """让采集器在接下来 ms 毫秒里只给**外壳**（模拟 Chromium 无障碍树懒启用）。"""
+        self._cold_until = time.time() + (float(ms) / 1000.0)
+
+    def is_cold(self):
+        return bool(getattr(self, "_cold_until", 0.0)) and time.time() < self._cold_until
+
+    def shell_root(self):
+        """冷启动外壳：**6 个节点、0 个可交互**（真页实测外壳约 18 个，量级相同）。"""
+        rid = [900, 1]
+        inner = []
+        for i in range(5):
+            rid[0] += 1
+            inner.append(_Ctrl("PaneControl", [20, 20 + 30 * i, 900, 46 + 30 * i],
+                               "外壳块%d" % (i + 1), rid=list(rid)))
+        return _Ctrl("PaneControl", [0, 0, 1280, 200], "外壳窗格",
+                     rid=[899, 1], children=inner)
+
     def root(self):
+        # ★ 窗F2：冷窗口期只给外壳（walk() 仍是现役真代码，换的只是 _lib 这个 I/O 边界）。
+        if self.is_cold():
+            return self.shell_root()
         inner = []
         rid = [100, 1]
         # (1) query 命中的**大**文本（面积占客户区 88%）：打分 0.638，压过小按钮的 0.601
@@ -588,6 +611,31 @@ def _screen_build(hwnd, args):                            # noqa: F811  故意�
     return out
 """
 
+# ===== 以下为 窗F2 注入段（跑红自证专用，勿入产品代码）=====================
+INJECT_WARMUP = """
+
+# ===== 以下为 窗F2 注入段（跑红自证专用，勿入产品代码）=====
+_real_ready_f2 = _screen_ready
+
+
+def _screen_ready(nodes, stats, *, elapsed_ms, prev_nodes=0):   # noqa: F811  故意覆盖真版
+    # 注入的缺陷：**没有就绪判定也没有暖机重试** —— 首扫拿到什么就交什么，
+    # 并且对外谎称已热（= 治「首扫不可信」之前的样子）。
+    return True, ["注入：永远当已热"]
+
+
+_real_build_f2 = _screen_build
+
+
+def _screen_build(hwnd, args):                            # noqa: F811  故意覆盖真版
+    _a = dict(args)
+    _a["warmup"] = False            # 连重试也不许发生
+    out = _real_build_f2(hwnd, _a)
+    out["screen_ready"] = True      # 且对外谎称已热
+    out["ready_证据"] = {"注入": "永远当已热"}
+    return out
+"""
+
 INJECT = {
     "guarantee": ("拿掉必进保证（纯按分取前 top）", "append", INJECT_GUARANTEE),
     "text_key": ("uid 里去掉 text_key（只剩结构路径）", "append", INJECT_TEXT_KEY),
@@ -605,6 +653,8 @@ INJECT = {
     "watch_shadow": ("退回只记第一条（重叠声明互蔽 ⇒ 误拒）", "append", INJECT_WATCH_SHADOW),
     "watch_width": ("宽度上限名存实亡（宽串放行）", "append", INJECT_WATCH_WIDTH),
     "watch_ctx": ("拒绝信封抠掉屏上下文（分不清校验失败与白屏）", "append", INJECT_WATCH_CTX),
+    # ★ 窗F2 的新注入：去掉就绪判定与暖机重试
+    "warmup": ("没有就绪判定也没有暖机（首扫直接当成品）", "append", INJECT_WARMUP),
 }
 
 
@@ -1669,6 +1719,134 @@ def check_watch_reject_ctx(core, fx):
     fx.quota = 3
     return "S6 拒绝信封带屏上下文", reds, ev
 
+def check_screen_ready(core, fx):
+    """S7 · 首扫不可信：暖机**有界**、screen_ready **如实**、**未热 ≠ 拒绝**。
+
+    器材：**时间门控的假采集器**（fx.start_cold(ms)）—— 接下来 ms 毫秒里 uia_tree.walk
+    只会拿到一棵**外壳**树（6 个节点、0 个可交互），ms 之后恢复全量。
+    ★ 只换了 I/O 边界（跟本判据一贯的 install_stubs 同款），**walk() 仍是现役真代码**。
+    """
+    reds = []
+    ev = {}
+    core._screen_forget(0)
+    fx.timer_tick = 0
+    fx.quota = 3
+
+    def 证据(sc):
+        return sc.get("ready_证据") or {}
+
+    def 盲点(r):
+        return " ".join(str(b) for b in (r.get("blind_spots") or []))
+
+    # ── ① 冷窗首扫：要么暖机过（重试≥1），要么 screen_ready=false 且 blind_spots 有提示
+    core._screen_forget(0)
+    fx.start_cold(300)
+    t0 = time.time()
+    r1, sc1 = call(core, top=500)
+    dt1 = (time.time() - t0) * 1000.0
+    e1 = 证据(sc1)
+    ev["①冷窗首扫"] = {"screen_ready": sc1.get("screen_ready"),
+                   "重试": e1.get("重试"), "等待毫秒": e1.get("等待毫秒"),
+                   "各次节点数": e1.get("各次节点数"), "耗时毫秒": int(dt1),
+                   "对象数": len(sc1.get("objects") or [])}
+    need(r1.get("ok") is True, "冷窗首扫没成功：%s" % (r1.get("warning") or "")[:120], reds)
+    need("screen_ready" in sc1, "返回里没有 screen_ready（就绪是这单的核心产出）", reds)
+    warmed = int(e1.get("重试") or 0) >= 1 and sc1.get("screen_ready") is True
+    notready = sc1.get("screen_ready") is False and "未热" in 盲点(r1)
+    need(warmed or notready,
+         "冷窗首扫既没暖机（重试=%r）也没标未热（screen_ready=%r, blind_spots=%s）"
+         % (e1.get("重试"), sc1.get("screen_ready"), 盲点(r1)[:80]), reds)
+    if warmed:
+        # ★ 取的是**节点数更多的那次**：第一趟（外壳）不该被交出去
+        tries = e1.get("各次节点数") or []
+        need(len(tries) >= 2 and int(tries[-1]) > int(tries[0]),
+             "暖机了却没取节点数更多的那次（各次=%r，交出的=%d）"
+             % (tries, int(e1.get("节点数") or 0)), reds)
+        need(int(e1.get("节点数") or 0) == int(tries[-1]),
+             "ready_证据.节点数 与各次最大值对不上：%r vs %r" % (e1.get("节点数"), tries), reds)
+        need(int(e1.get("等待毫秒") or 0) >= 300,
+             "暖机了却没等够间隔（等待 %r ms，派单要求 300~500ms）" % e1.get("等待毫秒"), reds)
+    need(int(e1.get("重试") or 0) <= int(e1.get("重试上限") or 2),
+         "重试次数越界：%r > 上限 %r" % (e1.get("重试"), e1.get("重试上限")), reds)
+
+    # ── ② 一直冷：两次后仍判未热 ⇒ screen_ready=false + 有界（不许无限等）
+    core._screen_forget(0)
+    fx.start_cold(8000)
+    t2 = time.time()
+    r2, sc2 = call(core, top=500)
+    dt2 = (time.time() - t2) * 1000.0
+    e2 = 证据(sc2)
+    ev["②一直冷"] = {"screen_ready": sc2.get("screen_ready"), "重试": e2.get("重试"),
+                  "等待毫秒": e2.get("等待毫秒"), "各次节点数": e2.get("各次节点数"),
+                  "判定": e2.get("判定"), "耗时毫秒": int(dt2)}
+    need(sc2.get("screen_ready") is False,
+         "连采 %r 趟外壳还报 screen_ready=true（外壳被当成热屏交出去了）" % e2.get("重试"), reds)
+    need(int(e2.get("重试") or 0) == 2,
+         "重试次数应恰好 2（有界的具体数值），实得 %r" % e2.get("重试"), reds)
+    need(dt2 < 5000, "暖机**有界**：这次调用花了 %d ms，超过 2×间隔+采集的合理上限" % int(dt2), reds)
+    need(e2.get("判定"), "screen_ready=false 却没给出判定依据（凭什么说没热）", reds)
+    bs2 = 盲点(r2)
+    ev["②的blind_spots"] = bs2[:260]
+    need("未热" in bs2, "未热时 blind_spots 没写「本屏可能未热」：%s" % bs2[:160], reds)
+    need("不等于" in bs2 or "不要当成" in bs2,
+         "blind_spots 没明写「不等于页面上没有」：%s" % bs2[:200], reds)
+    need("稍候" in bs2 or "再调" in bs2,
+         "blind_spots 没给可执行的下一步（稍候再调/交叉确认）：%s" % bs2[:200], reds)
+
+    # ── ③ ★ 未热 ≠ 拒绝：两种信封不许混
+    #   （a）未热 + 无声明 ⇒ ok=true/code=0，证据不足写在 screen_ready + blind_spots
+    need(r2.get("ok") is True and r2.get("code") in (0, None),
+         "未热被当成了错误（ok=%r code=%r）—— 它是**证据不足**，不是失败"
+         % (r2.get("ok"), r2.get("code")), reds)
+    need(bool(sc2.get("screen_ready")) is False and not bool(sc2.get("ready_证据") is None),
+         "未热那一趟没带 screen_ready/ready_证据", reds)
+    #   （b）同一块冷屏 + 声明一个匹配不到的串 ⇒ 那是**拒绝**（code=4 + watch_校验.unmatched）
+    r3, d3 = call(core, top=500, watch_text=["这串冷屏上不存在"])
+    ck3 = ((r3.get("data") or {}).get("watch_校验") or {})
+    ev["③冷屏+声明"] = {"ok": r3.get("ok"), "code": r3.get("code"),
+                   "unmatched": ck3.get("unmatched")}
+    need(r3.get("ok") is False and r3.get("code") not in (0, None),
+         "冷屏 + 声明匹配不到：应是**拒绝**（rc≠0），实得 ok=%r code=%r"
+         % (r3.get("ok"), r3.get("code")), reds)
+    need(ck3.get("unmatched") == ["这串冷屏上不存在"],
+         "拒绝信封没列出 unmatched：%r" % ck3.get("unmatched"), reds)
+    need(not d3, "拒绝时还回了 objects（会被当成声明已兑现）", reds)
+    need("校验失败" in 盲点(r3),
+         "拒绝信封的 blind_spots 没写「这是校验失败，不是屏幕空」：%s" % 盲点(r3)[:160], reds)
+
+    # ── ④ warmup=false ⇒ 不重试（省时间），但 screen_ready 仍**如实**判
+    core._screen_forget(0)
+    fx.start_cold(8000)
+    t4 = time.time()
+    r4, sc4 = call(core, top=500, warmup=False)
+    dt4 = (time.time() - t4) * 1000.0
+    e4 = 证据(sc4)
+    ev["④warmup=false"] = {"screen_ready": sc4.get("screen_ready"), "重试": e4.get("重试"),
+                     "等待毫秒": e4.get("等待毫秒"), "耗时毫秒": int(dt4)}
+    need(int(e4.get("重试") or 0) == 0,
+         "warmup=false 还重试了 %r 次（这参数就是用来关重试的）" % e4.get("重试"), reds)
+    need(int(e4.get("等待毫秒") or 0) == 0 and dt4 < 2000,
+         "warmup=false 却等了 %r ms（本次调用 %d ms）—— 没真关掉" % (e4.get("等待毫秒"), int(dt4)), reds)
+    need(sc4.get("screen_ready") is False,
+         "warmup=false 时 screen_ready 仍应**如实**判未热，实得 %r" % sc4.get("screen_ready"), reds)
+    need("未热" in 盲点(r4),
+         "warmup=false + 未热 ⇒ blind_spots 仍要点名（否则调用方无从知道这屏不可信）：%s"
+         % 盲点(r4)[:160], reds)
+
+    # ── ⑤ 暖回来之后：热屏就应当如实报 ready（别一路误报未热）
+    fx._cold_until = 0.0
+    core._screen_forget(0)
+    r5, sc5 = call(core, top=500)
+    ev["⑤热屏"] = {"screen_ready": sc5.get("screen_ready"), "节点数": 证据(sc5).get("节点数"),
+                 "重试": 证据(sc5).get("重试"), "与上次相比": 证据(sc5).get("与上次相比")}
+    need(sc5.get("screen_ready") is True,
+         "热屏反被报成未热（误报）—— 判据依据：%r" % 证据(sc5).get("判定"), reds)
+    need(int(证据(sc5).get("重试") or 0) == 0,
+         "热屏不该触发重试，实得 %r" % 证据(sc5).get("重试"), reds)
+    fx._cold_until = 0.0
+    return "S7 首扫就绪判定", reds, ev
+
+
 
 
 # ======================================================================
@@ -1821,7 +1999,8 @@ def main():
                      ("S3 未命中必拒", lambda: check_watch_unmatched(core, fx)),
                      ("S4 重叠声明全收", lambda: check_watch_shadow_allhit(core, fx)),
                      ("S5 声明宽度上限", lambda: check_watch_width(core, fx)),
-                     ("S6 拒绝信封带屏上下文", lambda: check_watch_reject_ctx(core, fx))):
+                     ("S6 拒绝信封带屏上下文", lambda: check_watch_reject_ctx(core, fx)),
+                     ("S7 首扫就绪判定", lambda: check_screen_ready(core, fx))):
         title, reds, ev = fn()
         res[title] = reds
         print("")
@@ -1904,7 +2083,11 @@ def main():
               "(10)给了 since 带回 since_echo/version_match/新 screen_version；"
               "S1声明过的 volatile 节点改了必 TEXT_CHANGED、进位恰好归因到它；"
               "S2未声明的倒计时不进位（uid 恒 skey@~，风暴没回流）；"
-              "S3声明匹配不到的东西必拒（rc≠0 + unmatched 逐条），挂起须显式。")
+              "S3声明匹配不到的东西必拒（rc≠0 + unmatched 逐条），挂起须显式；"
+              "S4重叠声明全收（一个节点可同时命中多条）；"
+              "S5单条声明命中节点数有上限，超宽拒绝；"
+              "S6拒绝信封带屏上下文（分得清校验失败与白屏）；"
+              "S7首扫就绪判定：暖机有界（最多2次）、screen_ready 如实、未热≠拒绝。")
     print("退出前 AgentCtlCtrlBorder* 窗 = %s（%s）" % count_border_windows())
     print("=" * 100)
     shutil.rmtree(tmp, ignore_errors=True)

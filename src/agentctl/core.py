@@ -3113,7 +3113,7 @@ def _screen_snap_get(hwnd: int):
     return rec
 
 
-def _screen_snap_put(hwnd: int, version: str, uids, meta, uids_all=None):
+def _screen_snap_put(hwnd: int, version: str, uids, meta, uids_all=None, nodes_n=0):
     now = time.time()
     if len(_SCREEN_SEEN) >= SCREEN_SNAP_MAX_HWNDS:
         for k in sorted(_SCREEN_SEEN, key=lambda x: _SCREEN_SEEN[x].get("t") or 0)[:8]:
@@ -3124,6 +3124,8 @@ def _screen_snap_put(hwnd: int, version: str, uids, meta, uids_all=None):
                                #   一个对象滑出视口再滑回来，不该被判成「不是上次那个」。
                                #   delta 仍只用视口内的 uids —— 屏外的东西本来就不算「变了」。
                                "uids_all": set(uids_all if uids_all is not None else uids),
+                               # ★ 这一趟**扫到多少节点** —— 就绪判定依据①的「上一次」基线
+                               "节点数": int(nodes_n or 0),
                                # ★ 每个 uid 的自述（label/role/rect）：uid_state 配对要用
                                "meta": dict(meta or {})}
 
@@ -3261,6 +3263,52 @@ def _screen_max_nodes(args: dict) -> int:
         n = SCREEN_DEFAULT_MAX_NODES
     return max(50, min(SCREEN_MAX_NODES_CEIL, n))
 
+# ══ 暖机与就绪判定（窗F2 · 框架 §⑲/§⑳）═══════════════════════════════════
+# 真页事实（不是推测）：Chromium 的无障碍树**懒启用** —— 开窗后 0.5 秒只拿到 18 个
+# 节点的外壳，3 秒才稳定到 49 个；首扫 matched=[]（声明一条都匹配不上），
+# 等 2 秒同一调用就中了。⇒ agent 第一次调 ctl_screen 很可能拿到**不完整的屏**就据此决策。
+# 本段治的就是这件事：**要么暖到再交，要么如实说「本屏可能未热」**。
+SCREEN_WARMUP_MAX_RETRY = 2      # 最多重试 2 次 ⇒ 一次调用最多采 3 趟（有界，不许无限等）
+SCREEN_WARMUP_GAP_MS = 400        # 重试间隔（派单要求 300~500ms，取中值；确定性优先于抖动）
+SCREEN_WARM_FAST_MS = 300         # 「采集太快」阈值：真树走 COM 不该这么快
+SCREEN_SHELL_MAX_NODES = 24       # 「节点极少」阈值（真页外壳实测 18 个）
+SCREEN_READY_SHRINK_RATIO = 0.6   # 节点数 < 上次的 60% ⇒ 疑心这趟是外壳
+
+
+def _screen_ready(nodes, stats, *, elapsed_ms, prev_nodes=0) -> tuple:
+    """这棵树**热了没有**。返回 (ready: bool, 依据: list[str])。
+
+    ★ 三条依据（写死、可调；任一命中即判未热）：
+      ① 节点数明显少于**上一次同窗口扫描**（< 60%）—— 树被抽走了（懒启动的典型形状）；
+      ② 可交互节点数 == 0 而窗口客户区非零 —— 一屏连个能点的都没有，多半只拿到外壳；
+      ③ 采集耗时很短却节点极少（外壳特征）—— 冷启动时树还没长出来，走一趟当然快。
+    ★ 全部三条都只在「客户区非零」时才有意义：零尺寸窗口的 0 节点不是「未热」。
+    ★ 宁可**保守报未热**：报「可能没热」的代价是多扫几趟；反过来（把外壳当热屏交出去）
+      的代价是 agent 据此断定「页面上没有这个东西」—— 那是事实层面的假绿。
+    """
+    nodes = list(nodes or [])
+    st = stats or {}
+    client = st.get("视口") or None
+    w = h = area = 0
+    if client and len(client) == 4:
+        w = max(0, int(client[2]) - int(client[0]))
+        h = max(0, int(client[3]) - int(client[1]))
+        area = w * h
+    n = len(nodes)
+    n_int = sum(1 for x in nodes
+                if str(x.get("type") or "") in uia_tree.INTERACTIVE_TYPES)
+    why = []
+    if area > 0:
+        if prev_nodes and n < prev_nodes * SCREEN_READY_SHRINK_RATIO:
+            why.append("节点数 %d 明显少于上一次的 %d（< %d%%）"
+                        % (n, int(prev_nodes), int(SCREEN_READY_SHRINK_RATIO * 100)))
+        if n_int == 0:
+            why.append("可交互节点 0 个，而客户区非零（%d×%d）—— 多半只拿到外壳" % (w, h))
+        if float(elapsed_ms) < SCREEN_WARM_FAST_MS and n <= SCREEN_SHELL_MAX_NODES:
+            why.append("采集只用了 %.0fms 却只有 %d 个节点（外壳特征）" % (elapsed_ms, n))
+    return (not why), why
+
+
 def _screen_build(hwnd: int, args: dict) -> dict:
     """语义屏本体。**只读**：不发点击、不 Invoke、不改窗口。"""
     import hashlib as _hl
@@ -3280,20 +3328,45 @@ def _screen_build(hwnd: int, args: dict) -> dict:
     # ★ name_trust 改成**建完候选之后再算**：offset-suspect 那档得看着一屏的选项才判得出来
     #   （见 _screen_offset_suspect）。
 
-    stats = {}
     max_nodes = _screen_max_nodes(args)
     max_depth = int(args.get("max_depth") or uia_tree.DEFAULT_MAX_DEPTH)
+    warm_raw = args.get("warmup")
+    warmup = True if warm_raw is None else bool(warm_raw)
+
     # ★ 固定口径：roles=("all",) + include_offscreen=True。
     #   语义屏要的是**完整结构骨架**（uid 的路径必须在全树上算才有意义），
     #   视口过滤与 top-N 放在**之后**做 —— 否则同一控件滚出屏幕就会换 uid。
-    nodes, _trunc = uia_tree.walk(hwnd, max_nodes=max_nodes, max_depth=max_depth,
-                                 roles=("all",), include_offscreen=True, stats=stats)
+    #
+    # ★ 窗F2：**有界**暖机。prev 要在走之前读 —— 就绪判定依据①拿它当「上一次」的基线。
+    prev = _screen_snap_get(hwnd)
+    prev_uids = (prev or {}).get("uids") or set()
+    prev_nodes = int((prev or {}).get("节点数") or 0)
+
+    best = None
+    attempts = 0
+    waited_ms = 0.0
+    n_tries_log = []
+    while True:
+        st = {}
+        t_walk = time.time()
+        walked, _trunc = uia_tree.walk(hwnd, max_nodes=max_nodes, max_depth=max_depth,
+                                      roles=("all",), include_offscreen=True, stats=st)
+        walk_ms = (time.time() - t_walk) * 1000.0
+        attempts += 1
+        n_tries_log.append(len(walked))
+        # ★ 取**节点数更多**的那次（平手取先到的：同一屏两趟一样就没必要换）。
+        if best is None or len(walked) > len(best["nodes"]):
+            best = {"nodes": walked, "stats": st, "ms": walk_ms}
+        ready, ready_why = _screen_ready(best["nodes"], best["stats"],
+                                         elapsed_ms=best["ms"], prev_nodes=prev_nodes)
+        if ready or not warmup or attempts > SCREEN_WARMUP_MAX_RETRY:
+            break
+        time.sleep(SCREEN_WARMUP_GAP_MS / 1000.0)
+        waited_ms += SCREEN_WARMUP_GAP_MS
+    nodes, stats, walk_ms = best["nodes"], best["stats"], best["ms"]
     client = stats.get("视口") or None
     scroll = stats.get("滚动") or {}
     struct_keys = _screen_struct_keys(nodes)
-
-    prev = _screen_snap_get(hwnd)
-    prev_uids = (prev or {}).get("uids") or set()
 
     base_area = 0
     if client and len(client) == 4:
@@ -3405,7 +3478,7 @@ def _screen_build(hwnd: int, args: dict) -> dict:
     _screen_snap_put(hwnd, screen_version, in_view_now,
                      {o["uid"]: {"label": o["label"], "role": o["role"],
                                   "rect": list(o["rect"])} for o in cands},
-                     uids_all=set(o["uid"] for o in cands))
+                     uids_all=set(o["uid"] for o in cands), nodes_n=len(nodes))
 
     texts = [{"id": "t%d" % k, "text": o["label"], "rect": o["rect"]}
              for k, o in enumerate(objects) if o["label"]]
@@ -3418,6 +3491,19 @@ def _screen_build(hwnd: int, args: dict) -> dict:
 
     out = {
         "screen_version": screen_version,                 # ← 修正②
+        # ★ 窗F2：本屏**热了没有**。false 是「证据不足」，**不是错误码** ——
+        #   信封照样 ok=true/code=0，调用方不许拿它当「页面上没有那个东西」。
+        "screen_ready": bool(ready),
+        "ready_证据": {"节点数": len(nodes),
+                     "与上次相比": ("%+d" % (len(nodes) - prev_nodes)) if prev_nodes
+                                   else "基线（本进程没有上一次扫描）",
+                     "等待毫秒": int(waited_ms), "重试": max(0, attempts - 1),
+                     "各次节点数": list(n_tries_log), "采集毫秒": int(walk_ms),
+                     "重试上限": SCREEN_WARMUP_MAX_RETRY, "间隔毫秒": SCREEN_WARMUP_GAP_MS,
+                     "判定": ready_why or ["节点数、可交互数、采集耗时三项都正常"],
+                     "口径": "依据① 节点数<上次60% / ②可交互=0而客户区非零 / ③采集过快而节点极少；"
+                           "任一命中即判未热。screen_ready=false ⇒ **证据不足**，不是"
+                           "「没有」—— 别据此断定页面上没有那个东西。"},
         "window": {"hwnd": win.get("hwnd"), "title": win.get("title"),
                    "cls": win.get("cls"), "pid": win.get("pid")},
         "viewport": viewport,
@@ -3578,6 +3664,18 @@ def t_screen(args: dict) -> dict:
         #   这一档只回 watch_校验，不回 objects —— 既然「要盯的文本」有一半不存在，
         #   这一屏的 objects 就不该被当成「声明已兑现」来用。
         res = r["data"].get("结果")
+        # ★ 窗F2：未热不是错误，是**证据不足** ⇒ 信封不动（仍 ok=true/code=0），
+        #   只在 blind_spots 里点名，并给一条可执行的下一步。
+        if isinstance(res, dict) and res.get("screen_ready") is False:
+            ev = res.get("ready_证据") or {}
+            r["blind_spots"] = list(r.get("blind_spots") or []) + [
+                "本屏可能未热（%s）—— **证据不足，不等于「页面上没有它」**："
+                "本屏扫到 %s 个节点，重试 %s 次仍未见完整树。Chromium 的无障碍树是懒启用的，"
+                "首扫常只拿到外壳。下一步：稍候 1~3 秒再调一次 ctl_screen（别改声明串），"
+                "或改用 ctl_shot/ctl_find 交叉确认；**在这一屏上没看到某个东西，"
+                "不要当成页面上没有**。"
+                % ("；".join(ev.get("判定") or []) or "依据不足",
+                   ev.get("节点数"), ev.get("重试"))]
         if isinstance(res, dict) and isinstance(res.get("watch_校验"), dict):
             # ★ 与拒绝路径对齐：成功时 watch_校验 也抬到 data 上（拒绝时那里没有「结果」段）。
             #   否则同一个字段两个位置，调用方得记住「成功去哪儿找、失败去哪儿找」。
