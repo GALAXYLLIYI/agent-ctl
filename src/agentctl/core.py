@@ -3073,6 +3073,23 @@ def _click_by_name(hwnd: int, name: str, args: dict):
             **({"_enabled_unknown": True} if en is None else {})}, None)
 
 
+
+# ── 帧过期（TTL）· 0 号证据链最小裁判的第一步（2026-10-18，三方商议 §㊾）──────
+# 为什么需要：screen_version 只能抓住「画面变了」；抓不住「你拿着一张十分钟前的
+# 旧帧去点」——画面没变、版本没变，但**你的判词会挂在一张早就不代表现在的帧上**。
+# ZCode 原话：证据必须绑 frame_id + TTL，否则判词对不上账。
+def _frame_ttl_ms(args: dict) -> int:
+    """帧有效期（毫秒）：调用方 > 环境变量 > 默认 30000。≤0 表示不判过期。"""
+    for raw in (args.get("frame_ttl_ms"), os.environ.get("AGENTCTL_FRAME_TTL_MS")):
+        if raw is None or str(raw).strip() == "":
+            continue
+        try:
+            return int(float(str(raw).strip()))
+        except Exception:
+            continue
+    return 30000
+
+
 def t_click(args: dict) -> dict:
     hwnd = int(args.get("hwnd") or 0)
     # ★ 窗G3：点前那一趟复核树的上下文（nodes/struct_keys/口径）。
@@ -3243,7 +3260,22 @@ def t_click(args: dict) -> dict:
                                "本次**零像素**，一个都没点。"
                                "重新 ctl_screen --hwnd %d 拿新的 screen_version（它就是新的 frame_id），"
                                "核对坐标还在不在原位再点。" % (fid, _cur, hwnd)))
-        args = {**args, "frame_id_校验": {"frame_id": fid, "当前 screen_version": _cur, "判定": "匹配"}}
+        # ★ 0 号最小裁判：版本对得上，还要判**帧龄**（画面没变 ≠ 这张帧还新鲜）
+        _rec = _SCREEN_SEEN.get(int(hwnd)) or {}
+        _t0 = float(_rec.get("t") or 0)
+        _age_ms = int(max(0.0, time.time() - _t0) * 1000) if _t0 else 0
+        _ttl = _frame_ttl_ms(args)
+        if _ttl > 0 and _t0 and _age_ms > _ttl:
+            return env(code=gate.CODE_STALE_CAPTURE,
+                       data={"frame_id_校验": {"frame_id": fid, "当前 screen_version": _cur,
+                                             "判定": "过期", "帧龄ms": _age_ms, "TTLms": _ttl}},
+                       warning=("frame_id=%s 虽然与当前 screen_version 一致，但这张帧已经 **%d ms** 了"
+                                "（TTL=%d ms）⇒ 判词不能挂在旧帧上，本次**零像素**。"
+                                "重新 ctl_screen --hwnd %d 拿新帧再点；"
+                                "确需放宽可传 frame_ttl_ms 或设 AGENTCTL_FRAME_TTL_MS。"
+                                % (fid, _age_ms, _ttl, hwnd)))
+        args = {**args, "frame_id_校验": {"frame_id": fid, "当前 screen_version": _cur,
+                                       "判定": "匹配", "帧龄ms": _age_ms, "TTLms": _ttl}}
 
     argv = ["click", "--hwnd", str(hwnd)]
     if args.get("name") and not args.get("_eid_hit"):
