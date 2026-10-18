@@ -515,6 +515,91 @@ class FakeCdp(object):
 CDP = FakeCdp()
 
 
+class FakeOcr(object):
+    '''**假 OCR**（窗G2）—— 只换 `agentctl.ocr` 模块上的四个 **I/O 叶子**：
+    `engine_ok` / `client_rect_screen` / `grab_client` / `_recognize`（外加 `dpi_scale` 这个查询）。
+
+    ★ **判据里绝不真跑 OCR**：真跑要截图 + 调 WinRT，慢、要桌面、还可能和用户抢前台。
+    ★ ★ **为什么不整个替换 `ocr_window`**：换掉它 = 把「守护线程 + join(max_ms) + 超时即返回」
+      那段真代码也换掉了 —— 超时断言就变成在测假件自己。踩过一次：假件睡 2 秒无视 max_ms，
+      判据红了但红得没意义。只换叶子，ocr_window 内部（上限、坐标换算、超时、原因）全是真代码。
+    ★ core 是 `from agentctl import ocr` 按模块取的，所以替换**模块属性**就够。
+    '''
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.engine_ok_flag = True
+        self.engine_raises = False
+        self.words = []
+        self.text = ''
+        self.geom = {'left': 0, 'top': 0, 'width': 1280, 'height': 900,
+                     'logical_width': 1280, 'logical_height': 900}
+        self.dpi_scale = 1.25
+        self.calls = []
+        self.slow_ms = 0          # >0 ⇒ ocr_window 会睡这么久（用来造超时）
+
+    def words_made(self, n, hit_text='', inside=True):
+        out = []
+        for i in range(n):
+            name = hit_text if (i == 0 and hit_text) else ('词%03d' % (i + 1))
+            # ★ 这些是**放大后位图里**的坐标（真实 OCR 给的就是这个尺度），
+            #   换算 ÷4 ×dpi_scale 由 ocr.py 真代码做，别在造数据时就替它算掉。
+            x, y, w, h = 400 + 120 * i, 800, 240, 96
+            if not inside:
+                x, y = 20000, 16000        # ÷4×1.25 后仍是 6250/5000 ⇒ 客户区 1280×900 之外
+            out.append({'t': name, 'x': x, 'y': y, 'w': w, 'h': h, 'conf': 0.55})
+        return out
+
+    def install(self, core):
+        try:
+            from agentctl import ocr as m
+        except Exception:
+            return None
+        me = self
+
+        def fake_engine_ok(lang='zh-Hans-CN', refresh=False):
+            if me.engine_raises:
+                raise RuntimeError('假 OCR：引擎导入炸了')
+            if not me.engine_ok_flag:
+                return {'ok': False, 'lang': '', 'langs': [],
+                        '原因': 'Windows.Media.Ocr 起不来（本机没装对应语言）', '上限': 10000}
+            return {'ok': True, 'lang': lang, 'langs': [lang], '原因': '', '上限': 10000}
+
+        def fake_geom(hwnd):
+            g = dict(me.geom)
+            g['ok'] = True            # 真函数会算这个标志，假件也得给 —— 不然 ocr.py 会说「拿不到客户区」
+            return g
+
+        def fake_grab(hwnd, box):
+            me.calls.append({'hwnd': int(hwnd), 'grab': True})
+            from PIL import Image
+            return Image.new('RGB', (int(box.get('logical_width') or 1280),
+                                     int(box.get('logical_height') or 900)), 'white')
+
+        def fake_recognize(png_bytes, lang):
+            me.calls.append({'recognize': True, 'bytes': len(png_bytes or b'')})
+            if me.slow_ms:
+                time.sleep(float(me.slow_ms) / 1000.0)
+            # ★ 200 条全给，让 ocr.py 真代码去裁、去换算、去报 omitted
+            return {'text': me.text or ' '.join(x['t'] for x in me.words),
+                    'words': [dict(x) for x in me.words]}
+
+        def fake_dpi(hwnd):
+            return float(me.dpi_scale)
+
+        m.engine_ok = fake_engine_ok
+        m.client_rect_screen = fake_geom
+        m.grab_client = fake_grab
+        m._recognize = fake_recognize
+        m.dpi_scale = fake_dpi
+        return m
+
+
+OCRSTUB = FakeOcr()
+
+
 def install_stubs(core, fx):
     """只换 I/O 边界。**walk / _in_view / _scroll_info / 全部 _screen_* 都是真代码。**"""
     uia = core.uia_tree
@@ -532,6 +617,10 @@ def install_stubs(core, fx):
     #   要测 CDP 就由 S8 显式摆假 cdp。
     CDP.reset()
     CDP.install(core)
+    # ★ 窗G2：同理，**默认把 OCR 钉成「引擎不可用」** —— 判据全程不截图、不调 WinRT。
+    OCRSTUB.reset()
+    OCRSTUB.engine_ok_flag = False
+    OCRSTUB.install(core)
 
 
 def call(core, **kw):
@@ -819,6 +908,72 @@ def _screen_min_probes(*, warmup, is_web, first_scan):   # noqa: F811  故意覆
     return 2 if (warmup and first_scan) else 1
 """
 
+# ===== 以下为 窗G2 注入段（跑红自证专用，勿入产品代码）=====================
+INJECT_OCR_WIRED = '''
+
+# ===== 以下为 窗G2 注入段（跑红自证专用，勿入产品代码）=====
+_real_channels_g2 = screen_channels
+
+
+def screen_channels(*, interactive_count, target_hit, name_trust='high',   # noqa: F811
+                    cdp_wired=False, cdp_reachable=False, dom_hit=False,
+                    ocr_wired=False, ocr_hit=False, ocr_bbox_usable=False, **kw):
+    # 注入的缺陷：**R3 根本没接线**（回到 G2 之前的样子）—— OCR 三个要素一律不接，
+    # 于是像素里明明认出了字，R3 也不成立，must_vlm 照样为 true（白白多叫一次 VLM）。
+    return _real_channels_g2(interactive_count=interactive_count,
+                             target_hit=target_hit, name_trust=name_trust,
+                             cdp_wired=cdp_wired, cdp_reachable=cdp_reachable,
+                             dom_hit=dom_hit)
+'''
+
+INJECT_OCR_CAP = '''
+
+# ===== 以下为 窗G2 注入段（跑红自证专用，勿入产品代码）=====
+_real_ocr_g2 = _screen_ocr
+
+
+def _screen_ocr(hwnd, *, query='', rect=None, lang='zh-Hans-CN', max_ms=1500):   # noqa: F811
+    # 注入的缺陷：**去掉 80 词上限** —— 一屏几百个词全塞回信封，
+    # token 被一条屏吃光，agent 反而更看不见目标。
+    out = dict(_real_ocr_g2(hwnd, query=query, rect=rect, lang=lang, max_ms=max_ms))
+    res = dict(out.get('res') or {})
+    res['words'] = list(res.get('words') or [])
+    res['omitted'] = {'total': len(res['words']), 'returned': len(res['words']), 'cap': None}
+    out['res'] = res
+    return out
+'''
+
+INJECT_OCR_BBOX = '''
+
+# ===== 以下为 窗G2 注入段（跑红自证专用，勿入产品代码）=====
+_real_ocr_g2b = _screen_ocr
+
+
+def _screen_ocr(hwnd, *, query='', rect=None, lang='zh-Hans-CN', max_ms=1500):   # noqa: F811
+    # 注入的缺陷：**越界的框也算 usable** —— OCR 的框飘了也照当锚，
+    # 顺着它去点就会点到别的地方去。
+    out = dict(_real_ocr_g2b(hwnd, query=query, rect=rect, lang=lang, max_ms=max_ms))
+    out['usable'] = bool(out.get('hit'))
+    return out
+'''
+
+INJECT_OCR_TIMEOUT = '''
+
+# ===== 以下为 窗G2 注入段（跑红自证专用，勿入产品代码）=====
+_real_ocr_g2t = _screen_ocr
+
+
+def _screen_ocr(hwnd, *, query='', rect=None, lang='zh-Hans-CN', max_ms=1500):   # noqa: F811
+    # 注入的缺陷：**超时不认** —— 没跑完也照样当「引擎可用」，
+    # 拿半截 words 当完整证据交出去（比明确失败坏得多）。
+    out = dict(_real_ocr_g2t(hwnd, query=query, rect=rect, lang=lang, max_ms=max_ms))
+    if not out.get('ok') and '超时' in str(out.get('原因') or ''):
+        out['wired'] = True
+        out['hit'] = bool(query)
+        out['usable'] = bool(query)
+    return out
+'''
+
 # ===== 以下为 窗G1 注入段（跑红自证专用，勿入产品代码）=====================
 INJECT_CDP_WIRED = '''
 
@@ -827,11 +982,16 @@ _real_channels_g1 = screen_channels
 
 
 def screen_channels(*, interactive_count, target_hit, name_trust='high',   # noqa: F811
-                    cdp_wired=False, cdp_reachable=False, dom_hit=False, **kw):
+                    cdp_wired=False, cdp_reachable=False, dom_hit=False,
+                    ocr_wired=False, ocr_hit=False, ocr_bbox_usable=False, **kw):
     # 注入的缺陷：**R1 根本没接线**（回到 G1 之前的样子）—— CDP 三要素一律不接，
     # 于是 DOM 明明命中了，R1 也不成立，must_vlm 照样为 true（白白多叫一次 VLM）。
+    # ★ ocr_* **原样透传**：这个注入只该拆 CDP 那条通道。顺手把 OCR 也吞掉的话，
+    #   红线会从 S8 溢到 S9（实测踩过：3 条 → 6 条、两个组都红），注入的爆炸半径就废了。
     return _real_channels_g1(interactive_count=interactive_count,
-                             target_hit=target_hit, name_trust=name_trust)
+                             target_hit=target_hit, name_trust=name_trust,
+                             ocr_wired=ocr_wired, ocr_hit=ocr_hit,
+                             ocr_bbox_usable=ocr_bbox_usable)
 '''
 
 INJECT_CDP_CAP = '''
@@ -886,6 +1046,11 @@ def _cdp_version(port=CDP_DEFAULT_PORT):              # noqa: F811  故意覆盖
 
 
 INJECT = {
+    # ★ 窗G2 的四个新注入（R3 那条通道的四根骨头各断一次）
+    "ocr_wired": ("R3 根本没接线（OCR 三要素一律不接）", "append", INJECT_OCR_WIRED),
+    "ocr_cap": ("ocr 段去掉 80 词上限", "append", INJECT_OCR_CAP),
+    "ocr_bbox": ("bbox 越界也算可用（会点偏）", "append", INJECT_OCR_BBOX),
+    "ocr_timeout": ("OCR 超时当没事（拿半截结果当证据）", "append", INJECT_OCR_TIMEOUT),
     "guarantee": ("拿掉必进保证（纯按分取前 top）", "append", INJECT_GUARANTEE),
     "text_key": ("uid 里去掉 text_key（只剩结构路径）", "append", INJECT_TEXT_KEY),
     "version": ("screen_version 钉死不变", "append", INJECT_VERSION),
@@ -1976,6 +2141,162 @@ def check_watch_reject_ctx(core, fx):
     return "S6 拒绝信封带屏上下文", reds, ev
 
 DOM_ONLY_QUERY = '只在DOM里出现的那个词'
+OCR_ONLY_QUERY = '只画在像素里的那个词'
+
+
+def check_ocr_r3(core, fx):
+    '''S9 · OCR 通道（R3）：命中才算、不可用就如实说、words 有上限、bbox 越界就不算锚、超时不挂。
+
+    器材：**假 OCR**（OCRSTUB）—— 只换 `agentctl.ocr` 模块上的两个函数，**绝不真跑 OCR**。
+    '''
+    reds = []
+    ev = {}
+
+    def 盲点(r):
+        return ' '.join(str(b) for b in (r.get('blind_spots') or []))
+
+    # ── ① 引擎可用 + 像素里认出了 + 框能当锚 ⇒ R3 真、must_vlm 变 false
+    OCRSTUB.reset()
+    OCRSTUB.engine_ok_flag = True
+    OCRSTUB.words = OCRSTUB.words_made(12, hit_text=OCR_ONLY_QUERY)
+    OCRSTUB.text = OCR_ONLY_QUERY + ' 与其它字'
+    fx.cls = 'TkTopLevel'
+    core._screen_forget(0)
+    r1, sc1 = call(core, query=OCR_ONLY_QUERY, top=500, ocr=True)
+    ch1 = sc1.get('channels') or {}
+    c3 = ch1.get('R3_ocr') or {}
+    oc1 = sc1.get('ocr') or {}
+    ev['①命中'] = {'R3_ocr': c3, 'R2_uia_hit': (ch1.get('R2_uia') or {}).get('hit'),
+                 'must_vlm': ch1.get('must_vlm'),
+                 'ocr段': {k: oc1.get(k) for k in ('wired', 'hit', 'usable', '跑了', 'dpi_scale', 'ms')}}
+    need(oc1.get('跑了') is True, 'OCR 压根没跑（跑了=%r）—— ocr=True 是强制' % oc1.get('跑了'), reds)
+    need(oc1.get('wired') is True and oc1.get('hit') is True,
+         '像素里明明有「%s」，OCR 却报没认出来：%r' % (OCR_ONLY_QUERY, oc1), reds)
+    need(c3.get('wired') is True and c3.get('hit') is True, 'R3 三要素没成立：%r' % c3, reds)
+    need(ch1.get('must_vlm') is False,
+         'R3 已成立，must_vlm 必须是 false（像素已经给出真相了）', reds)
+    need((ch1.get('R2_uia') or {}).get('hit') is False,
+         '本该 UIA 不命中（R2=%r），否则「must_vlm 变 false」分不清是谁干的'
+         % (ch1.get('R2_uia') or {}).get('hit'), reds)
+
+    # ── ①b CDP 与 OCR **同时在**：R1/R2/R3 三条都要报出来，谁也不许覆盖谁
+    CDP.reset()
+    CDP.up = True
+    CDP.dom_objects = CDP.make_dom(12, hit_text=DOM_ONLY_QUERY)
+    r1b, sc1b = call(core, query=OCR_ONLY_QUERY, top=500, ocr=True)
+    ch1b = sc1b.get('channels') or {}
+    ev['①b三通道并存'] = {k: (ch1b.get(k) or {}).get('hit') for k in ('R1_cdp', 'R2_uia', 'R3_ocr')}
+    need((ch1b.get('R3_ocr') or {}).get('hit') is True,
+         'CDP 在场时 R3 被吞了：%r' % ch1b.get('R3_ocr'), reds)
+
+    # ── ①c **中文逐字切开**也必须命中（2026-10-18 DSH 真页实测锁）
+    #   Windows OCR 把「剩余可选」认成「剩 余 可 选」（每字之间一个空格）；
+    #   用普通规范化比较时**多字中文查询永远不中**（实测：`"剩余" in text` 为 False、`"剩" in text` 为 True）。
+    #   这条锁的就是 `_ocr_tight`（吃掉 CJK 间空白；**拉丁词之间的空格不动**）。
+    OCRSTUB.reset()
+    OCRSTUB.engine_ok_flag = True
+    OCRSTUB.text = '119 ： 56 剩 余 可 选 3 项 · 第 7 / 20 步'
+    OCRSTUB.words = OCRSTUB.words_made(8, hit_text='剩')
+    core._screen_forget(0)
+    r1c, sc1c = call(core, query='剩余可选', top=500, ocr=True)
+    oc1c = sc1c.get('ocr') or {}
+    ev['①c逐字切开'] = {k: oc1c.get(k) for k in ('wired', 'hit', 'usable')}
+    need(oc1c.get('hit') is True,
+         'OCR 文本是「剩 余 可 选」而查询是「剩余可选」⇒ 必须命中（CJK 间空白要吃掉）；实得 %r'
+         % (oc1c,), reds)
+    need(core._ocr_tight('not allowed') == 'not allowed',
+         '拉丁词之间的空格不许被吃掉（否则 not allowed 会粘成 notallowed）', reds)
+    need(ch1b.get('R1_cdp') is not None and ch1b.get('R2_uia') is not None,
+         '三通道并存时 channels 少了别的通道：%r' % list(ch1b), reds)
+    need('hit' in (ch1b.get('R1_cdp') or {}) and 'hit' in (ch1b.get('R2_uia') or {}),
+         'R1/R2 的判定字段被 OCR 那次重算弄丢了', reds)
+
+    # ── ② 引擎不可用 ⇒ R3 false、**不假装**，blind_spots 说清楚
+    OCRSTUB.reset()
+    OCRSTUB.engine_ok_flag = False
+    core._screen_forget(0)
+    r2, sc2 = call(core, query=OCR_ONLY_QUERY, top=500, ocr=True)
+    ch2 = sc2.get('channels') or {}
+    oc2 = sc2.get('ocr') or {}
+    bs2 = 盲点(r2)
+    ev['②引擎不可用'] = {'R3_ocr': ch2.get('R3_ocr'),
+                       'ocr段': {k: oc2.get(k) for k in ('wired', 'hit', 'usable', '原因')},
+                       'blind_spots': bs2[:240]}
+    need(oc2.get('wired') is False and (ch2.get('R3_ocr') or {}).get('hit') is False,
+         '引擎不可用却报 R3 有线：%r / %r' % (oc2, ch2.get('R3_ocr')), reds)
+    need(r2.get('ok') is True,
+         'OCR 不可用把整次调用变成失败了（ok=%r）—— 通道不可用是**证据不足**，不是错误' % r2.get('ok'), reds)
+    need('OCR' in bs2, 'OCR 没接上却没有 blind_spots 说明：%s' % bs2[:200], reds)
+    need('不等于' in bs2 or '没有' in bs2,
+         'blind_spots 没把「R3 不成立 ≠ 页面上没有」说透：%s' % bs2[:200], reds)
+
+    # ── ③ words ≤80、omitted.total 诚实、dpi_scale 必须在
+    OCRSTUB.reset()
+    OCRSTUB.engine_ok_flag = True
+    OCRSTUB.words = OCRSTUB.words_made(200, hit_text=OCR_ONLY_QUERY)
+    core._screen_forget(0)
+    r3, sc3 = call(core, query=OCR_ONLY_QUERY, top=500, ocr=True)
+    oc3 = sc3.get('ocr') or {}
+    wds3 = oc3.get('words') or []
+    om3 = oc3.get('omitted') or {}
+    ev['③上限'] = {'假 OCR 给了': len(OCRSTUB.words), '回了': len(wds3),
+                 'omitted': om3, 'dpi_scale': oc3.get('dpi_scale')}
+    need(len(wds3) <= 80, 'ocr 段回了 %d 个词（上限 80）' % len(wds3), reds)
+    need(int(om3.get('total') or 0) == len(OCRSTUB.words),
+         'omitted.total 不诚实：引擎给了 %d，报了 %r' % (len(OCRSTUB.words), om3.get('total')), reds)
+    need(oc3.get('dpi_scale') not in (None, ''),
+         'dpi_scale 不在返回里 —— 坐标是按什么换算的？调用方没法自己核', reds)
+    need((sc3.get('channels') or {}).get('R3_ocr', {}).get('dpi_scale') is not None,
+         'channels.R3_ocr 里没有 dpi_scale', reds)
+
+    # ── ④ bbox 落在客户区外 ⇒ usable=false（框不能当锚，点下去会点到别处）
+    OCRSTUB.reset()
+    OCRSTUB.engine_ok_flag = True
+    OCRSTUB.words = OCRSTUB.words_made(12, hit_text=OCR_ONLY_QUERY, inside=False)
+    core._screen_forget(0)
+    r4, sc4 = call(core, query=OCR_ONLY_QUERY, top=500, ocr=True)
+    ch4 = sc4.get('channels') or {}
+    oc4 = sc4.get('ocr') or {}
+    ev['④bbox越界'] = {'命中': oc4.get('hit'), 'usable': oc4.get('usable'),
+                     'R3': ch4.get('R3_ocr'), '原因': oc4.get('原因')}
+    need(oc4.get('hit') is True, '这组造的是「认出了但框越界」，hit 本该为 true：%r' % oc4, reds)
+    need(oc4.get('usable') is False,
+         '框落在客户区 1280×900 之外（x=5000,y=4000）却还 usable —— 那会点偏', reds)
+    need((ch4.get('R3_ocr') or {}).get('hit') is False,
+         'usable=false 时 R3 不该成立：%r' % ch4.get('R3_ocr'), reds)
+    need((ch4.get('R3_ocr') or {}).get('bbox_usable') is False,
+         'R3_ocr.bbox_usable 没有如实报 false：%r' % ch4.get('R3_ocr'), reds)
+
+    # ── ⑤ 超时 ⇒ ok=false + 原因，**不许挂**
+    OCRSTUB.reset()
+    OCRSTUB.engine_ok_flag = True
+    OCRSTUB.slow_ms = 2000
+    OCRSTUB.words = OCRSTUB.words_made(12, hit_text=OCR_ONLY_QUERY)
+    core._screen_forget(0)
+    t5 = time.time()
+    r5, sc5 = call(core, query=OCR_ONLY_QUERY, top=500, ocr=True, ocr_max_ms=100)
+    dt5 = (time.time() - t5) * 1000.0
+    oc5 = sc5.get('ocr') or {}
+    ev['⑤超时'] = {'ms预算': 100, '实测调用毫秒': int(dt5),
+                 'ocr段': {k: oc5.get(k) for k in ('wired', 'hit', '原因', 'ms')},
+                 'R3': (sc5.get('channels') or {}).get('R3_ocr')}
+    need(dt5 < 1500, 'max_ms=100 却花了 %d ms —— 超时预算没生效（**不许挂**）' % int(dt5), reds)
+    need(oc5.get('wired') is False,
+         '超时了却还报 wired=true（拿没跑完的结果当证据）：%r' % oc5, reds)
+    need('超时' in str(oc5.get('原因') or ''), '超时时没给原因：%r' % oc5.get('原因'), reds)
+    need(not (oc5.get('words') or []), '超时了还回了一截 words —— 那是半截证据，比没有更坏', reds)
+    need((sc5.get('channels') or {}).get('R3_ocr', {}).get('hit') is False,
+         '超时却报 R3 命中：%r' % (sc5.get('channels') or {}).get('R3_ocr'), reds)
+
+    # 收尾：把假 OCR 收回「引擎不可用」，别影响后面的组
+    OCRSTUB.reset()
+    OCRSTUB.engine_ok_flag = False
+    OCRSTUB.install(core)
+    CDP.reset()
+    CDP.install(core)
+    fx.cls = 'TkTopLevel'
+    core._screen_forget(0)
+    return 'S9 OCR 接线与 R3', reds, ev
 
 
 def check_cdp_r1(core, fx):
@@ -2484,7 +2805,8 @@ def main():
                      ("S5 声明宽度上限", lambda: check_watch_width(core, fx)),
                      ("S6 拒绝信封带屏上下文", lambda: check_watch_reject_ctx(core, fx)),
                      ("S7 首扫就绪判定", lambda: check_screen_ready(core, fx)),
-                     ("S8 CDP 接线与 R1", lambda: check_cdp_r1(core, fx))):
+                     ("S8 CDP 接线与 R1", lambda: check_cdp_r1(core, fx)),
+                     ("S9 OCR 接线与 R3", lambda: check_ocr_r3(core, fx))):
         title, reds, ev = fn()
         res[title] = reds
         print("")
@@ -2577,7 +2899,11 @@ def main():
               "⑧非网页类首扫不加延迟（重试=0）；⑨warmup=false 不探第二次但就绪仍如实；"
               "S8CDP接线：DOM命中⇒R1真且must_vlm=false（R2不成立时单独扛）、"
               "CDP不可达⇒如实false并写进blind_spots（不等于「页面没有」）、"
-              "dom段≤60条且逐条带role/name/rect/selector、端口被别人占⇒明确拒绝不抢。")
+              "dom段≤60条且逐条带role/name/rect/selector、端口被别人占⇒明确拒绝不抢；"
+              "S9OCR接线：像素里认出且框能当锚⇒R3真且must_vlm=false（R2不成立时单独扛）、"
+              "引擎不可用/超时⇒如实false并写进blind_spots（不等于「页面没有」）、"
+              "words≤80且omitted.total诚实、dpi_scale在、bbox越界⇒usable=false、"
+              "三通道并存时R1/R2/R3各自都报得出来。")
     print("退出前 AgentCtlCtrlBorder* 窗 = %s（%s）" % count_border_windows())
     print("=" * 100)
     shutil.rmtree(tmp, ignore_errors=True)

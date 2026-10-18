@@ -2721,6 +2721,113 @@ def _cdp_probe(*, port: int = CDP_DEFAULT_PORT, url_contains: str = "",
 
 
 # ── 独立实例：起 / 关（不碰用户现有的浏览器）──────────────────────────────
+# ── 窗G2 · OCR（R3）接线 ────────────────────────────────────────────────────
+def _ocr_module():
+    """拿 agentctl.ocr。**拿不到就说拿不到**（没装 / 导入炸了），不许假装有这条通道。
+
+    ★ 判据就靠这个模块对象 monkeypatch（ocr_window / engine_ok），所以这里**按模块取**、
+      不在 core 里另抄一份实现。
+    """
+    try:
+        from agentctl import ocr as m
+        return m
+    except Exception:
+        return None
+
+
+def _ocr_norm(s) -> str:
+    return _screen_norm_text(str(s or ""))
+
+
+# ★ 2026-10-18（DSH 真页实测补）：Windows OCR 把中文**逐字切开并加空格**
+#   （"剩余可选" → "剩 余 可 选"）⇒ 直接用 `q in blob` 判**多字中文永远不中**。
+#   实测证据：真 Edge 窗口 ocr_window 返回的 text 是 "119 ： 56 剩 余 可 选 3 项 · 第 7 / 20 步"，
+#   而 `"剩余" in text` 为 False、`"剩" in text` 为 True。
+#   这里把「CJK 之间的空白」吃掉再比；**拉丁词之间不动**（否则 "not allowed" 会粘成 "notallowed"）。
+_CJK_RANGE = "\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff"
+
+
+def _ocr_tight(s) -> str:
+    t = _ocr_norm(s)
+    return re.sub(r"(?<=[%s])\s+(?=[%s])" % (_CJK_RANGE, _CJK_RANGE), "", t)
+
+
+def _screen_ocr(hwnd: int, *, query: str = "", rect=None,
+                 lang: str = "zh-Hans-CN", max_ms: int = 1500) -> dict:
+    """R3 三要素的事实来源：wired（引擎起得来）/ hit（像素里认出了目标）/ usable（框能当锚）。
+
+    ★ **命中判定必须按整段文本，不能只按单个 word**：实测 Windows OCR 会把中文逐字切开
+      （「剩余 00:42」认成 剩|余|00|：|42），只比单词的话多字关键词永远命中不了。
+    """
+    out = {"wired": False, "hit": False, "usable": False, "ok": False,
+           "命中": [], "原因": "", "res": None, "端口无关": True}
+    m = _ocr_module()
+    if m is None:
+        out["原因"] = "agentctl.ocr 导入失败 —— 本机没有可用的 OCR 模块"
+        return out
+    try:
+        eng = m.engine_ok(lang)
+    except Exception as e:
+        eng = {"ok": False, "原因": "%s: %s" % (type(e).__name__, e)}
+    out["wired"] = bool(eng.get("ok"))
+    out["引擎"] = str(eng.get("lang") or "")
+    out["可用语言"] = list(eng.get("langs") or [])
+    if not out["wired"]:
+        out["原因"] = str(eng.get("原因") or "OCR 引擎不可用")
+        return out
+    try:
+        res = m.ocr_window(int(hwnd), rect=rect, lang=lang, max_ms=int(max_ms))
+    except Exception as e:
+        out["原因"] = "ocr_window 抛异常：%s: %s" % (type(e).__name__, e)
+        return out
+    out["res"] = res
+    out["ok"] = bool(res.get("ok"))
+    if not out["ok"]:
+        # ★ 超时/引擎抽风都走这一条：**如实报 false + 原因**，绝不返回半截 words 当命中。
+        #   wired 也一起落 false —— 它指的是「**这一屏**拿到了像素这条证据」，
+        #   不是「引擎进程在不在」。引擎本身起没起得来另看 `引擎`/`可用语言` 两个字段。
+        out["wired"] = False
+        out["原因"] = str(res.get("原因") or "OCR 没跑成")
+        return out
+    words = res.get("words") or []
+    # ★ 用 `_ocr_tight`（吃掉 CJK 间空白）而不是 `_ocr_norm`：Windows OCR 把中文逐字切开，
+    #   用 norm 时多字中文查询永远不中（真页实测：query="剩余" 命中 False，而逐字都在）。
+    q = _ocr_tight(query)
+    blob = _ocr_tight(" ".join([str(res.get("text") or "")]
+                               + [str(x.get("t") or "") for x in words]))
+    if q and q in blob:
+        out["hit"] = True
+    hits = [x for x in words if q and _ocr_norm(x.get("t")) and _ocr_norm(x.get("t")) in q]
+    if not hits:
+        hits = [x for x in words if q and q in _ocr_norm(x.get("t"))]
+    out["命中"] = hits[:8]
+    # usable：框落在客户区内 **且** 宽高都大于 OCR_MIN_BOX_PX（太小当锚会点偏）
+    geom = res.get("客户区") or {}
+    cw = int(geom.get("width") or 0)
+    ch = int(geom.get("height") or 0)
+    min_px = int(getattr(m, "OCR_MIN_BOX_PX", 4))
+    slack = 2
+    usable = []
+    for wd in (out["命中"] or hits[:8]):
+        try:
+            x, y = int(wd.get("x") or 0), int(wd.get("y") or 0)
+            bw, bh = int(wd.get("w") or 0), int(wd.get("h") or 0)
+        except Exception:
+            continue
+        if bw <= min_px or bh <= min_px:
+            continue
+        if cw and ch and (x < -slack or y < -slack or x + bw > cw + slack or y + bh > ch + slack):
+            continue
+        usable.append(wd)
+    out["usable_boxes"] = usable
+    out["usable"] = bool(usable)
+    out["客户区"] = geom
+    if out["hit"] and not out["usable"]:
+        out["原因"] = ("认出了「%s」，但它的框落在客户区外或太小（> %d px 才算能当锚），"
+                        "R3 不成立" % (query, min_px))
+    return out
+
+
 def _cdp_browser_exe() -> str:
     """找浏览器可执行文件。找不到就**说找不到**，不瞎编一个路径。"""
     env_exe = str(os.environ.get("AGENTCTL_BROWSER_EXE") or "").strip()
@@ -2918,6 +3025,7 @@ SCREEN_SOURCE_CONF = {
     "cdp": {"bbox": 0.90, "text": 0.90, "existence": 0.90},  # DOM 结构
     # OCR：像素只证明「那儿有块墨」，**证明不了那是个可点的控件** ⇒ existence 单独压低；
     # 而它给的框是像素框（点下去大概率偏）⇒ bbox 也不高，但**与 text 分开记**。
+    # ★ 窗G2：这一档搬去 `ocr.OCR_CONF` 了（一份真值，core 不再抄一遍，抄两份迟早会漂）。
     "ocr": {"bbox": 0.55, "text": 0.55, "existence": 0.40},
 }
 
@@ -3896,6 +4004,43 @@ def _screen_build(hwnd: int, args: dict) -> dict:
     channels["R1_cdp"]["page_url"] = str(cdp.get("page_url") or "")
     channels["R1_cdp"]["端口"] = int(cdp.get("端口") or cdp_port)
     channels["R1_cdp"]["source_confidence"] = dict(SCREEN_SOURCE_CONF["cdp"])
+    # ★ 窗G2 · OCR（R3）。**三态**：
+    #   ocr=true  强制跑；ocr=false 不跑；不给 = auto ——
+    #   **只有当 R1、R2 都没命中目标、且调用方给了 query 时才自动跑**。
+    #   理由：OCR 要截图+识别，是三条通道里最贵的一条；而它唯一不可替代的场景是
+    #   「像素里有字、UIA 瞎了」（Canvas / 游戏 / Electron），那正是 auto 要救的场合。
+    ocr_arg = args.get("ocr")
+    want_ocr = (ocr_arg is not None and bool(ocr_arg)) or (
+        ocr_arg is None
+        and bool(query)
+        and not (channels.get("R1_cdp") or {}).get("hit")
+        and not (channels.get("R2_uia") or {}).get("hit")
+        and int(base_area) > 0)
+    ocr_off = {"wired": False, "hit": False, "usable": False,
+               "原因": "调用方关掉了 OCR 通道"}
+    ocr = (_screen_ocr(hwnd, query=query,
+                       lang=str(args.get("ocr_lang") or "zh-Hans-CN"),
+                       max_ms=int(args.get("ocr_max_ms") or 1500))
+           if want_ocr else ocr_off)
+    if want_ocr:
+        # ★ CDP 与 OCR **同时在**时两条通道都要报出来 —— 第二次调用只补 OCR 三个字段，
+        #   R1/R2 的判定在 screen_channels 里是彼此独立的，不会互相覆盖。
+        channels = screen_channels(
+            interactive_count=n_interactive,
+            target_hit=bool(_screen_query_hit(query, hit_labels)),
+            name_trust=trust,
+            cdp_wired=bool(cdp.get("wired")), cdp_reachable=bool(cdp.get("reachable")),
+            dom_hit=bool(cdp.get("dom_hit")),
+            ocr_wired=bool(ocr.get("wired")), ocr_hit=bool(ocr.get("hit")),
+            ocr_bbox_usable=bool(ocr.get("usable")))
+        channels["R1_cdp"]["命中节点数"] = int(cdp.get("命中节点数") or 0)
+        channels["R1_cdp"]["page_url"] = str(cdp.get("page_url") or "")
+        channels["R1_cdp"]["端口"] = int(cdp.get("端口") or cdp_port)
+        channels["R1_cdp"]["source_confidence"] = dict(SCREEN_SOURCE_CONF["cdp"])
+    ch3 = channels.setdefault("R3_ocr", {})
+    ch3["命中节点数"] = len(ocr.get("命中") or [])
+    ch3["dpi_scale"] = (ocr.get("res") or {}).get("dpi_scale")
+    ch3["source_confidence"] = dict(SCREEN_SOURCE_CONF["ocr"])
 
     out = {
         "screen_version": screen_version,                 # ← 修正②
@@ -3926,6 +4071,18 @@ def _screen_build(hwnd: int, args: dict) -> dict:
                                         "omitted": {"total": 0, "returned": 0,
                                                     "cap": SCREEN_DOM_MAX_OBJECTS},
                                         "不可用原因": str(cdp.get("原因") or "")[:200]}),
+        # ★ 窗G2 · OCR 段。没跑/跑不成时是 {wired:false, words:[]} + 一句原因，
+        #   **不假装有像素这条证据**（同 CDP/未热那几条纪律）。
+        "ocr": {"wired": bool(ocr.get("wired")), "hit": bool(ocr.get("hit")),
+                "usable": bool(ocr.get("usable")),
+                "跑了": bool(want_ocr),
+                "原因": str(ocr.get("原因") or "")[:200],
+                "引擎": str(ocr.get("引擎") or ""),
+                "dpi_scale": (ocr.get("res") or {}).get("dpi_scale"),
+                "words": list((ocr.get("res") or {}).get("words") or [])[:80],
+                "omitted": dict((ocr.get("res") or {}).get("omitted")
+                                or {"total": 0, "returned": 0, "cap": 80}),
+                "ms": (ocr.get("res") or {}).get("ms")},
         "omitted": {
             "total": total_cands,                          # 真实候选总数（含屏外；视口过滤/top-N 之前）
             "returned": len(objects),
@@ -4103,6 +4260,15 @@ def t_screen(args: dict) -> dict:
                     "只是这一屏没有 DOM 这条证据。下一步：ctl_browser action=launch 起一个"
                     "独立实例（或把 cdp_port 指到你已在调试的浏览器），再调一次。"
                     % (str(dom.get("不可用原因") or "端口 %s 上没有 CDP 实例" % ch1.get("端口"))[:160],)]
+            # ★ 窗G2：OCR 跑了但没成立（引擎不可用 / 超时 / 框不可用）——
+            #   同样是**证据不足**，只进 blind_spots，信封不动。
+            oc = res.get("ocr") or {}
+            if oc.get("跑了") and not (res.get("channels") or {}).get("R3_ocr", {}).get("hit"):
+                r["blind_spots"] = list(r.get("blind_spots") or []) + [
+                    "OCR 通道没成立（R3 不成立）：%s —— **这不等于「页面上没有它」**，"
+                    "只是这一屏没有像素这条证据（UIA 也可能正瞎着）。下一步：确认窗口已在前台且没最小化，"
+                    "或调大 ocr_max_ms（默认 1500ms），或改用 ctl_shot 让模型自己看。"
+                    % (str(oc.get("原因") or "没认出来")[:160],)]
         if isinstance(res, dict) and isinstance(res.get("watch_校验"), dict):
             # ★ 与拒绝路径对齐：成功时 watch_校验 也抬到 data 上（拒绝时那里没有「结果」段）。
             #   否则同一个字段两个位置，调用方得记住「成功去哪儿找、失败去哪儿找」。
