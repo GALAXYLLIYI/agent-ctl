@@ -1781,9 +1781,20 @@ def send_unicode(ch):
     """**中文输入必须走 KEYEVENTF_UNICODE**：按虚拟键码只能打出 ASCII，
     中文要靠"直接把码点写进键盘事件"，绕开输入法与键盘布局。"""
     code = ord(ch)
-    for flags in (KEYEVENTF_UNICODE, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP):
-        inp = INPUT(type=INPUT_KEYBOARD, ki=KEYBDINPUT(0, code, flags, 0, None))
-        user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
+    # ★ 2026-10-18 P0-B 补：非 BMP 字符（emoji 等 U+1F000 以上）**必须拆成
+    #   UTF-16 代理对分别发**。改前直接把 ord(ch) 塞进 wScan ——
+    #   wScan 是 16 位，0x1F60A 被截成 0xF60A，收进去是**半个代理项**
+    #   （实测：A+emoji+B 回读成 'A\uf60aB'，屏幕上不是那个 emoji）。
+    #   BMP 段（中文/字母/数字）走的还是原来那条，逐字节一致。
+    if code > 0xFFFF:
+        _c = code - 0x10000
+        units = (0xD800 | (_c >> 10), 0xDC00 | (_c & 0x3FF))
+    else:
+        units = (code,)
+    for _u in units:
+        for flags in (KEYEVENTF_UNICODE, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP):
+            inp = INPUT(type=INPUT_KEYBOARD, ki=KEYBDINPUT(0, _u, flags, 0, None))
+            user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
 
 
 def send_text(text, gap=0.012, nl="enter"):
@@ -1899,7 +1910,68 @@ def send_vk(vk, down=True):
     user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
 
 
-def do_keys(hwnd, vk=0x41, ctrl=False, times=1, dry=False, wait=0.06, scan_code=False):
+# ══ 键名 → 虚拟键码（2026-10-18 · P0-B · Codex-2）═════════════════════════════
+# ★ 为什么加这张表：今天 QQ 现场的第一道断点就是「ctl_keys 不认字母」——
+#   传 keys="v" 直接被上游白名单拒掉，于是 Ctrl+V 走不通、中文只能退到
+#   KEYEVENTF_UNICODE，而那条路当时还被 UIA 元素入口挡着。
+# ★ **只补「字母 / 数字 / 常见编辑键」**，不放行整个 16 位 vk 空间：
+#   那个空间里绝大多数是切窗口 / 截屏 / 锁屏 / 重启这类组合键，
+#   全量放行等于把它们直接递出去（core.py KEY_WHITELIST 上方那段理由同样成立）。
+#   ★ 字母统一映射到**大写** VK（Windows 的字母 vk 本来就是 0x41~0x5A）；
+#     要打小写/符号得配 Shift，那是 send_vk(0x10) 的事，不在键名表里编。
+KEY_NAME_TO_VK = {}
+for _i in range(26):                                   # a~z / A~Z 同码
+    KEY_NAME_TO_VK[chr(ord("a") + _i)] = 0x41 + _i
+    KEY_NAME_TO_VK[chr(ord("A") + _i)] = 0x41 + _i
+for _d in range(10):                                   # 0~9
+    KEY_NAME_TO_VK[str(_d)] = 0x30 + _d
+KEY_NAME_TO_VK.update({
+    "space": 0x20, "Space": 0x20,
+    "enter": 0x0D, "Enter": 0x0D, "return": 0x0D,
+    "tab": 0x09, "Tab": 0x09,
+    "esc": 0x1B, "Esc": 0x1B, "escape": 0x1B,
+    "backspace": 0x08, "Backspace": 0x08,
+    "delete": 0x2E, "Delete": 0x2E, "del": 0x2E,
+    "insert": 0x2D, "Insert": 0x2D,
+    "home": 0x24, "Home": 0x24,
+    "end": 0x23, "End": 0x23,
+    "pageup": 0x21, "PageUp": 0x21,
+    "pagedown": 0x22, "PageDown": 0x22,
+    "up": 0x26, "arrowup": 0x26, "ArrowUp": 0x26,
+    "down": 0x28, "arrowdown": 0x28, "ArrowDown": 0x28,
+    "left": 0x25, "arrowleft": 0x25, "ArrowLeft": 0x25,
+    "right": 0x27, "arrowright": 0x27, "ArrowRight": 0x27,
+})
+for _f in range(1, 13):                                # F1~F12
+    KEY_NAME_TO_VK["f%d" % _f] = 0x6F + _f
+    KEY_NAME_TO_VK["F%d" % _f] = 0x6F + _f
+KEY_NAMES_HELP = "、".join(
+    ["a~z / A~Z", "0~9", "F1~F12", "Space", "Enter", "Tab", "Esc", "Backspace",
+     "Delete", "Insert", "Home", "End", "PageUp", "PageDown",
+     "Up/Down/Left/Right"])
+
+
+def resolve_vk(text):
+    """把 --vk 的入参解成虚拟键码：**键名或数值都收**。
+
+    返回 (vk, 说明)；解不出抛 ValueError（由 main 转成一条人话 + 非 0 码）。
+    ★ 收数值是为了**向后兼容**：改前 --vk 就是 int(s, 0)，
+    0x41 / 65 / a 现在走同一条路 —— 老脚本一个字都不用改。
+    """
+    s = str(text or "").strip()
+    if not s:
+        raise ValueError("--vk 不能为空（键名如 v / 0 / Enter，或数值 0x56 / 86）")
+    if s in KEY_NAME_TO_VK:
+        return KEY_NAME_TO_VK[s], "键名 %s" % s
+    try:
+        return int(s, 0), "数值 %s" % s
+    except ValueError:
+        raise ValueError("--vk 认不出 %r。可用键名：%s；或十进制/十六进制数值"
+                         "（如 0x56 / 86）。" % (s, KEY_NAMES_HELP))
+
+
+def do_keys(hwnd, vk=0x41, ctrl=False, times=1, dry=False, wait=0.06, scan_code=False,
+            key_name=""):
     """C 级：发送虚拟键组合。vk 默认 0x41=Ctrl+A。
 
     ctrl=True 时按"按住 Ctrl → 敲键 → 松开 Ctrl"的顺序；times>1 时连敲（如退格清空）。
@@ -2650,7 +2722,7 @@ def _norm_nl(s):
 
 
 def do_type(hwnd, text, dry=False, allow_if_starts_with=None, force_send=False,
-             scan_code=False):
+             scan_code=False, focus=False, nl=None):
     """C 级：打字（含中文走 Unicode）。
 
     两种模式：
@@ -2662,6 +2734,22 @@ def do_type(hwnd, text, dry=False, allow_if_starts_with=None, force_send=False,
 
     scan_code=True（命令行 `--scan-code`）走**扫描码注入**，给 VirtualBox 这类
     PS/2 键盘模拟的目标用（见 send_text_scan 的注释）。默认 False。
+
+    ③ **无元素直发**（`--focus`，2026-10-18 P0-B 新增）：**压根不找 UIA 元素**，
+       对前台焦点窗逐字符 `SendInput(KEYEVENTF_UNICODE)`（send_text 的默认路径）。
+       为什么要有第三种：①② 都以「UIA 文本区」为入口，而 QQ 主窗这类
+       **一个可定位元素都没有**（今天现场 ctl_type 直接 code=7、data.raw 无元素），
+       ①② 全都走不通 ⇒ 输入通道整条断掉。
+       ★ 与 ② 的差别不是「更宽松」而是**换入口**：② 先试 read_doc、成功就仍走
+         文档模式的安全阀；③ 连 read_doc 都不调，不存在"文档非空"的判断。
+       ★ 中文 / emoji / 密码框通用：只发字符、**不回读**（密码框回读也没意义）。
+       ★ 仍要求目标窗在前台：ensure_foreground 失败就是现有 rc=5 口径
+         （"没前台，可置前后解决"），**不静默改成盲打**。
+       ★ 失败要能分开：「没前台」⇒ rc=5；「发了但画面没变」⇒ rc=8，绝不当成功。
+       ★ 换行默认 `shift_enter`：这一路的场景（QQ/聊天框/单行输入框）里
+         Enter = **提交**，按 enter 会把一段任务文本切成好几条各自发出去
+         （send_text 的注释里记着这个坑，WorkBuddy 那次 1127 字被拆成多条）。
+         要真文档语义显式传 `--nl enter`。
     """
     info, why = check_target(hwnd)
     if why:
@@ -2678,6 +2766,40 @@ def do_type(hwnd, text, dry=False, allow_if_starts_with=None, force_send=False,
     _fg = ensure_foreground(hwnd, "打字", dry=dry)
     if _fg:
         return _fg
+    # ── ③ 无元素直发（--focus）：**在 read_doc 之前**分叉，一个 UIA 元素都不找。
+    if focus:
+        nl_mode = nl or "shift_enter"
+        if nl_mode not in ("enter", "shift_enter", "space"):
+            return _tell_next(2, "换行口径只能是 enter / shift_enter / space，收到 %r"
+                              % nl_mode, hwnd)
+        if dry:
+            log("（演练）⌨ 打字 [无元素直发 %d 字，换行=%s] 窗口「%s」"
+                % (len(text), nl_mode, info["title"]))
+            return 0
+        b0 = evidence(hwnd, "focussend0")
+        if scan_code:
+            n_scan, fb_chars = send_text_scan(text)
+        else:
+            n_scan, fb_chars = 0, []
+            send_text(text, nl=nl_mode)
+        time.sleep(0.45)
+        b1 = evidence(hwnd, "focussend1")
+        f0, f1 = _img_fp(b0.get("文件") or ""), _img_fp(b1.get("文件") or "")
+        changed = None if (f0 is None or f1 is None) else (f1 != f0)
+        ev = ("" if changed is None
+              else ("　✔ 画面已变化" if changed else "　⚠⚠ 画面无变化——别当成功"))
+        log("⌨ 打字 [无元素直发 %d 字（含中文=%s）换行=%s%s] 窗口「%s」"
+            "　前图=%s 后图=%s%s"
+            % (len(text), any(ord(x) > 127 for x in text), nl_mode,
+               " 扫描码" if scan_code else "", info["title"],
+               b0.get("文件") or "无", b1.get("文件") or "无", ev))
+        if scan_code:
+            log("   扫描码注入：%d/%d 字符走了扫描码；回退 UNICODE 的字符：%s"
+                % (n_scan, len(text), "".join(fb_chars) or "无"))
+        # ★ 核验降级说明必须留痕：无元素直发**没有 UIA 回读**可比，
+        #   「画面没变」判 8 而不是默默当成功。
+        log("   核验：前后截图比对（无 UIA 回读可比）；判不了=unknown 不算失败")
+        return 0 if (changed is not False) else 8
     c, before, how = read_doc(hwnd)
     if before is None and not force_send:
         return _tell_next(4, f"打不了字：{how}", hwnd,
@@ -2829,8 +2951,23 @@ def main():
     ap.add_argument("--coord", action="store_true", help="点击：强制走坐标路径（练 SendInput 退路）")
     ap.add_argument("--retry", type=int, default=1,
                     help="点击：页面无变化时自动重试几次（默认 1；**幂等动作才用**，切换类按钮设 0）")
-    ap.add_argument("--vk", type=lambda s: int(s, 0), default=0x41,
-                    help="keys：虚拟键码（默认 0x41 = A，配 --ctrl 即 Ctrl+A 全选；0x08 = 退格）")
+    ap.add_argument("--vk", default="0x41",
+                    help="keys：虚拟键码**或键名**（2026-10-18 P0-B 补了 a~z / A~Z / 0~9 / F1~F12 "
+                         "/ Space·Enter·Tab·Esc·Backspace·Delete·Insert·Home·End·PageUp·PageDown"
+                         "/ 方向键）。数值写法一字未改（0x41 / 65 都还收），默认 0x41 = A，"
+                         "配 --ctrl 即 Ctrl+A 全选；Ctrl+V 就写 --vk v --ctrl。")
+    # ★ 无元素直发：压根不找 UIA 元素，对前台焦点窗逐字符 SendInput(KEYEVENTF_UNICODE)。
+    #   今天 QQ 现场的病根就是这一条：ctl_type 在没有可定位元素的窗口上直接 code=7。
+    ap.add_argument("--focus", action="store_true",
+                    help="type：**无元素直发** —— 不找 UIA 元素，对**前台焦点窗**逐字符 "
+                         "SendInput(KEYEVENTF_UNICODE)（中文/emoji/密码框通用，不回读）。"
+                         "仍要求目标窗在前台：置不上去就是现有 rc=5。"
+                         "⚠ 没有「文档非空」那道保险，回执里如实写明。")
+    ap.add_argument("--nl", choices=["enter", "shift_enter", "space"], default=None,
+                    help="type --focus：换行怎么发。默认 shift_enter —— "
+                         "无元素直发的场景（聊天框/单行输入框）里 Enter = **提交**，"
+                         "按 enter 会把一段任务文本切成多条各自发出去。"
+                         "真文档语义显式写 --nl enter。")
     ap.add_argument("--ctrl", action="store_true", help="keys：与 Ctrl 组合")
     ap.add_argument("--times", type=int, default=1, help="keys：连按几次（清空字段时配 0x08 用）")
     ap.add_argument("--no-clear", action="store_true",
@@ -2897,8 +3034,15 @@ def main():
         return do_fill(a.hwnd, xy, a.text or "", a.dry_run, clear=not a.no_clear)
 
     if a.action == "keys":
-        return do_keys(a.hwnd, a.vk, a.ctrl, a.times, a.dry_run,
-                        scan_code=a.scan_code)
+        # ★ 2026-10-18 P0-B：--vk 现在**键名或数值都收**（a~z / 0~9 / F1~F12 / Enter…）。
+        #   Ctrl+V ⇒ --vk v --ctrl；老写法 --vk 0x41 一个字没改，照旧。
+        try:
+            _vk, _how = resolve_vk(a.vk)
+        except ValueError as e:
+            print(str(e))
+            return 2
+        return do_keys(a.hwnd, _vk, a.ctrl, a.times, a.dry_run,
+                        scan_code=a.scan_code, key_name=_how)
 
     # ── ① rc=5「快照类」出口（派单 ① 明列的第三类 rc=5）────────────────────
     # 为什么 act.py 要有这条路：派单 ① 把 rc=5 拆成**坐标类 / 快照类 / 前台类**，
@@ -2995,7 +3139,7 @@ def main():
             print("要 --text")
             return 1
         return do_type(a.hwnd, a.text, a.dry_run, force_send=a.force_send,
-                       scan_code=a.scan_code)
+                       scan_code=a.scan_code, focus=a.focus, nl=a.nl)
     if a.action == "drag":
         if not (a.xy and a.to):
             print("要 --xy 起点 --to 终点")

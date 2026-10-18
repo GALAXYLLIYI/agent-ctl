@@ -825,7 +825,32 @@ def _check_locked(p: dict, sc: str, *, skip_count: bool = False) -> tuple[bool, 
         return False, f"本张通行证动作次数已用尽（{n}/{limit}）", CODE_UNAUTH
     return True, f"范围「{SCOPES.get(sc, sc)}」有效至 {p.get('expires')}，已用 {n}/{limit} 次", CODE_OK
 
+# ────────────────────── 敏感窗终判（读侧）──────────────────────
+# ★ 接线单 §二 5（DSH 解禁的**窄口**：只许加终判读侧，不动码表）：
+#   敏感窗拒绝原先**只在弹窗层**（授权弹窗的候选列表里不放它们）。
+#   但坐标点击（ctl_click --xy）不经过候选窗口那一步 ⇒
+#   用户即使没在候选里看到，仍可能被**直接点到**授权弹窗 / UAC 框 / 系统设置页。
+#   这里补上「动作时服务端终判」：每次动作都读黑名单，命中即拒。
+#
+# ★ 名单不在这里写：真源仍是老线 act.py 的五张表（进程名硬拒/终端、类名硬拒/终端、
+#   标题兜底），由 authstate.deny_window() 去读。这里只做一层薄转发，
+#   免得 core.py 为了判个窗口多背一个模块（core 本来就 import gate）。
+def deny_target(exe=None, cls=None, title="") -> tuple[bool, str]:
+    """动作时敏感窗终判。命中 ⇒ 抛 GateDenied（CODE_DENY_WHITELIST=3，与老线 rc=3 同义）。
+
+    返回 (放行?, 说明)。**不计数、不改码表** —— 它是读侧判定，不是新的一档闸门。
+    """
+    from agentctl import authstate as _as        # 惰性：gate 是内核，不反过来拖累它
+    hit, why, _kind = _as.deny_window(exe=exe, cls=cls, title=title)
+    if hit:
+        log("⛔ 拒绝（敏感窗终判）：%s" % why)
+        raise GateDenied(why, CODE_DENY_WHITELIST)
+    return True, why or "不属敏感窗"
+
+
 def check(scope: str) -> tuple[bool, str, int]:
+
+
     """只读检查（不计数）。要动手请用 require()。"""
     sc = short(scope)
     with _exclusive():

@@ -34,6 +34,27 @@ r"""判据 · F4 语义屏 ctl_screen（窗B1 · 2026-10-17）
     S11 cdp.py 的 `--port`（窗B 2026-10-18）：`--port 9333` 真去连 :9333、不给参数仍连 :9222，
        真源与产物都如此；＋ 契约写明「结果包在 `data.结果` 里（objects 在 `data.结果.objects`）」
        与「ctl_browser 的 port 与 `cdp.py --port` 同步」。
+    (11) P0 输入通道（窗W1 · 2026-10-18，接线单 §二 1~4）：
+       ① `mode=focus` 打字 ⇒ 靶输入框里真出现字符，且走的是「无元素直发」那条路；
+       ② `ctl_keys(keys="v", ctrl=True)` 不报"认不出"；**只验前台路径**（走了后台投递就只记不判）；
+       ③ `frame_id ≡ screen_version`：对得上才点得动（真送达），对不上 ⇒ code=12 且**零像素**；
+       ④ `after.diff.changed` 与画面真实变化一致：真变 ⇒ true；零变 ⇒ false **且不当成功**。
+       ★ 靶窗选择（务必读完再用）：
+         (11) 用**判据自建的靶窗**——一个用 `pythonw.exe` 拉起的独立进程，自注册类名
+         `W1JudgeTarget`、里面放着一个真 `Edit` 子窗和一块可点的按钮区（点中写状态文件）。
+         为什么不能省事用 python + Tk：自指保护按属主进程名**硬拒 `python.exe`**
+         （`legacy_tools\act.py` 的 `BLOCKED_PROCESSES_HARD`："凡是 Python 进程自己拥有的窗口，
+          一律不许被本系统触碰"——那是**设计**，不是缺陷；`tests\_wS_靶标进程.py` 的解释文档同理），
+         python 自建窗在 (11) 里**永远点不到**。也不用 notepad.exe：Win11 的 System32\notepad.exe
+         是打包版壳，本会话起了进程却 6 秒不出可见窗（实测）。
+         ⚠️ 这条判据成立依赖 `pythonw.exe` 不在黑名单里 —— 若哪天被加进去，本组会翻红，
+            那是事实变化，回执里要能看出来。不是 QQ / 浏览器，也不碰用户任何真实窗口，跑完 terminate。
+    (12) P0-A 授权合并 · 敏感窗终判（窗W1 · 2026-10-18，接线单 §二 5）：
+       敏感窗拒绝**不能只在弹窗层**：`--xy` 直点也必须被服务端拦下（每次都读黑名单，命中即拒）。
+       靶窗用**自建 Tk 窗**（属主 python.exe ⇒ 落 `BLOCKED_PROCESSES_HARD`，正是"敏感"那一族）。
+       ★ 判据盯的是**服务端终判**，不是老线 act.py 那层：拒绝必须发生在 act.py 之前
+         ⇒ 可观察判据 = `data.raw` 为空 **或** warning 点名"终判/服务端"；两样都没有 ⇒ 红。
+       ★ 现状预期：Codex-3 把终判接进 core 之前，本条**红**（接线单明说未落地可红）。
 
 跑法：
     python -X utf8 tests\_语义屏判据.py                # 合成夹具（无桌面也能跑）
@@ -48,6 +69,16 @@ r"""判据 · F4 语义屏 ctl_screen（窗B1 · 2026-10-17）
     python -X utf8 tests\_语义屏判据.py --inject version_reply  # 必红⑩（since 的版本应答不回）
     python -X utf8 tests\_语义屏判据.py --inject cdp_port      # 必红⑪（cdp.py 把 --port 丢掉）
     python -X utf8 tests\_语义屏判据.py --inject contract_env  # 必红⑪（契约删掉「data.结果」那一句）
+    python -X utf8 tests\_语义屏判据.py --inject type_needs_element  # 必红⑪①（focus 被悄悄降级成 element）
+    python -X utf8 tests\_语义屏判据.py --inject keys_no_letter      # 必红⑪②（字母键一律当"认不出"）
+    python -X utf8 tests\_语义屏判据.py --inject frame_skip_check    # 必红⑪③（frame_id 校验被整段跳过）
+    python -X utf8 tests\_语义屏判据.py --inject diff_always_true    # 必红⑪④（after.diff 恒报"变了"）
+    python -X utf8 tests\_语义屏判据.py --inject deny_window_bypass  # 必红⑫（敏感窗终判被旁路）
+    python -X utf8 tests\_语义屏判据.py --inject all                 # 一起注，逐条报红
+★ (11) 组**只在有交互桌面的会话里跑**：它要真拉起记事本、真 SendInput。跑不了 ⇒ 如实说"环境受限"
+  （退出码 2），**不把"没验"算成绿**。
+★ (12) 组判据的红/绿要看 Codex-3 是否已把 `authstate.deny_window` 接进 core 的动作路径 ——
+  未接线时默认红，这正是接线单说的"预期"。
 ★ 名字说明：--inject version 是**修正②**那条（screen_version 钉死），它现在会同时红 (2) 与 (10) —— 两处盯的都是「版本必须是新签发的」，如实报。
 
 ★ 换掉的只有 I/O 边界：uia_tree._lib（怎么拿窗口根）、uia_tree._client_rect（怎么拿客户区）、
@@ -1186,6 +1217,111 @@ INJECT_CONTRACT_ENV = '''
 ★ 窗B：把契约里「data.结果」那一句**删掉**（不是改错、是真的没有）⇒ 判据必须跑红。
 '''
 
+# ──────────────────────── 窗W1（P0-C）的五个注入 ────────────────────────
+# 四注入钉 (11) 的四根骨头，各断一次；第五个（deny_window_bypass）钉 (12)。
+# 全部只落在 %TEMP% 的副本上，产品代码一个字节都不改。
+INJECT_TYPE_NEEDS_ELEMENT = '''
+
+# ===== 以下为 窗W1 注入段（跑红自证专用，**勿入产品代码**）=====
+_real_t_type = t_type
+
+
+def t_type(args: dict) -> dict:                    # noqa: F811  故意覆盖真版
+    """注入的缺陷：把 mode=focus 悄悄降级回 element。
+    真实后果：QQ 主窗这类「一个可定位元素都没有」的窗又点不了字 —— 输入通道整条断掉。"""
+    return _real_t_type({**args, "mode": "element"})
+'''
+
+INJECT_KEYS_NO_LETTER = '''
+
+# ===== 以下为 窗W1 注入段（跑红自证专用，**勿入产品代码**）=====
+# ⚠ 注入点必须是 **_keys_spec** 而不是 _resolve_vk：
+#   _resolve_vk 在接线单 §二-1 之后就已经**没有任何调用者**了（它自己 docstring 里也写了
+#   "已不再被任何地方调用"）—— 打它一个字节都不会响，注入会"装作生效"却跑不红。
+#   真正的生效口径是 _keys_spec（键名原样透传真源）。
+_real_keys_spec = _keys_spec
+
+
+def _keys_spec(keys, ctrl: bool = False):          # noqa: F811  故意覆盖真版
+    """注入的缺陷：单字母 / 单数字键名一律当"认不出"（键名表退回 2026-10-18 改前）。
+    真实后果：Ctrl+V / Ctrl+A / Ctrl+C 全部发不出去。"""
+    s = str(keys or "").strip()
+    if len(s) == 1 and (s.isalpha() or s.isdigit()):
+        return None, "", None, env(
+            code=gate.CODE_NO_CTRL,
+            warning="keys 认不出：%r（注入：字母/数字键不放行，键名表退回改前）" % s)
+    return _real_keys_spec(keys, ctrl)
+'''
+
+INJECT_FRAME_SKIP_CHECK = '''
+
+# ===== 以下为 窗W1 注入段（跑红自证专用，**勿入产品代码**）=====
+_real_t_click = t_click
+
+
+def t_click(args: dict) -> dict:                   # noqa: F811  故意覆盖真版
+    """注入的缺陷：frame_id 的**比对被跳过** —— 把屏版本基线伪造成与传入凭据一致，
+    于是任何 frame_id（包括早就过期的旧屏版）都能通过校验。
+    真实后果：拿旧屏版点新画面 —— 本仓头号事故「拿旧截图点新画面」复发。
+
+    ⚠ 为什么不用「把 frame_id 从 args 里删掉」那种写法：删掉会让**合法的**那一次点击
+      也因为"两个凭据都缺"而报 code=12 —— 那是"缺凭据"的红，不是"旧凭据也放行"的红，
+      红得不是这一条要防的事。这里要的正是「旧凭据也能过」。
+    """
+    fid = str((args or {}).get("frame_id") or "").strip()
+    if fid:
+        try:
+            _h = int(args.get("hwnd") or 0)
+            _SCREEN_SEEN[_h] = {**(_SCREEN_SEEN.get(_h) or {}), "screen_version": fid}
+        except Exception:
+            pass
+    return _real_t_click(args)
+'''
+
+INJECT_DIFF_ALWAYS_TRUE = '''
+
+# ===== 以下为 窗W1 注入段（跑红自证专用，**勿入产品代码**）=====
+def _act_diff_of(before, after, win_off=None, ignore=None):   # noqa: F811  故意覆盖真版
+    """注入的缺陷：after.diff 恒报 changed=True（光标闪烁/抗锯齿也算"变了"）。
+    真实后果：该字段没有信息量 —— 「发了但画面没变」再也判不出来。
+
+    ⚠ 签名必须与真版一致（before, after, win_off, ignore 四个）—— 少收一个，
+      _act 里的四参调用会当场 TypeError，那是"注入把被测代码搞崩了"，不是"注入跑红了"。
+    """
+    return {"changed": True, "bbox": None, "_local": None,
+            "说明": "注入：恒报 changed=True"}
+'''
+
+# ★ deny_window_bypass：patch 的是 **sys.modules 里那个 authstate 模块对象**的属性。
+#
+#   ⚠ 踩过的坑（第一次写错，注入"装作生效"却一点不红）：
+#     起先是把 authstate.py 复制成一份 `<tmp>\authstate_注入缺陷.py`、用 spec_from_file_location
+#     加载成一个**新模块对象**，再把这个新对象赋给 core 的全局变量。那没用 ——
+#     `agentctl.authstate` 还是 sys.modules 里原来那个对象，gate.deny_target 里那句惰性的
+#     `from agentctl import authstate` 拿的也是原来那个 ⇒ 真身一个字节没变。
+#     正确做法是改**模块对象的属性**：所有人都持有同一个模块对象，改属性对所有引用者同时生效。
+INJECT_DENY_WINDOW_BYPASS = '''
+
+# ===== 以下为 窗W1 注入段（跑红自证专用，**勿入产品代码**）=====
+import sys as _sys
+
+try:
+    from agentctl import authstate as _w1_as_mod
+except Exception:
+    _w1_as_mod = _sys.modules.get("agentctl.authstate")
+
+
+def _w1_deny_bypass(*a, **kw):
+    """注入的缺陷：敏感窗终判被旁路 —— 永远判「未命中」。
+    真实后果：授权弹窗 / UAC / 系统设置页也能被 --xy 直点（弹窗层那道拦不住坐标动作）。"""
+    return (False, "注入：终判被旁路（判为未命中）", "")
+
+
+if _w1_as_mod is not None:
+    _w1_as_mod.deny_window = _w1_deny_bypass      # 改模块对象的属性 ⇒ 所有引用者同时生效
+    _sys.modules["agentctl.authstate"] = _w1_as_mod
+'''
+
 INJECT_EVAL_PORT = '''
 
 
@@ -1262,6 +1398,13 @@ INJECT = {
     "eval_port": ("_cdp_eval 退回硬拒（非 9222 不透传 --port）", "append", INJECT_EVAL_PORT),
     "cdp_port": ("cdp.py 把 --port 丢掉（非 9222 硬连 9222）", "cdp", INJECT_CDP_PORT),
     "contract_env": ("契约删掉「data.结果」那一句", "contract", INJECT_CONTRACT_ENV),
+    # ★ 窗W1（P0-C）的五个注入：四条钉 (11) 的四根骨头，第五条钉 (12) 的敏感窗终判
+    "type_needs_element": ("mode=focus 被悄悄降级回 element", "append", INJECT_TYPE_NEEDS_ELEMENT),
+    "keys_no_letter": ("字母/数字键一律当认不出（键名表退回改前）", "append", INJECT_KEYS_NO_LETTER),
+    "frame_skip_check": ("frame_id 校验被整段跳过（旧凭据也能点）", "append", INJECT_FRAME_SKIP_CHECK),
+    "diff_always_true": ("after.diff 恒报 changed=True", "append", INJECT_DIFF_ALWAYS_TRUE),
+    "deny_window_bypass": ("敏感窗终判被旁路（永远判未命中）", "authstate",
+                          INJECT_DENY_WINDOW_BYPASS),
 }
 
 
@@ -1285,6 +1428,11 @@ def build_injected(tmp, kinds):
                 f.write(csrc + snippet)
         elif mode == "contract":
             pass          # 下面统一处理：影子件先抄好，再按需把那句删掉
+        elif mode == "authstate":
+            # ★ 窗W1：敏感窗终判旁路。注入段自己会去 patch sys.modules 里那个
+            #   `agentctl.authstate` 模块对象 —— 这里只把片段接到 core 副本末尾，
+            #   真 authstate.py 一个字节都不碰（也不再需要影子副本）。
+            src = src + snippet
         else:
             raise SystemExit("未知注入方式：%s" % mode)
         notes.append("%s=%s" % (k, desc))
@@ -3461,6 +3609,707 @@ def _tk_hwnd(win):
 # ======================================================================
 # main
 # ======================================================================
+# ======================================================================
+# 窗W1 · (11) P0 输入通道 / (12) 授权合并（2026-10-18，接线单 §二 1~5、8）
+# ★ 靶窗选择（务必读完再用）：
+#   (11) 用**判据自己拉起的 notepad 实例** —— 自指保护按属主进程名硬拒 python.exe
+#         （act.py 的 BLOCKED_PROCESSES_HARD：「凡是 Python 进程自己拥有的窗口，一律不许被本系统
+#         触碰」——那是**设计**，不是缺陷，见 tests\_wS_靶标进程.py 的解释文档），
+#         所以 python 自建的 Tk 窗在 (11) 里**永远点不到**，不能当动作靶。
+#         notepad.exe 不在任何黑名单；实例由判据拉起、跑完 terminate，不碰用户任何真实窗口，
+#         更不是 QQ / 浏览器。
+#   (12) 反过来**必须**用 python 自建的 Tk 窗 —— 它正是"敏感窗"那一族（属主 python.exe + 类名
+#         TkTopLevel 都在硬拒表里），判据要的就是"连它也拦得住"。
+# ======================================================================
+W1_BLOCKED = []          # 环境受限原因（既不算红、也不算绿）
+
+
+def _w1_clip(text):
+    """往剪贴板放一段已知文本（Ctrl+V 的独立真相来源）。"""
+    import win32clipboard as wc
+    import win32con
+    for attempt in range(3):
+        try:
+            wc.OpenClipboard()
+            wc.EmptyClipboard()
+            wc.SetClipboardData(win32con.CF_UNICODETEXT, text)
+            wc.CloseClipboard()
+            return True
+        except Exception:
+            try:
+                wc.CloseClipboard()
+            except Exception:
+                pass
+            time.sleep(0.15)
+    return False
+
+
+# ★ (11) 的靶窗宿主（判据把它写进 %TEMP% 再用 **pythonw.exe** 起进程）：
+#   · 为什么不用 notepad.exe：Win11 的 System32\notepad.exe 是**打包版壳**，本会话里起了进程
+#     却 6 秒内不出任何可见窗（实测 p.poll()=None、EnumWindows 一个都没有）⇒ 当不了靶。
+#   · 为什么不用 python + Tk：属主进程是 python.exe ⇒ `BLOCKED_PROCESSES_HARD` 硬拒（设计如此）。
+#   · 为什么不用 csc 编 WinForms（tests\_wS_靶标进程.py 的做法）：本沙箱禁止编译任意 C#。
+#   ⇒ 取两者之间：**pythonw.exe 起进程 + 自注册类名 W1JudgeTarget**。属主进程名不是 python.exe、
+#     类名不在任何黑名单 ⇒ 与 `_wS_靶标进程.py` 的用意一致（"靶必须由非 Python 进程拥有"）。
+#   ⚠️ 依赖项写明白：这条成立**依赖 `pythonw.exe` 不在 BLOCKED_PROCESSES_HARD**。哪天它被加进去，
+#     本组会从绿翻红（拒绝），那是事实变化，不是判据坏了 —— 回执里要能看出来。
+W1_TARGET_SRC = r'''
+# -*- coding: utf-8 -*-
+"""W1 (11) 判据的靶窗宿主（由判据用 pythonw.exe 拉起）。只读自己的命令行参数。"""
+import ctypes
+import sys
+import win32con
+import win32gui
+
+# ★ DPI 感知**必须自己声明**（本次踩到，实测取证）：
+#   不声明的话，Windows 对本进程做 DPI 虚拟化 —— 屏幕物理坐标进到 wndproc 的 WM_LBUTTONDOWN
+#   lParam 时会被**除以缩放系数**（本机 1.5）。实测：判据按物理像素算出的按钮中心 (76,63)，
+#   靶窗收到的是 (51,42) ⇒ 落在按钮区 (24,44,128,80) 的**上边界之外 2 像素**，
+#   表现就是"信封报 ok=True、靶窗计数纹丝不动"的假成功。
+#   声明之后收发都是物理像素 —— 这与契约 conventions.coordinates「一律物理像素（DPI 感知）」同口径。
+try:
+    ctypes.windll.shcore.SetProcessDpiAwareness(2)      # PER_MONITOR_AWARE
+except Exception:
+    try:
+        ctypes.windll.user32.SetProcessDPIAware()
+    except Exception:
+        pass
+
+CLS = "W1JudgeTarget"
+STATE = sys.argv[1] if len(sys.argv) > 1 else "state.txt"
+# ★ 窗口标题带**唯一令牌**：判据只认带自己那个令牌的窗。
+#   少了它，判据会连到上一轮没退干净的旧靶窗（同一类名），读到别人的输入框内容 ——
+#   表现是"文本莫名其妙已经有一半"，极难查。
+TITLE = "W1判据靶窗|" + (sys.argv[2] if len(sys.argv) > 2 else "")
+# ⚠ 这三组是**物理像素**的客户区坐标（已声明 DPI 感知，不做虚拟化缩放）。
+#   窗口开 450x255 是按 1.5 倍屏（本机 DPI=144）留的余量：客户区约 435x236，
+#   按钮区与编辑区都落在其内；在 100% 缩放的机器上同样放得下（那时客户区更大）。
+BTN = (24, 44, 200, 110)         # 按钮区（客户区坐标）
+EDIT = (20, 130, 380, 165)       # 编辑区（客户区坐标）
+hEdit = 0                        # 编辑区句柄（wndproc 的 WM_ACTIVATE 要用）
+
+
+def wndproc(h, msg, w, l):
+    if msg == win32con.WM_DESTROY:
+        win32gui.PostQuitMessage(0)
+        return 0
+    if msg == win32con.WM_LBUTTONDOWN:
+        x, y = l & 0xFFFF, (l >> 16) & 0xFFFF
+        try:                      # ★ 取证：靶窗如实记下自己收到的客户区坐标
+            with open(STATE + ".log", "a") as _f:
+                _f.write("%d,%d\n" % (x, y))
+        except Exception:
+            pass
+        if BTN[0] <= x <= BTN[2] and BTN[1] <= y <= BTN[3]:
+            try:
+                n = int(open(STATE).read() or "0")
+            except Exception:
+                n = 0
+            with open(STATE, "w") as f:
+                f.write(str(n + 1))
+        return 0
+    if msg == win32con.WM_ACTIVATE and w:
+        win32gui.SetFocus(hEdit)      # 前台激活时把焦点交给编辑区
+    return win32gui.DefWindowProc(h, msg, w, l)
+
+
+def main():
+    global hEdit
+    wc = win32gui.WNDCLASS()
+    wc.lpfnWndProc = wndproc
+    wc.lpszClassName = CLS
+    wc.hInstance = win32gui.GetModuleHandle(None)
+    win32gui.RegisterClass(wc)
+    h = win32gui.CreateWindow(wc.lpszClassName, TITLE,
+                              win32con.WS_OVERLAPPEDWINDOW, 0, 0, 450, 255,
+                              0, 0, wc.hInstance, None)
+    e = win32gui.CreateWindow("Edit", "",
+                              win32con.WS_CHILD | win32con.WS_VISIBLE
+                              | win32con.WS_BORDER | win32con.ES_AUTOHSCROLL,
+                              EDIT[0], EDIT[1], EDIT[2] - EDIT[0], EDIT[3] - EDIT[1],
+                              h, 0, wc.hInstance, None)
+    win32gui.ShowWindow(h, win32con.SW_SHOW)
+    win32gui.UpdateWindow(h)
+    hEdit = e
+    win32gui.SetFocus(e)
+    with open(STATE, "w") as f:
+        f.write("0")
+    win32gui.PumpMessages()
+
+
+main()
+'''
+
+
+def _w1_legacy_sandbox(core, reds=None):
+    r"""★ 让 (11)(12) 跑的 act.py 是**真源原样副本**，而它的闸门状态落在沙箱里。
+
+    为什么必须绕这一层（不绕会怎样，实测）：
+      `_act()` 是唯一的真动作通道，它 spawn 子进程跑 `legacy_tools\act.py`。
+      而 act.py 带**自己的**一份 gate（`legacy_tools\gate.py`，靠 `sys.path.insert(0, HERE)`
+      命中），那份 gate 的 AUTHDIR 写死成 `HERE\_auth` —— **不受任何环境变量控制**
+      （它只让 BRAKE_FLAG 受控）。于是直接跑就会去读**真机的通行证**
+      `legacy_tools\_auth\auth_pass.json` ⇒ 两种坏结局，都不是产品缺陷：
+        ① 判据去碰真闸门状态（违反纪律）；
+        ② 真机此刻没证 ⇒ act.py 出 rc=9 ⇒ 判据恒红，且这红与环境有关、不可重现。
+      （本次就是先撞上 ②：`code=9 未获授权`，服务端那两道闸其实早被 sandbox() 铺的证放过了。）
+
+    做法：**整个 legacy_tools 目录原样复制**一份到沙箱临时目录，再让 `core.LEGACY` 指向它。
+      子进程里 `HERE` 变成沙箱目录 ⇒ AUTHDIR 落在沙箱 ⇒ 读写全是沙箱状态。
+      act.py / gate.py **一个字节都没改** —— 复制后逐个比对 md5，对不上就报红（防止
+      "以为在测真源、其实测了个被改过的副本"，那是比不测更糟的假证据）。
+
+    ⚠ 这不是"绕过闸门"：证的档位 / 次数上限 / 过期 / 敏感窗终判全由那份 gate **原样执行**，
+      只是状态文件挪进了临时目录 —— 与 `sandbox()` 对 src 侧 gate 做的事完全同款。
+    """
+    import hashlib
+    src_dir = os.path.join(ROOT, "legacy_tools")
+    dst = os.path.join(SB["dir"], "legacy")
+    if not os.path.isdir(dst):
+        shutil.copytree(src_dir, dst,
+                        ignore=shutil.ignore_patterns("__pycache__", "_auth", "*.log"))
+        auth = os.path.join(dst, "_auth")
+        os.makedirs(auth, exist_ok=True)
+        # ★ 老线 gate 用**全名档位**（"C级 打字快捷键"），不是简写 C —— 与 src 侧 short() 那套不同。
+        with io.open(os.path.join(auth, "auth_pass.json"), "w", encoding="utf-8") as f:
+            json.dump({"scopes": ["A级 只读感知", "B级 点击滚动", "C级 打字快捷键", "D级 拖拽"],
+                       "acts": 0, "acts_limit": 99,
+                       "expires_at": time.time() + 3600}, f, ensure_ascii=False)
+    # 副本一致性：真源与沙箱副本必须逐字节相同，否则本组判的就不是真源
+    for nm in ("act.py", "gate.py"):
+        a = os.path.join(src_dir, nm)
+        b = os.path.join(dst, nm)
+        try:
+            ha = hashlib.md5(io.open(a, "rb").read()).hexdigest()
+            hb = hashlib.md5(io.open(b, "rb").read()).hexdigest()
+        except Exception as e:
+            if reds is not None:
+                reds.append("沙箱 legacy 副本比不了 md5（%s）：%s: %s" % (nm, type(e).__name__, e))
+            continue
+        if ha != hb and reds is not None:
+            reds.append("沙箱里的 %s 与真源 %s **不是同一份**（md5 %s vs %s）"
+                        " ⇒ 本组判的不是真源，结论无效" % (nm, nm, ha[:12], hb[:12]))
+    return dst
+
+
+def _w1_spy_legacy(core):
+    """给 `core._legacy` 套一层**只记账、不改行为**的壳：记下每次真去 spawn act.py 的 argv。
+
+    为什么非得有这一层：判据要能分清两件不同的事 ——
+      A. 服务端自己就拒了 ⇒ **act.py 一次都没被 spawn**（前拦成立）；
+      B. 服务端放行、动作发出去了、最后被 act.py 那层拒 ⇒ spawn 过。
+    只盯着返回的 warning / raw 猜不出这个区别（两边都可能回 code=3、回同一句文案），
+    而「敏感窗终判到底接没接进 core 的动作路径」恰恰就是 A 与 B 之差。
+    ⚠ 壳子只 append 一行记账，然后**原样转发、原样返回** —— 判定逻辑一个字节都不碰。
+    """
+    calls = []
+    real = core.__dict__.get("_legacy")
+
+    def spy(name, args, timeout=60):
+        if name == "act.py":
+            calls.append(list(args))
+        return real(name, args, timeout)
+
+    core._legacy = spy
+    return calls, real
+
+
+def _w1_ensure_fg(hwnd, tries=3):
+    """把靶窗置到前台**并确认真的在前台**。返回 True/False。
+
+    ★ 为什么必须显式确认：真窗口判据的送达依赖前台 —— focus 打字发往「前台焦点窗」、
+      坐标点击要真正落在靶窗上。而 agent 会话跑判据时**用户可能正在用这台电脑**
+      （实测撞到过：raw 里写着「现前台仍是 hwnd=854912『OpenCode』」，
+      靶窗被别的程序压着置不上前，于是打字/点击全部失败、判据一片红）。
+      那种红是**指着产品喊冤**：产品没错，是这一刻没有可供判定的交互前台。
+    ⇒ 置不上前就记 W1_BLOCKED（既不算红也不算绿，退出码 2），如实说"这一条我验不了"。
+    """
+    import win32con
+    import win32gui
+    for _i in range(tries):
+        try:
+            win32gui.ShowWindow(hwnd, win32con.SW_SHOW)
+            win32gui.SetForegroundWindow(hwnd)
+        except Exception:
+            pass
+        time.sleep(0.25)
+        if win32gui.GetForegroundWindow() == hwnd:
+            return True
+    return False
+
+
+class _W1Target(object):
+    """(11) 的动作靶：pythonw 进程 + 自注册类名 + 真 Edit 子窗 + 可点按钮区（点中写状态文件）。"""
+
+    def __init__(self, box):
+        import subprocess
+        self.p = None
+        self.hwnd = 0
+        self.edit = 0
+        self.state = os.path.join(box, "w1_clicks.txt")
+        self.src = os.path.join(box, "_w1_target.py")
+        with io.open(self.src, "w", encoding="utf-8") as f:
+            f.write(W1_TARGET_SRC)
+        # ★ 唯一令牌：本轮判据只认带这个令牌的窗（防连到上一轮残留的旧靶窗）
+        self.tok = "w1_%d_%d" % (os.getpid(), int(time.time() * 1000) % 1000000)
+        # 用**同一个解释器的 pythonw**：子进程也要有 pywin32
+        pyw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
+        if not os.path.isfile(pyw):
+            pyw = sys.executable
+        self.p = subprocess.Popen([pyw, self.src, self.state, self.tok],
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        t0 = time.time()
+        while time.time() - t0 < 12:
+            self._find()
+            if self.hwnd and self.edit:
+                time.sleep(0.3)
+                return
+            time.sleep(0.1)
+
+    def _find(self):
+        """只认**本轮自己拉起**的那个靶窗：类名 + 标题令牌 + 属主 PID 三重条件。"""
+        import ctypes
+        import win32gui
+        import win32process
+        top = []
+        pid = self.p.pid if self.p else 0
+
+        def cb(h, _l):
+            try:
+                if (win32gui.GetClassName(h) or "") != "W1JudgeTarget":
+                    return True
+                if self.tok not in (win32gui.GetWindowText(h) or ""):
+                    return True                       # 别的轮次留下的窗，不认
+                _t, p = win32process.GetWindowThreadProcessId(h)
+                if pid and p != pid:
+                    return True                       # 不是本轮进程的窗，不认
+                top.append(h)
+            except Exception:
+                pass
+            return True
+
+        ctypes.windll.user32.EnumWindows(
+            ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)(cb), 0)
+        self.hwnd = top[0] if top else 0
+
+        kids = []
+
+        def cb2(c, _l):
+            try:
+                if (win32gui.GetClassName(c) or "") == "Edit":
+                    kids.append(c)
+            except Exception:
+                pass
+            return True
+
+        self.edit = 0
+        if self.hwnd:
+            win32gui.EnumChildWindows(self.hwnd, cb2, 0)
+            self.edit = kids[0] if kids else 0
+
+    def clicks(self):
+        """按钮区被点了几次（跨进程零耦合证据）。"""
+        try:
+            return int(io.open(self.state, encoding="utf-8").read() or "0")
+        except Exception:
+            return None
+
+    def text(self):
+        """编辑区当前文本 —— "字真打进去了吗"的独立真相（act.py 的 focus 路不回读）。"""
+        import ctypes
+        import win32con, win32gui
+        if not self.edit:
+            return None
+        n = win32gui.SendMessage(self.edit, win32con.WM_GETTEXTLENGTH, 0, 0) or 0
+        if not n:
+            return ""
+        buf = ctypes.create_unicode_buffer(int(n) + 1)
+        try:
+            win32gui.SendMessage(self.edit, win32con.WM_GETTEXT, int(n) + 1, buf)
+        except Exception:
+            return None
+        return buf.value or ""
+
+    def button_xy(self):
+        """按钮区中心的**屏幕坐标**（坐标口径：屏幕物理像素，与契约 conventions.coordinates 一致）。
+
+        ⚠ 坑（本次踩到）：BTN 那组是**客户区**坐标，而 `GetWindowRect` 给的是**窗口外框**
+        左上角 —— 两者差一条标题栏 + 一圈边框。直接 `外框左上 + 客户区偏移` 会整体往下偏
+        二三十像素，点就落在按钮区外边（表现：信封报 ok=True、靶窗计数纹丝不动）。
+        正确换算是 `ClientToScreen(hwnd, (0,0))` 拿客户区原点。
+        """
+        import win32gui
+        if not self.hwnd:
+            return None
+        bx = (24 + 200) // 2
+        by = (44 + 110) // 2
+        org = win32gui.ClientToScreen(self.hwnd, (0, 0))
+        return [int(org[0]) + bx, int(org[1]) + by]
+
+    def edit_xy(self):
+        """编辑区里一处空白（点这儿不改内容，只移焦点）的屏幕坐标。"""
+        import win32gui
+        r = win32gui.GetWindowRect(self.edit or self.hwnd)
+        return [int(r[0]) + 200, int(r[1]) + 10]
+
+    def close(self):
+        """彻底收掉：terminate 不够就 kill —— 留一个残窗，下一轮判据就可能连到它。"""
+        try:
+            self.p.terminate()
+        except Exception:
+            pass
+        try:
+            self.p.wait(timeout=3)
+        except Exception:
+            try:
+                self.p.kill()
+            except Exception:
+                pass
+
+
+def _w1_tk_target():
+    """自建 Tk 靶窗（属主 python.exe ⇒ 敏感窗黑名单硬拒族），返回 (root, hwnd)。"""
+    import tkinter as tk
+    root = tk.Tk()
+    root.title("W1判据敏感靶")
+    root.geometry("320x160+220+220")
+    tk.Label(root, text="W1 (12) 授权合并靶窗").place(x=20, y=20, width=280, height=22)
+    root.update()
+    h = int(root.winfo_id())
+    import win32gui
+    hwnd = win32gui.GetParent(h) or h
+    return root, hwnd
+
+
+def check_input_channel(core, fx):
+    """(11) P0 输入通道（接线单 §二 1~4、8）。返回 (组名, 红线列表, 证据字典)。"""
+    title = "(11) P0 输入通道（focus 打字 / keys 字母 / frame_id / after.diff）"
+    reds, ev = [], {}
+    if W1_BLOCKED:
+        return title, reds, ev
+    # ⚠ 不能调 sandbox() —— 那会二次重置 SB["dir"] 与整组环境变量（主沙箱当场作废）。
+    box = os.path.join(SB["dir"], "w1t")
+    os.makedirs(box, exist_ok=True)
+    tgt = _W1Target(box)
+    if not tgt.hwnd or not tgt.edit:
+        W1_BLOCKED.append("(11) 靶窗起不来：12s 内没等到 W1JudgeTarget 顶层窗 + Edit 子窗"
+                          "（宿主用 pythonw.exe 起；本会话没有交互桌面时会这样）")
+        tgt.close()
+        return title, reds, ev
+    _old_legacy = core.LEGACY
+    core.LEGACY = _w1_legacy_sandbox(core, reds)
+    _spawned, _real_legacy = _w1_spy_legacy(core)
+    # ★ 先把前面组打在 core 上的桩**还原成真身**再动手。
+    #   实测踩到：S10「动作侧接线」组为了跑合成夹具，把
+    #     core._win_rect   → lambda h: [0,0,1280,900]
+    #     core._is_foreground → lambda h: True
+    #   打进去之后**没有还原**。而 `_act_grab()` 正是拿 `_win_rect` 当截图区域 ⇒
+    #   本组的前/后快照实际截的是 1280x900 的**屏幕**，把桌面上一切噪声都收进 diff，
+    #   bbox 涨到 1000x569、零变化的打字也被判成"画面变了"（全量跑时假红，单跑却绿）。
+    #   ⇒ 判据组之间有桩泄漏；任何要碰真窗口的组都必须先把这几个真身放回来。
+    for _k in ("_win_rect", "_is_foreground"):
+        if ORIG.get(_k) is not None:
+            core.__dict__[_k] = ORIG[_k]
+    try:
+        hwnd = tgt.hwnd
+        import win32gui
+        ev["靶窗"] = {"hwnd": hwnd, "标题": win32gui.GetWindowText(hwnd) or "",
+                      "类名": win32gui.GetClassName(hwnd) or "",
+                      "属主进程": "pythonw.exe（自建，非 QQ/浏览器，判据跑完 terminate）"}
+        # ★ 串窗自检：新靶窗的输入框必须是空的。不空 ⇒ 连到了上一轮残留的旧窗，
+        #   后面每一条"字真打进去了"都会读到别人的内容 —— 那比判不出来更糟。
+        _init = tgt.text()
+        if (_init or "").strip():
+            W1_BLOCKED.append("(11) 靶窗起脏了：新靶窗输入框初始就有内容 %r ⇒ "
+                              "连到了上一轮没退干净的旧窗，本组判据不成立" % (_init or "")[:40])
+            return title, reds, ev
+        # ★ 把靶窗置到前台：后面 ③ 的坐标点击与 ② 的前台按键都要求目标窗真的在前台。
+        #   这一步模拟的是「用户自己正在操作这个窗」的真实场景 —— 不是替产品放宽条件，
+        #   act.py 自己也有 ensure_foreground，但子进程从后台切前台常被系统拒绝（只闪任务栏）。
+        #   置不上前 ⇒ 记为**环境受限**（不是红），见 _w1_ensure_fg 的说明。
+        ev["置前"] = _w1_ensure_fg(hwnd)
+        if not ev["置前"]:
+            W1_BLOCKED.append("(11) 靶窗置不到前台（当前前台是 hwnd=%s「%s」）"
+                              " —— 真窗口的打字/点击判不了，本组不算红也不算绿"
+                              % (win32gui.GetForegroundWindow(),
+                                 (win32gui.GetWindowText(win32gui.GetForegroundWindow()) or "")[:20]))
+            return title, reds, ev
+        TEXT1 = "ab12"
+        CLIP = "W1粘贴"
+
+        def _fg_or_block(tag):
+            """每个动作之前重新确认前台还在靶窗上（用户随时可能切走）。"""
+            if _w1_ensure_fg(hwnd):
+                return True
+            W1_BLOCKED.append("(11) %s 之前靶窗已不在前台（前台是 hwnd=%s「%s」）"
+                              " ⇒ 本组判不了，不算红也不算绿"
+                              % (tag, win32gui.GetForegroundWindow(),
+                                 (win32gui.GetWindowText(win32gui.GetForegroundWindow()) or "")[:20]))
+            return False
+
+        # ── ① mode=focus：无元素直发，且靶里真出现字符 ──
+        n0 = len(_spawned)
+        r1 = core.t_type({"hwnd": hwnd, "text": TEXT1, "mode": "focus",
+                          "actor": "判据W1", "allow_foreground": True})
+        raw1 = str((r1.get("data") or {}).get("raw") or "")
+        argv1 = list(_spawned[n0:])
+        ev["①focus"] = {"ok": bool(r1.get("ok")), "code": r1.get("code"),
+                        "warning": (r1.get("warning") or "")[:90],
+                        "传给act.py的argv": argv1}
+        if not need(bool(r1.get("ok")),
+                    "① mode=focus 打字没成功：code=%s warning=%s"
+                    % (r1.get("code"), (r1.get("warning") or "")[:120]), reds):
+            pass
+        else:
+            # ★ 机读证据：core **透传给 act.py 的命令行**里有没有 --focus。
+            #   这比看 raw 文案硬 —— 文案是 act.py 给的，argv 是 core 给的，
+            #   「mode 被降级回 element」这个缺陷**只会**体现在 argv 上。
+            need(any(("--focus" in a) for a in argv1),
+                 "① 信封报成功，但传给 act.py 的 argv 里**没有 --focus**（%r）"
+                 " ⇒ mode=focus 没被透传，被悄悄降级回 element 了" % (argv1[:1] or []), reds)
+            need("无元素直发" in raw1,
+                 "① 信封报成功，但 raw 里没有「无元素直发」—— 走的不是 focus 路"
+                 "（mode 被降级回 element 了）：%r" % raw1[-120:], reds)
+            got = tgt.text() or ""
+            ev["①靶里文本"] = got[:60]
+            need(TEXT1 in got,
+                 "① 信封报成功，但靶窗输入框里没有 %r（实际 %r）—— act.py 的 focus 路不回读，"
+                 "这条独立真相正是它缺的那一口" % (TEXT1, got[:60]), reds)
+
+        # ── ② ctl_keys(v, ctrl)：不报"认不出"；**只验前台路径** ──
+        if not _fg_or_block("② ctrl+V"):
+            return title, reds, ev
+        _w1_clip(CLIP)
+        r2 = core.t_keys({"hwnd": hwnd, "keys": "v", "ctrl": True,
+                          "actor": "判据W1", "allow_foreground": True})
+        raw2 = str((r2.get("data") or {}).get("raw") or "")
+        ev["②keys"] = {"ok": bool(r2.get("ok")), "code": r2.get("code"),
+                       "warning": (r2.get("warning") or "")[:90],
+                       "路径": ("后台投递" if "后台按键生效" in raw2 else "前台")}
+        w2 = r2.get("warning") or ""
+        need(not (("认不出" in w2) or ("不在白名单" in w2)),
+             "② ctrl+V 被键名表拦了（认不出/不在白名单）：%s" % w2[:140], reds)
+        if r2.get("ok") and "后台按键生效" not in raw2:
+            # 接线单 §二：Ctrl **只验前台路径** —— 走了后台投递就把"送达"这条记下来不判，
+            # 否则会把后台路径的偶然成功算成前台路径的通过。
+            got2 = tgt.text() or ""
+            ev["②靶里文本"] = got2[-60:]
+            need(CLIP in got2,
+                 "② 前台路径下 ctrl+V 成功，但靶窗输入框里没有剪贴板文本 %r（实际 %r）"
+                 % (CLIP, got2[-60:]), reds)
+        elif "后台按键生效" in raw2:
+            ev["②送达"] = "未走前台路径（PostMessage 后台投递生效）⇒ 只验「没报认不出」"
+
+        # ── ③ frame_id ≡ screen_version ──
+        if not _fg_or_block("③ 坐标点击"):
+            return title, reds, ev
+        sc = core.dispatch("ctl_screen", {"hwnd": hwnd, "query": QUERY,
+                                          "actor": "判据W1"})
+        fid = str((((sc.get("data") or {}).get("结果") or {}).get("screen_version")) or "")
+        ev["③frame_id"] = {"screen_version": fid}
+        p = tgt.button_xy()
+        c0 = tgt.clicks()
+        r3 = core.t_click({"hwnd": hwnd, "xy": p, "frame_id": fid, "actor": "判据W1"})
+        c1 = tgt.clicks()
+        ev["③对得上"] = {"ok": bool(r3.get("ok")), "code": r3.get("code"),
+                        "warning": (r3.get("warning") or "")[:90],
+                        "按钮计数": [c0, c1]}
+        if not need(bool(r3.get("ok")),
+                    "③ frame_id 对得上仍点不动：code=%s warning=%s"
+                    % (r3.get("code"), (r3.get("warning") or "")[:120]), reds):
+            pass
+        else:
+            # ★ 断言"计数变多了"而不是"恰好 +1"：一次 ctl_click 内部可能带重试
+            #   （实测见过 [0→2]），判据要防的是**零送达**，不是替产品规定它点几下。
+            need(c1 is not None and c1 > (c0 or 0),
+                 "③ 信封报点成功，但按钮计数没动（%r → %r）—— 零送达" % (c0, c1), reds)
+        r4 = core.t_click({"hwnd": hwnd, "xy": p, "frame_id": fid + "_旧",
+                           "actor": "判据W1"})
+        c2 = tgt.clicks()
+        raw4 = str((r4.get("data") or {}).get("raw") or "")
+        ev["③旧凭据"] = {"ok": bool(r4.get("ok")), "code": r4.get("code"),
+                        "warning": (r4.get("warning") or "")[:90],
+                        "按钮计数": [c1, c2], "raw": raw4[:120]}
+        need(r4.get("code") == 12,
+             "③ 旧 frame_id 期望 code=12，实际 %s（warning=%s）"
+             % (r4.get("code"), (r4.get("warning") or "")[:120]), reds)
+        need(c2 == c1, "③ 旧 frame_id 竟然真点了（按钮计数 %r → %r）——「零像素」是空话" % (c1, c2), reds)
+        need(not raw4,
+             "③ 旧 frame_id 的拒绝带着 act.py 的原文 ⇒ 是老线拦的，不是服务端在前拦的", reds)
+
+        # ── ④ after.diff 与画面真实变化一致（真变⇒true；零变⇒false 且不当成功）──
+        if not _fg_or_block("④ 打字"):
+            return title, reds, ev
+        r5 = core.t_type({"hwnd": hwnd, "text": "xy", "mode": "focus",
+                          "actor": "判据W1", "allow_foreground": True})
+        d5 = ((r5.get("data") or {}).get("after") or {}).get("diff") or {}
+        ev["④真变化"] = {"ok": bool(r5.get("ok")), "code": r5.get("code"),
+                        "diff.changed": d5.get("changed"),
+                        "bbox": d5.get("bbox"),
+                        "靶里文本": (tgt.text() or "")[-40:]}
+        need(d5.get("changed") is True,
+             "④ 真打了字（靶里文本已变），after.diff.changed=%r 应为 True" % d5.get("changed"), reds)
+        r6 = core.t_type({"hwnd": hwnd, "text": "", "mode": "focus",
+                          "actor": "判据W1", "allow_foreground": True})
+        d6 = ((r6.get("data") or {}).get("after") or {}).get("diff") or {}
+        ev["④零变化"] = {"ok": bool(r6.get("ok")), "code": r6.get("code"),
+                        "diff.changed": d6.get("changed"),
+                        "bbox": d6.get("bbox"),
+                        "warning": (r6.get("warning") or "")[:90]}
+        # ★ 为什么断言写成 `is not True` 而不是 `is False`：
+        #   changed 是**三值**（True 真变 / False 确认没变 / None 没测出来），
+        #   契约要的是「不是 True ⇒ 就不许当成功」。写成 `is False` 是把判据的成败
+        #   押在"这一刻屏幕上除了我什么都没动"上 —— 实测全量跑（前面二十组刚开过一堆窗）
+        #   时前后两张窗口截图里混进了环境噪声，bbox 甚至涨到 1000x569，
+        #   changed 于是真实地报了 True。那**不是产品撒谎**（画面确实变了），
+        #   是本判据把自己的夹具噪声算成了产品缺陷 ⇒ 会假红。
+        #   ⚠ 放宽的是"必须是 False"这一档；"不许当成功"这条一分没松，
+        #      diff_always_true 注入（恒报 True）照样当场红。
+        need(d6.get("changed") is not True,
+             "④ 空文本（画面零变化）时 after.diff.changed=%r 不应为 True"
+             " —— 零变化却报「变了」，等于把「键发出去了」冒充成「字出现了」"
+             % d6.get("changed"), reds)
+        need(r6.get("ok") is False and r6.get("code") in (8, 5),
+             "④ 零变化时应当**不当成功**（期望 code=8 确认没变 / code=5 没测出来，都不许报成功），"
+             "实际 ok=%s code=%s" % (r6.get("ok"), r6.get("code")), reds)
+
+        # ── ⑤ 数字键必须走「键名」：'9' 是数字 9，不是 Tab（窗W2 补，接线单 Codex-1 报的洞）──
+        #   ★ 改前 core 先 int(s, 0)：int("9",0)=9 ⇒ vk=0x09=**Tab**、int("8",0)=8 ⇒ 0x08=**Backspace**；
+        #     而 '0'~'7' 因 0x00~0x07 不在 _VK_SAFE 里**全拒**。
+        #     前两种是「静默发错键」—— 键发出去了、回执也绿的，只有回读才发现打错；
+        #     比拒绝更坏，所以这条必须钉在端到端上：既看信封，也看靶里真出现的字符。
+        #   纯函数那半（'0'~'7' 不被拒）直接在 core 上判，不 spawn，省得连按八次真键。
+        if not _fg_or_block("⑤ 数字键"):
+            return title, reds, ev
+        for _d in "01234567":
+            _spec5, _why5, _nm5, _err5 = core._keys_spec(_d, False)
+            need(_err5 is None and _spec5 == _d and ("键名" in (_why5 or "")),
+                 "⑤ keys=%r 没被当键名（spec=%r why=%r err=%s）—— core 抢在真源前面当数值判了"
+                 % (_d, _spec5, (_why5 or "")[:40],
+                    (_err5 or {}).get("code")), reds)
+        _txt5a = tgt.text() or ""
+        r7 = core.t_keys({"hwnd": hwnd, "keys": "9", "actor": "判据W1",
+                          "allow_foreground": True})
+        d7 = r7.get("data") or {}
+        _w7 = r7.get("warning") or ""
+        _txt5b = tgt.text() or ""
+        ev["⑤数字键"] = {"ok": bool(r7.get("ok")), "code": r7.get("code"),
+                        "data.vk": d7.get("vk"), "data.键名": d7.get("键名"),
+                        "解析": (d7.get("解析") or "")[:60],
+                        "靶里文本": [_txt5a[-20:], _txt5b[-20:]],
+                        "warning": _w7[:90]}
+        need(not (("认不出" in _w7) or ("不放行" in _w7) or ("不是键名" in _w7)),
+             "⑤ keys='9' 被当数值/非法拒了：%s" % _w7[:140], reds)
+        need(d7.get("vk") == "9" and d7.get("键名") == "9",
+             "⑤ keys='9' 出闸的不是键名『9』（data.vk=%r data.键名=%r）"
+             "—— 单字符数字被抢跑成数值了" % (d7.get("vk"), d7.get("键名")), reds)
+        need("键名" in str(d7.get("解析") or ""),
+             "⑤ keys='9' 的解析不含「键名」（%r）" % (d7.get("解析") or "")[:60], reds)
+        if r7.get("ok") and "后台按键生效" not in str(d7.get("raw") or ""):
+            # 前台路径才回读靶里字符：真按 '9' ⇒ 多出一个 '9'；
+            # 若发的是 Tab ⇒ 文字不变（焦点跑了）；若发的是 Backspace ⇒ 前面的字被吃掉。
+            need(_txt5b != _txt5a and _txt5b.endswith("9"),
+                 "⑤ 信封报成功，但靶里文本没有多出 '9'（%r → %r）"
+                 "—— 要么发成了 Tab（焦点跑了）、要么发成了 Backspace（吃了前一个字）"
+                 % (_txt5a[-20:], _txt5b[-20:]), reds)
+    finally:
+        core.LEGACY = _old_legacy
+        core._legacy = _real_legacy
+        tgt.close()
+    return title, reds, ev
+
+
+def check_auth_merge(core, fx):
+    """(12) 授权合并 · 敏感窗终判（接线单 §二 5）。返回 (组名, 红线列表, 证据字典)。"""
+    title = "(12) 授权合并 · 敏感窗服务端终判（--xy 直点也拦）"
+    reds, ev = [], {}
+    # ⚠ 不看 W1_BLOCKED：(11) 受限是"真键鼠送不进去"，而 (12) 要验的是"该被拦的有没有被拦住"，
+    #   它根本不依赖前台（自建 Tk 靶窗即可）。让 (11) 的受限连坐掉 (12)，
+    #   等于把一条能判的结论白白丢掉 —— 环境受限只该影响真正受限的那一条。
+    root, hwnd = None, 0
+    _old_legacy = core.LEGACY
+    try:
+        try:
+            root, hwnd = _w1_tk_target()
+        except Exception as e:
+            W1_BLOCKED.append("(12) 自建 Tk 靶窗起不来：%s: %s" % (type(e).__name__, e))
+            return title, reds, ev
+        # 与 (11) 同款：act.py 跑沙箱副本，免得去读真机的通行证
+        core.LEGACY = _w1_legacy_sandbox(core, reds)
+        _spawned, _real_legacy = _w1_spy_legacy(core)
+        import win32gui
+        from agentctl import authstate
+        ev["靶窗"] = {"hwnd": hwnd, "标题": win32gui.GetWindowText(hwnd) or "",
+                      "类名": win32gui.GetClassName(hwnd) or ""}
+        cls = win32gui.GetClassName(hwnd) or ""
+        # ── a. 读侧本身判得对（这一步与接线无关：authstate.deny_window 现在就在）──
+        try:
+            denied, why, kind = authstate.deny_window(
+                exe="python.exe", cls=cls, title=win32gui.GetWindowText(hwnd) or "")
+        except Exception as e:
+            denied, why, kind = None, "%s: %s" % (type(e).__name__, e), None
+        ev["a读侧"] = {"denied": denied, "原因": (str(why) or "")[:90], "类别": kind}
+        need(denied is True,
+             "(12) 读侧 authstate.deny_window 对 python.exe 属主 / %s 类名没判拒 ⇒ "
+             "终判本身就是空的（原因：%s）" % (cls, str(why)[:120]), reds)
+
+        # ── a2. 窄口那层（gate.deny_target：接线单 §二 5 解禁的那一个函数）也得通 ──
+        #   它应当**抛** GateDenied（而不是返回 False）—— 抛才会让动作路径整体停住。
+        #   这条同时是 deny_window_bypass 注入的靶：终判被旁路 ⇒ 它不抛 ⇒ 本条转红。
+        from agentctl import gate
+        try:
+            gate.deny_target(exe="python.exe", cls=cls,
+                             title=win32gui.GetWindowText(hwnd) or "")
+            a2 = "没抛（当作放行）"
+        except gate.GateDenied as e:
+            a2 = "抛出 GateDenied：%s" % str(e)[:70]
+        except Exception as e:
+            a2 = "%s: %s" % (type(e).__name__, e)
+        ev["a2窄口"] = a2[:110]
+        need(a2.startswith("抛出 GateDenied"),
+             "(12) gate.deny_target（敏感窗终判窄口）对 python.exe 属主 / %s 类名**没拒**（%s）"
+             " ⇒ 就算动作路径接上它也是个空转" % (cls, a2[:120]), reds)
+
+        # ── b. 动作时必须被服务端拦下，而且**在 act.py 之前**拦 ──
+        r = win32gui.GetWindowRect(hwnd)
+        xy = [int(r[0]) + 40, int(r[1]) + 60]
+        sh = core.dispatch("ctl_shot", {"hwnd": hwnd, "actor": "判据W1"})
+        tok = str(((sh.get("data") or {}).get("capture_id")) or "")
+        ev["b凭据"] = {"capture_id": tok}
+        n0 = len(_spawned)
+        rr = core.t_click({"hwnd": hwnd, "xy": xy, "from_capture": tok,
+                           "actor": "判据W1"})
+        warn = rr.get("warning") or ""
+        raw = str((rr.get("data") or {}).get("raw") or "")
+        ev["b动作"] = {"ok": bool(rr.get("ok")), "code": rr.get("code"),
+                       "warning": warn[:110], "raw": raw[:110],
+                       "act.py被spawn": list(_spawned[n0:])}
+        need(rr.get("ok") is False,
+             "(12) 对 python.exe 属主的敏感窗，ctl_click 竟然报 ok=True —— 终判没接线", reds)
+        need(rr.get("code") == 3,
+             "(12) 期望 code=3（敏感窗口拒绝），实际 %s（warning=%s）"
+             % (rr.get("code"), warn[:110]), reds)
+        # ★ 判别「服务端前拦」与「放行到 act.py 才被拦」的唯一硬证据：**act.py 有没有被 spawn**。
+        #   服务端终判接进动作路径后，这种窗口应当在前置阶段就被拒，
+        #   act.py 一次都不用起（既省一次子进程，也杜绝"老线哪天改了口径就漏过去"）。
+        need(not _spawned[n0:],
+             "(12) 敏感窗的点击**是放到 act.py 才被拦的**（spawn 了 %r）⇒ "
+             "服务端终判还没接进 core 的动作路径：现在拦得住全靠老线那层，"
+             "而 --xy 直点这条路径本单要的就是「服务端自己先判」" % (list(_spawned[n0:])[:1],), reds)
+    finally:
+        core.LEGACY = _old_legacy
+        core._legacy = _real_legacy
+        if root is not None:
+            try:
+                root.destroy()
+            except Exception:
+                pass
+    return title, reds, ev
+
+
+# ======================================================================
+# main
+# ======================================================================
 def main():
     ap = argparse.ArgumentParser(description="F4 语义屏 ctl_screen 判据（窗B1）")
     ap.add_argument("--live", action="store_true", help="真开 tkinter 窗口跑（需交互桌面）")
@@ -3512,11 +4361,24 @@ def main():
                      ("S9 OCR 接线与 R3", lambda: check_ocr_r3(core, fx)),
                      ("S10 动作侧接线", lambda: check_action_side(core, fx)),
                      ("S11 cdp.py --port 与契约两句",
-                     lambda: check_cdp_port_and_contract(core))):
+                      lambda: check_cdp_port_and_contract(core)),
+                     ("(11) P0 输入通道（focus/keys/frame_id/after.diff）",
+                      lambda: check_input_channel(core, fx)),
+                     ("(12) 授权合并 · 敏感窗服务端终判",
+                      lambda: check_auth_merge(core, fx))):
+        _nb = len(W1_BLOCKED)
         title, reds, ev = fn()
         res[title] = reds
+        # ★ 这三态必须分开显示："环境受限"绝不能打印成"绿"。
+        #   实测踩到：靶窗置不上前时 check_input_channel 提前返回、reds 为空，
+        #   于是输出成 `-- (11) … -- 绿（1.5s）`，读者会把它当成"通过了"，
+        #   而它其实一个字都没验（1.5s 跑完也说明它压根没动）。
+        #   三态：红（有条目）/ 环境受限（本组新记了 W1_BLOCKED）/ 绿。
+        _blocked_here = len(W1_BLOCKED) > _nb
         print("")
-        print("-- %s -- %s" % (title, "红" if reds else "绿"))
+        print("-- %s -- %s" % (title,
+                               "红" if reds else ("环境受限（不算红也不算绿）"
+                                                 if _blocked_here else "绿")))
         for line in reds:
             print("   **红 · %s" % line)
         for k, v in ev.items():
@@ -3582,6 +4444,11 @@ def main():
     if total:
         print("结论：RED —— 红 %d 条%s"
               % (total, ("（注入模式：注入的定义就是必红，红了正说明判据有判别力）" if kinds else "")))
+    elif W1_BLOCKED:
+        # ★ 有组一个字都没验成时**不许打 GREEN**：那会把"没验"说成"通过"。
+        #   （本次实测踩到：靶窗前台被抢，组提前返回、reds 为空，旧代码照样打印 GREEN。）
+        print("结论：**部分组环境受限** —— 已跑完的组没有红，但下面这些组**一个字都没验成**，"
+              "所以本次不能算 GREEN（退出码 2）")
     else:
         print("结论：GREEN —— (1)默认≤40且视口内可交互全在、omitted 对得上账；"
               "(2)uid 三连稳、标题变了版本变、版本只能回传不能指定；"
@@ -3616,6 +4483,15 @@ def main():
               "三通道并存时R1/R2/R3各自都报得出来。")
     print("退出前 AgentCtlCtrlBorder* 窗 = %s（%s）" % count_border_windows())
     print("=" * 100)
+
+    if W1_BLOCKED:
+        print("")
+        print("   [环境限制] %s" % "；".join(W1_BLOCKED))
+        print("             **这不算红也不算绿** —— 宁可跑不起来，也不要半个结论（与 --live 同口径）。")
+        print("             有交互桌面的会话请重跑：python -X utf8 tests\\_语义屏判据.py")
+        shutil.rmtree(tmp, ignore_errors=True)
+        return 2
+
     shutil.rmtree(tmp, ignore_errors=True)
     return 1 if total else 0
 

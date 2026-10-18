@@ -1491,9 +1491,17 @@ def _bind_capture(args: dict, hwnd: int) -> dict | None:
     #   照字面传 --capture_id 会**静默失效**（code=12），实测踩过两次。
     #   ★ 两者都要过 verify_capture 的窗口/前台/TTL 三重校验，多认不放宽任何约束。
     tok = args.get("from_capture") or args.get("capture_id")
-    if not tok:
+    # ★ P0-A：坐标路径的凭据现在有**两种**（契约 §二）：
+    #   from_capture（截图凭据，ctl_shot / ctl_tree 签发）或 frame_id（屏版凭据，ctl_screen 签发）。
+    #   二者**至少一个**；都缺仍然 code=12 —— 这条铁律不动（旧坐标点新画面）。
+    fid = str(args.get("frame_id") or "").strip()
+    if not tok and not fid:
         return env(code=gate.CODE_STALE_CAPTURE,
-                   warning="走坐标的动作必须带 from_capture（先 ctl_shot 或 ctl_tree 拿 capture_id）"
+                   warning="走坐标的动作必须带一个凭据："
+                           "**from_capture**（先 ctl_shot 或 ctl_tree 拿 capture_id）"
+                           "**或 frame_id**（先 ctl_screen 拿 screen_version）。"
+                           "两个都缺 ⇒ 无法判断这个坐标是否还对当前画面，"
+                           "本次一个像素都没点。"
                            "—— 见《AGENT接口.md》§3：这台机器的头号事故就是拿旧截图点新画面")
     rect = _win_rect(hwnd)
     fg = _is_foreground(hwnd)
@@ -1508,10 +1516,13 @@ def _bind_capture(args: dict, hwnd: int) -> dict | None:
                 img = hashlib.sha256(shot.rgb).hexdigest()
         except Exception:
             img = None
-    try:
-        gate.check_capture(tok, hwnd=hwnd, rect=rect, foreground=fg, image_sha256=img)
-    except gate.GateDenied as e:
-        return env(code=e.code, warning=f"{e.why} —— 重新 ctl_shot 拿新的 capture_id 再动手")
+    # ★ 只有带了 from_capture 才走这道四重校验；
+    #   只带 frame_id 的路径由 t_click 拿它去对 screen_version（那是 frame_id 的本义）。
+    if tok:
+        try:
+            gate.check_capture(tok, hwnd=hwnd, rect=rect, foreground=fg, image_sha256=img)
+        except gate.GateDenied as e:
+            return env(code=e.code, warning=f"{e.why} —— 重新 ctl_shot 拿新的 capture_id 再动手")
     return None
 
 
@@ -1666,6 +1677,254 @@ def _cl_run(py: str, argv: list, timeout: int = 300):
     return p.returncode, (p.stdout or "") + (p.stderr or "")
 
 
+# ════════════════════════════════════════════════════════
+# 动作信封 · after.diff（P0-A · 2026-10-18）
+# ════════════════════════════════════════════════════
+# 契约 §二：data.after.diff = { changed:bool, bbox:[x,y,w,h]|null, crop_path?:str }
+#   before/after 落 work\_actions\<frame_id>\，只留最近 20 组。
+#
+# ★ 为什么必须在**动作前**就拍：事后补拍无法归因 ——
+#   那和「截图发现界面变了」不能证明「是这个动作造成的」是同一个道理
+#   （同 T17 闭环开头那条教训）。
+# ★ 为什么阈值化再取 bbox：光标闪烁 / 字体抗齿齿会让 getbbox 永远非空 ⇒
+#   每一次动作都报 changed=true，等于这个字段没有信息量。
+#   所以先把小于阈值的差抹掉，剩下的才算「画面真的变了」。
+
+ACT_DIFF_KEEP = 20        # work/_actions 下只留最近 N 组（契约 §二：20）
+ACT_DIFF_STEP = 2         # 每通道最大差 < 2 视为噪声（0=完全相同，255=黑白反转）
+# ★ 接线单 §二-4：变化区的忽略噪声口径。
+#   光标闪烁是一条 1~2px 宽的竖条，靠像素比对会让每一次动作都报变了。
+#   caret_px=8 是窄边上限：单个字符大概 9~11px 宽，7a84边 9 > 8 就不会被当成光标。
+ACT_DIFF_IGNORE_DEFAULT = {"caret_px": 8, "min_area_px": 24}
+
+
+def _diff_ignore_cfg(args) -> dict:
+    """读 diff_ignore（部分支持），永远返回一份**完整**配置。
+
+    ★ 为什么不直接拼进去：调用方只传了一半（只传 caret_px）时，
+    另一个输入就会变成 None → 比对时报 TypeError。缺的项必须补齐。
+    """
+    _cfg = dict(ACT_DIFF_IGNORE_DEFAULT)
+    _raw = (args or {}).get("diff_ignore")
+    if isinstance(_raw, dict):
+        for _k in _cfg:
+            try:
+                _v = int(_raw.get(_k))
+            except (TypeError, ValueError):
+                continue
+            if _v >= 0:
+                _cfg[_k] = _v
+    return _cfg
+
+
+def _act_fid(fid) -> str:
+    """把**外部传的** frame_id 洗成能安全当目录名的一段。
+
+    ★ 为什么要洗：frame_id 是调用方给的字符串，直接拼路径等于
+    把一个「../../..」当目录名用。这里只因为落盘名字，不因为判定。
+    """
+    s = re.sub(r"[^0-9A-Za-z_.\-]", "_", str(fid or "")).strip("._")[:64]
+    return s or "nofid"
+
+
+def _act_diff_blocks(mask) -> list:
+    """把阈值化的变化 mask 切成**连通块**，返回 [(宽, 高, 面积, (x0,y0,x1,y1))]。
+
+    ★ 为什么不能只看包围盒：光标闪烁 + 区域选取会在一条横线上留下**一串互不相连的碎片**，
+      它们的包围盒很宽（整行那么宽），可里面真正变了的像素加起来还不如一个字符多 ——
+      只用包围盒面积必然误报。分块后才能区分「光标」与「字符」。
+
+    实现参考：先按行抽连续段（用 bytes.find 跳过零段，大图也不慢），
+    再用并查集合并「上下相邻且 x 区间相交」的段。
+    """
+    try:
+        w, h = mask.size
+        data = mask.tobytes()
+    except Exception:
+        return []
+    runs = []                       # [y, x0, x1]（按 y 递增，行内亦按 x 递增）
+    for y in range(h):
+        row = data[y * w:(y + 1) * w]
+        x = 0
+        while True:
+            x = row.find(255, x)
+            if x < 0:
+                break
+            x2 = row.find(0, x)
+            if x2 < 0:
+                x2 = w
+            runs.append([y, x, x2 - 1])
+            x = x2
+    if not runs:
+        return []
+    parent = list(range(len(runs)))
+
+    def _find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    def _union(a, b):
+        ra, rb = _find(a), _find(b)
+        if ra != rb:
+            parent[rb] = ra
+
+    # 只比较**相邻两行**的段（双指针），不做 O(n^2) 全比
+    i = 0
+    n = len(runs)
+    while i < n:
+        _y0 = runs[i][0]
+        j = i
+        while j < n and runs[j][0] == _y0:
+            j += 1
+        k = j
+        while k < n and runs[k][0] == _y0 + 1:
+            k += 1
+        for a in range(i, j):
+            for b in range(j, k):
+                if runs[a][1] <= runs[b][2] and runs[b][1] <= runs[a][2]:
+                    _union(a, b)
+        # ★ i = j（而不是 k）：下一轮要从「刚合并过的那行」继续，
+        #   否则变成**成对**合并（20-21、22-23…），第 21 行和第 22 行永远接不上 ——
+        #   一块 20 行高的字符块会被切成 10 个 2 行高的碎块，每块都得不到 caret_px 而被当成光标丢掉。
+        i = j
+    agg = {}
+    for _idx, (_y, _x0, _x1) in enumerate(runs):
+        _r = _find(_idx)
+        _a = agg.get(_r)
+        if _a is None:
+            agg[_r] = {"area": _x1 - _x0 + 1, "x0": _x0, "x1": _x1, "y0": _y, "y1": _y}
+        else:
+            _a["area"] += _x1 - _x0 + 1
+            _a["x0"] = min(_a["x0"], _x0)
+            _a["x1"] = max(_a["x1"], _x1)
+            _a["y1"] = max(_a["y1"], _y)
+    return [(_a["x1"] - _a["x0"] + 1, _a["y1"] - _a["y0"] + 1, _a["area"],
+             (_a["x0"], _a["y0"], _a["x1"], _a["y1"])) for _a in agg.values()]
+
+
+def _act_grab(hwnd: int):
+    """截目标窗当前画面 → PIL.Image。
+
+    **取不到返回 None，绝不返回一张空白图冒充。**
+    """
+    try:
+        r = _win_rect(int(hwnd))
+        if not r or r[2] <= r[0] or r[3] <= r[1]:
+            return None
+        import mss                                          # noqa: PLC0415
+        from PIL import Image                               # noqa: PLC0415
+        with mss.mss() as sct:
+            shot = sct.grab({"left": r[0], "top": r[1],
+                             "width": r[2] - r[0], "height": r[3] - r[1]})
+        return Image.frombytes("RGB", shot.size, shot.rgb)
+    except Exception:
+        return None
+
+
+def _act_diff_of(before, after, win_off=None, ignore=None) -> dict:
+    """两帧求差。返回 {changed, bbox, 说明}。
+
+    changed 三值：True 真变了 / False 确认没变 / None **没测出来**。
+    ⛔ None 不许当成 False ——「我没看见」和「我看见了没变」是两回事，
+    混起来就是把「我没看见」说成了「我看见了没变」。
+    bbox 用**屏幕绝对坐标**（与项目☄1 go xy/rect 同口径），
+    而 crop 裁图用窗口内坐标 —— 两者不同源，正好对得上。
+    """
+    if before is None or after is None:
+        return {"changed": None, "bbox": None,
+                "说明": "取不到画面（窗口不可读 / 截图失败）⇒ 没测出来，不等于没变"}
+    if before.size != after.size:
+        _w = max(before.size[0], after.size[0])
+        _h = max(before.size[1], after.size[1])
+        _ox, _oy = win_off or (0, 0)
+        return {"changed": True, "bbox": [_ox, _oy, _w, _h],
+                "说明": "动作前后窗口尺寸变了（%s → %s）" % (before.size, after.size)}
+    try:
+        from PIL import ImageChops                        # noqa: PLC0415
+        _d = ImageChops.difference(before, after).convert("L")
+        _mask = _d.point(lambda v: 255 if v >= ACT_DIFF_STEP else 0)
+        _bb = _mask.getbbox()
+    except Exception as e:
+        return {"changed": None, "bbox": None, "说明": "求差失败：%s" % e}
+    if not _bb:
+        return {"changed": False, "bbox": None,
+                "说明": "逐像素比对无变化（阈值 %d/255）" % ACT_DIFF_STEP}
+    x0, y0, x1, y1 = _bb
+    _ox, _oy = win_off or (0, 0)
+    # ★ 接线单 §二-4：changed 是**必要非充分**。
+    #   真变了 => changed 必须 true（光标闪烁不算变了）；零变化 => 必须 false。
+    #   中间那个「只是光标在闪」现代成 false。
+    _ig = ignore if isinstance(ignore, dict) else ACT_DIFF_IGNORE_DEFAULT
+    _caret = int(_ig.get("caret_px", 8) or 0)
+    _minarea = int(_ig.get("min_area_px", 24) or 0)
+    # ★ ★ changed 只在「diff_ignore 之外确实有面积 ≥ min_area_px 的差异」时为 True。
+    #   改前只看**包围盒**宽高与面积，地址是：光标闪烁 + 区域选取在同一行留下一串
+    #   互不相连的碎片 —— 包围盒横跃整行，**面积很大**，但真正变了的像素很少。
+    #   改成分块后才能回答「到底变了多少」这个问题。
+    _blocks = _act_diff_blocks(_mask)
+    _live = [_b for _b in _blocks if (not _caret) or min(_b[0], _b[1]) > _caret]
+    _sum = sum(_b[2] for _b in _live)
+    if (not _live) or (_minarea and _sum < _minarea):
+        _drop = len(_blocks) - len(_live)
+        return {"changed": False, "bbox": None, "忽略为": True,
+                "说明": ("共 %d 块变化（其中 %d 块窄边≤%d 判为光标类），"
+                        "剩余面积 %d px2 ≤ min_area_px=%d ⇒ 判为没变"
+                        % (len(_blocks), _drop, _caret, _sum, _minarea)) if _drop
+                       else ("变化面积 %d px2 ≤ min_area_px=%d ⇒ 判为没变" % (_sum, _minarea))}
+    x0 = min(_b[3][0] for _b in _live)
+    y0 = min(_b[3][1] for _b in _live)
+    x1 = max(_b[3][2] for _b in _live)
+    y1 = max(_b[3][3] for _b in _live)
+    # ★ 块的 (x0,y0,x1,y1) 是**闭区间**（含末端像素），所以宽高要 +1。
+    #   改前用 Image.getbbox()，它返回的是**右开区间**，宽就是 x1-x0 ——
+    #   换成闭区间后若不 +1，60px 的块会报成 59（K4b 实测报 59 键出的就是这个），
+    #   裁图还会少切一列。口径不能在重写后对不齐。
+    _w = x1 - x0 + 1
+    _h = y1 - y0 + 1
+    # _local 是窗口内坐标，给 _act_diff_store 裁图用；PIL crop 是**右开区间**，所以右下标 +1。
+    return {"changed": True, "bbox": [_ox + x0, _oy + y0, _w, _h],
+            "_local": (x0, y0, x1 + 1, y1 + 1),
+            "说明": ("变化区（窗口内 %d,%d 起 %dx%d；%d 块合计 %d px2）"
+                    % (x0, y0, _w, _h, len(_live), _sum))}
+
+
+def _act_diff_store(fid, before, after, diff) -> dict:
+    """before/after/diff 落 work\\_actions\\<fid>\\；只留最近 ACT_DIFF_KEEP 组。
+
+    返回 {dir, crop_path} 对 diff 做不可变补充（落盘失败不能连带 diff 本身丢了）。
+    ⛔ 整个落盘都包在 try 里：落盘是**附带证据**，不是动作本身成功的前提。
+    """
+    _out = {}
+    try:
+        _dir = os.path.join(ROOT, "work", "_actions", _act_fid(fid))
+        os.makedirs(_dir, exist_ok=True)
+        for _nm, _im in (("before.png", before), ("after.png", after)):
+            if _im is not None:
+                _im.save(os.path.join(_dir, _nm))
+        _loc = diff.get("_local")
+        if diff.get("changed") and _loc and after is not None:
+            # crop_path = 「变了的那块直接看」—— 采用 after 的对应区（而不是差分图）
+            _cp = os.path.join(_dir, "crop.png")
+            after.crop(_loc).save(_cp)
+            _out["crop_path"] = _cp
+        _out["dir"] = _dir
+    except Exception as e:
+        _out["落盘失败"] = str(e)
+    try:
+        _base = os.path.join(ROOT, "work", "_actions")
+        _ds = [os.path.join(_base, d) for d in os.listdir(_base)]
+        _ds = [d for d in _ds if os.path.isdir(d)]
+        if len(_ds) > ACT_DIFF_KEEP:
+            for _old in sorted(_ds, key=lambda p: os.path.getmtime(p))[:len(_ds) - ACT_DIFF_KEEP]:
+                import shutil                                # noqa: PLC0415
+                shutil.rmtree(_old, ignore_errors=True)
+    except Exception:
+        pass
+    return _out
+
+
 def _act(action: str, args: dict, argv: list[str], scope: str = "B") -> dict:
     """统一：**先验证通行证（非消耗）→ 再验租约 → 再验观测绑定 → 调 act.py → 成功后消费 capture_id**。
 
@@ -1704,6 +1963,14 @@ def _act(action: str, args: dict, argv: list[str], scope: str = "B") -> dict:
         if _rcv != 0:
             return env(code=gate.CODE_UNSTABLE, data={"raw": _outv[-800:]},
                        warning="动作【前】快照失败 ⇒ 拒绝执行（没拍到「前」，事后无法归因）")
+
+    # ★ P0-A：动作**前**拍一张。当前哪些动作需要快照？
+    #   ① 带 frame_id 的（契约 §二：before/after 落 work\_actions\<frame_id>\）；
+    #   ② t_type 的 mode=focus（契约 §二：「发了但画面没变 ⇒ code=8」，
+    #      —— 那条口径本身就需要快照才判得出，与 frame_id 无关。
+    # ⛔ 不启用时**一张都不拍** ⇒ 输出与改前逐字节一致（非破坏性）。
+    _need_diff = bool(args.get("_need_diff") or args.get("frame_id"))
+    _before = _act_grab(hwnd) if _need_diff else None
 
     rc, out, e = _legacy("act.py", argv, timeout=int(args.get("timeout_sec") or ACT_TIMEOUT_SEC))
     r = _map_rc(rc, out, e)
@@ -1748,6 +2015,46 @@ def _act(action: str, args: dict, argv: list[str], scope: str = "B") -> dict:
         except Exception:
             pass
 
+    # ★ P0-A：动作后拍一张、求差、落盘、写进信封。
+    # ⛔ 信封的 data.after **合并**而不是覆盖：t_click 已经把 uid_state 放在
+    #   data.after 里（窗G3），覆盖会把那个证据抹掉。
+    if _need_diff:
+        _after = _act_grab(hwnd)
+        _wr = _win_rect(hwnd) or [0, 0, 0, 0]
+        _df = _act_diff_of(_before, _after, (int(_wr[0]), int(_wr[1])),
+                           _diff_ignore_cfg(args))
+        # 没带 frame_id 的（focus 模式）用作用名+时间戳当目录名 —— 同一次动作仍落在同一个目录里。
+        _fid = args.get("frame_id") or ("%s_%d" % (action, time.time_ns()))
+        _st = _act_diff_store(_fid, _before, _after, _df)
+        _pub = {k: v for k, v in _df.items() if not k.startswith("_")}
+        for _k in ("crop_path", "dir", "落盘失败"):
+            if _st.get(_k):
+                _pub[_k] = _st[_k]
+        _d0 = r.get("data") or {}
+        _a0 = _d0.get("after") or {}
+        r["data"] = {**_d0, "after": {**_a0, "diff": _pub}}
+
+        # ★ 契约 §二 · mode=focus 的第二种失败：「发了但画面没变 ⇒ code=8」。
+        #   ⛔ **绝不当成功**。因为这一款就是「不要用「动作发出去了」冒充
+        #   「事情发生了」」的最后一道护栏，放过它就等于把该红的那部分白白赊了。
+        #   分三态：False=确认没变→ code=8；None=没测出来→ code=5（不冒充「没变」，
+        #   也不报成功；True=真变了→ 就是成功。
+        if r.get("ok") and args.get("_need_diff") and _df.get("changed") is not True:
+            if _df.get("changed") is False:
+                _w8 = ("★ 字符已发出来，但**动作前后画面逐像素比对没变**（阈值 %d/255）。"
+                       "本次**不报成功** —— 「键发出去了」不等于「字边确实出现了」。"
+                       "可能原因：焦点不在目标窗、目标窗不在前台、对方拒收输入、或字段不可编辑。"
+                       "先确认前台与焦点（ctl_windows 看当前前台），再重试。" % ACT_DIFF_STEP)
+                r = env(code=gate.CODE_NO_CHANGE,
+                        data=r.get("data"),
+                        warning=_w8)
+            else:
+                r = env(code=gate.CODE_UNSTABLE,
+                        data=r.get("data"),
+                        warning=("★ 字符已发出来，但**没能比对画面**（%s）。"
+                                 "本次不报成功 —— 不能把「我没看见」写成「我看见了没变」。"
+                                 "请把目标窗到前台后重试，并用 ctl_screen 目测确认。" % _df.get("说明", "")))
+
     # ★ T17 闭环后半（2026-10-12）。四条硬约束：
     #   ① 不声明 expect 时，**一个字段都不加** ⇒ 输出与改前逐字节一致（非破坏性）
     #   ② unknown / 快照不可比 都【不算成功】—— 与 验动作.py 同口径
@@ -1774,7 +2081,11 @@ def _act(action: str, args: dict, argv: list[str], scope: str = "B") -> dict:
             #   失败路径若只放进 data，agent 就得记两个位置 —— 同一件事必须只有一个读法。
             return env(code=_code, verdict=verdict,
                        verify={"expect": exp, "watch": watch, "action_ok": True, **_vdetail},
-                       data={"rc": (r.get("data") or {}).get("rc"),
+                       # ★ P0-A：合并 r["data"] 而不是新造 —— 动作确实发出去了，
+                       #   那些已经拿到手的证据（after.uid_state / after.diff）不能因为
+                       #   闭环不过就丢掉；新填的五个键只覆写自己那部分。
+                       data={**(r.get("data") or {}),
+                             "rc": (r.get("data") or {}).get("rc"),
                              "action_ok": True, "verdict": verdict,
                              "expect": exp, **_vdetail},
                        warning="★ 动作执行了，但【独立验证没通过】：verdict=%s。"
@@ -2435,6 +2746,29 @@ def t_click(args: dict) -> dict:
         else:
             args = got
 
+    # ★ P0-A · frame_id 凭据校验（契约 §二）：
+    #   frame_id 必须与**当前** screen_version 对得上，不符 ⇒ code=12 且**零像素**。
+    #   位置在这里（门禁之后、argv 组装之前）是有意为的：
+    #   门禁先报「你没通行证」再报「你给的凭据已经过期」（项目一致口径）；
+    #   凭据校验则必须早于**任何动作**，否则「零像素」就是一句空话。
+    fid = str(args.get("frame_id") or "").strip()
+    if fid:
+        _cur = str((_SCREEN_SEEN.get(int(hwnd)) or {}).get("screen_version") or "")
+        if not _cur:
+            return env(code=gate.CODE_STALE_CAPTURE,
+                       warning=("给了 frame_id=%s，但**本机还没有这个窗的屏版本基线**（没过 ctl_screen）。"
+                               "无法判断凭据是新是旧 ⇒ 本次**一个像素都没点**。"
+                               "先 ctl_screen --hwnd %d 拿到 screen_version，再把它当 frame_id 传回来。" % (fid, hwnd)))
+        if fid != _cur:
+            return env(code=gate.CODE_STALE_CAPTURE,
+                       data={"frame_id_校验": {"frame_id": fid, "当前 screen_version": _cur,
+                                             "判定": "不匹配"}},
+                       warning=("frame_id=%s 与当前 screen_version=%s **对不上** ⇒ 画面已经变了（或屏片过期）。"
+                               "本次**零像素**，一个都没点。"
+                               "重新 ctl_screen --hwnd %d 拿新的 screen_version（它就是新的 frame_id），"
+                               "核对坐标还在不在原位再点。" % (fid, _cur, hwnd)))
+        args = {**args, "frame_id_校验": {"frame_id": fid, "当前 screen_version": _cur, "判定": "匹配"}}
+
     argv = ["click", "--hwnd", str(hwnd)]
     if args.get("name") and not args.get("_eid_hit"):
         # 只有**老线兜底**才会走到这里：新线 name 路径的 argv 里不再有 --name，
@@ -2452,7 +2786,17 @@ def t_click(args: dict) -> dict:
         argv += ["--retry", str(int(args["retry"]))]
     if args.get("dry_run"):
         argv += ["--dry-run"]
+    # ★ 接线单 §二 5：敏感窗终判在**spawn 之前**。命中 ⇒ code=3，argv 不会被送出去。
+    #   位置在参数校验（eid/name/xy/frame_id）之后、组 argv 之后，但**在 _act 之前**——所以 argv 已组好了却没出去。
+    _derr = _deny_sensitive_target(hwnd, "ctl_click", "点击")
+    if _derr:
+        return _derr
     r = _act("click", args, argv)
+    # ★ P0-A：frame_id 校验结论在**动作之后立即**回显，不只在 ok 时。
+    #   动作本身失败但**凭据是对的**（例如点击发出去了但画面没变 → code=8）时，
+    #   这条信息正好最值钱 —— 只在成功时才看得见的设计，恰好在需要它的场合隐身。
+    if args.get("frame_id_校验"):
+        r["data"] = {**(r.get("data") or {}), "frame_id_校验": args["frame_id_校验"]}
     if r.get("ok") and args.get("_eid_hit"):
         # ★ 窗G3 · 动作后回读：「点下去了」不等于「点对了」。
         #   after{uid_state, screen_version}：文字变了 = TEXT_CHANGED（动作达成的证据）；
@@ -2466,6 +2810,9 @@ def t_click(args: dict) -> dict:
                      "note": "按控件名/eid 点击不依赖观测；走坐标时已校验 capture_id",
                      "点到": args.get("_eid_hit"),
                      "expect_uid_校验": args.get("_expect_uid_校验"),
+                     # ★ P0-A：成功路径也要回显凭据校验结论 —— 拒绝路径在 data.frame_id_校验 里。
+                     #   只在拒绝时报、成功时不报，那就是让调用方在成功下也看不到自己凭据到底比对过没。
+                     "frame_id_校验": args.get("frame_id_校验"),
                      # ★ W2-C：让程序能自证坐标系，不必靠人记得 SOP 怎么写。
                      "坐标口径": "屏幕物理像素（与 ctl_find/ctl_tree 的 rect/center 同源；"
                                   "不要减窗口原点）"}
@@ -2492,13 +2839,82 @@ def t_click(args: dict) -> dict:
     return r
 
 
+def _deny_sensitive_target(hwnd: int, tool: str, what: str):
+    """动作时敏感窗终判（接线单 §二 5 的 core 侧接线）。命中返回错误信封，否则 None。
+
+    ★ 位置是硬要求：**参数校验之后、spawn 之前**。
+      命中却照旧 spawn 的话，act.py 那边虽然也会拒，但白跑一个子进程，
+      更要命的是信封里读不出「到底是谁拦的」——拒绝发生在 spawn 之后就说不清了。
+
+    ⛔ **fail-closed**：判定器自身出错也拒，不放行。
+      “判不出来就当没事”在点击这事上等于直接放行——这正是敏感窗终判要阻的事。
+    """
+    _info = _win_info_for(hwnd)
+    try:
+        gate.deny_target(exe=_info.get("process") or None,
+                         cls=_info.get("class") or None,
+                         title=_info.get("title") or None)
+    except gate.GateDenied as e:
+        return env(code=e.code,
+                   data={"blocked_by": "sensitive_window", "窗口": _info},
+                   warning=("%s —— %s。本次**没发出任何动作**："
+                            "拦在 spawn 之前，act.py 根本没被调起（argv 为空）。"
+                            "这类窗口属于用户自己的东西（授权弹窗 / UAC / 系统设置页那一类），"
+                            "点它等于替用户越权。" % (what, e.why)))
+    except Exception as e:
+        return env(code=gate.CODE_UNSTABLE,
+                   data={"blocked_by": "sensitive_window_judge_failed", "异常": str(e)[:200]},
+                   warning=("%s 的敏感窗终判**自身出错**（%s）。"
+                            "本次**没发出任何动作**（fail-closed）—— "
+                            "判定器不可用时不当没事。原因：%s"
+                            % (what, type(e).__name__, e)))
+    return None
+
+
+def _type_focus_gate(args: dict, hwnd: int):
+    """focus 模式的前台门禁（契约 §二）。成功返回 None。
+
+    ★ 与 _allow_foreground 的差别（这里是故意的）：
+      _allow_foreground（t_scroll / t_keys 那两处）是**无条件**要 allow_foreground，
+      因为那两个动作本身就会主动置前，它们不需要区分「已在前台」。
+      而 focus 模式只是**往前台焦点窗发字——目标窗已在前台时不会打断使用者，
+      就不应该拒绝。所以这里先看前台，真的不在前台才要 allow_foreground。
+    """
+    if _is_foreground(hwnd):
+        return None
+    return _allow_foreground(args, "ctl_type", "focus 模式直接往前台焦点窗打字")
+
+
 def t_type(args: dict) -> dict:
     hwnd = int(args.get("hwnd") or 0)
+    mode = str(args.get("mode") or "element").strip().lower()
+    if mode not in ("element", "focus"):
+        return env(code=gate.CODE_NO_CTRL,
+                   warning="mode 只认 %s，收到 %r。"
+                           "① element（默认，回退兼容）：找 UIA 元素后对它打字。"
+                           "② focus（新）：不找元素，直接往前台焦点窗逐字符发。"
+                           % ("/".join(("element", "focus")), mode))
     argv = ["type", "--hwnd", str(hwnd), "--text", str(args.get("text") or "")]
     if args.get("force_send"):
         argv += ["--force-send"]
     if args.get("dry_run"):
         argv += ["--dry-run"]
+    if mode == "focus":
+        # ① 不找 UIA 元素：透传 --focus 给 act.py。
+        #   这个开关的底层实现（逐字符 SendInput KEYEVENTF_UNICODE）归 Codex-2 的 act.py，
+        #   core 这里只负责拿控参与失败口径。
+        argv += ["--focus"]
+        # ② 前台门禁：没前台 ⇒ code=5（可置前后解决）。
+        err = _type_focus_gate(args, hwnd)
+        if err:
+            return err
+        # ③ 强制快照差分：契约 §二的第二种失败「发了但画面没变 ⇒ code=8」
+        #   就是靠这张快照判的，不启用它那条口径就根本不成立。
+        args = {**args, "_need_diff": True}
+    # ★ 接线单 §二 5：敏感窗终判在**spawn 之前**。命中 ⇒ code=3，argv 不会被送出去。
+    _derr = _deny_sensitive_target(hwnd, "ctl_type", "打字")
+    if _derr:
+        return _derr
     # ★ 2026-10-10：type 老线要 C 级（act.py do_type gate.require(C)），
     #   新线预检与 rc=7 弹窗都必须按 C 走 —— 传 B 会让弹窗签出没用的 B 证。
     return _act("type", args, argv, scope="C")
@@ -2563,8 +2979,97 @@ KEY_WHITELIST = {
 KEY_VK_WHITELIST = {vk: name for name, vk in KEY_WHITELIST.items()}
 _KEY_NAMES = "、".join(sorted(KEY_WHITELIST))
 
+# ★ 接线单 §二-1：**键名表只留真源 act.py 一份**。
+#   改前 core 自带一份白名单并把 a~z/0~9 挡在外面 —— 真源明明认得的 v，
+#   在 core 这道闸就被拒了，用户拿到的处方是「认不出」，而真源认得。
+#   两份表早晚对不上，所以 core 不再维护键名表：只判「形状」与「组合」。
+#
+# ⛔ 数值 vk 仍要护栏（见 KEY_WHITELIST 上方），但**字母与数字键放行**：
+#   接线单原话「KEY_WHITELIST 不再拦字母/数字」。
+_VK_ALNUM = (set(range(0x30, 0x3A))        # 0-9
+             | set(range(0x41, 0x5B))      # A-Z
+             | set(range(0x61, 0x7B)))     # a-z
+_VK_SAFE = set(KEY_WHITELIST.values()) | _VK_ALNUM
+
+# ★ 接线单 §二-2：ctrl 自由布尔会放出 Ctrl+W / Ctrl+F4 这类破坏性组合。
+#   只放行编辑类五件套：A 全选 / C 复制 / V 粘贴 / X 剪切 / Z 撤销。
+CTRL_COMBO_ALLOWED = ("A", "C", "V", "X", "Z")
+_KEYNAME_RE = re.compile(r"^[A-Za-z0-9]+$")   # 键名形状：字母 + 数字（v / PageDown / F13）
+# ★ 数值的认定：**0x 前缀**，或**≥2 个数字**。
+#   单个数字不算数值 —— 它是**键名**（真源 act.py 就是这么定义的）。
+_NUMERIC_RE = re.compile(r"^(?:0[xX][0-9a-fA-F]+|[0-9]{2,})$")
+
+
+def _keys_spec(keys, ctrl: bool) -> tuple:
+    """把 keys 收成给 act.py 的 --vk 原文。
+
+    返回 (原文 or None, 说明, 归一键名 or None, 错误信封 or None)。
+
+    ★ 认不认得**不在这儿判**（那是真源的事）。core 只做两件必须自己做的事：
+      ① 形状 —— 不是「键名」也不是「数值」的，连 spawn 都不值 → 直接 code=4；
+      ② 组合 —— ctrl 只放行 §二-2 那五个（接线单 §二-3：拒绝也是 code=4）。
+    ⛔ 所有拒绝都用 **code=4（NO_CTRL）**：「键名不合法 / 找不到控件」同语，
+      不再混用 code=5（UNSTABLE，含义是「当前不稳定」）—— 读起来会让 agent 去重新观测。
+    """
+    s = str(keys or "").strip()
+    if not s:
+        return None, "", None, env(
+            code=gate.CODE_NO_CTRL,
+            warning="keys 不能为空 —— 传键名（如 v / PageDown / F5）"
+                    "或数值（如 0x56 / 86）")
+
+    _name = None
+    _why = ""
+    # ★ ★ 单个数字是**键名**，不是数值 —— 这个顺序纻倒会静默发错键：
+    #   int("8", 0) = 8 = **0x08 = VK_BACKSPACE**；int("9", 0) = 9 = **0x09 = VK_TAB**。
+    #   改前 agent 要打字面上的「8」，core 抢在真源前面当成数值，
+    #   真源忠实地发了**退格**，且会报成功 —— 键发出去了、回执也绿的，
+    #   只有回读才发现打的是退格而不是「8」。
+    #   真源 act.py 的 KEY_NAME_TO_VK 里明确有 str(_d) = 0x30 + _d（act.py 的 0~9 循环），
+    #   那就是**键名**；core 抢跑就把它截胡了。
+    if _NUMERIC_RE.match(s):
+        # ★ 不用 int(s, 0)：base=0 会把「012」当八进制拿成 10。按 16/10 分开写。
+        _num = int(s, 16) if s[:2].lower() == "0x" else int(s, 10)
+        if _num not in _VK_SAFE:
+            return None, "", None, env(
+                code=gate.CODE_NO_CTRL,
+                warning=("vk=0x%X（%d）不放行 —— 这个 16 位空间里绝大多数是"
+                         "切窗口 / 截屏 / 锁屏这类组合键，numeric 写法不放行。"
+                         "字母/数字键可以直接写键名（如 v、F5、PageDown）。" % (_num, _num)))
+        _why = "数值 %s ⇒ vk=0x%X" % (s, _num)
+        _name = chr(_num) if 0x20 < _num < 0x7F else KEY_VK_WHITELIST.get(_num)
+    else:
+        if not _KEYNAME_RE.match(s):
+            return None, "", None, env(
+                code=gate.CODE_NO_CTRL,
+                warning=("keys=%r 不是键名也不是数值 —— 键名只收「字母+数字」（v / A / F13 / PageDown），"
+                         "数值写法收 0x41 / 86。本次**一个键都没发**。" % s))
+        _why = "键名 %s（原样透传真源）" % s
+        _name = s
+
+    # ② 组合 allowlist —— 按键**字母**判，不看是键名写的还是数值写的。
+    if ctrl:
+        _letter = str(_name or "").upper()[:1]
+        if _letter not in CTRL_COMBO_ALLOWED:
+            return None, "", None, env(
+                code=gate.CODE_NO_CTRL,
+                warning=("Ctrl+%s 不在允许的组合内 —— 只放行 %s。"
+                         "控制键自由布尔会放出 Ctrl+W 这类破坏性组合。"
+                         "本次**一个键都没发**，也没拦截屏幕。"
+                         % (s, " / ".join("Ctrl+" + c for c in CTRL_COMBO_ALLOWED))))
+        _why += "（Ctrl 组合在允许清单内）"
+    return s, _why, _name, None
+
 
 def _resolve_vk(keys) -> tuple:
+    """⛔ **已不再被任何地方调用（接线单 §二-1 后 t_keys 改用 _keys_spec）。**
+
+    保留是为了不碰别人可能引用它，**不再是生效口径**。
+    明写在这里是为了防一种具体的误导：看到这个函数就会当「键名白名单」在还很多人眼里有效，
+    而真实是它一份都没有。真正的判定在上面的 _keys_spec：键名原样透传真源、数值才走护栏。
+    删掉它需确认全仓无引用者；本单不做这个判定。
+    """
+
     """把 keys（键名或 vk 数值）解成虚拟键码。返回 (vk, 说明)；解不出时 vk 为 None。
 
     收两种写法：白名单里的键名（"PageDown"），或该键的十进制 / 十六进制数值
@@ -2678,15 +3183,17 @@ def t_scroll(args: dict) -> dict:
 
 
 def t_keys(args: dict) -> dict:
-    """按键（C 级）。白名单键 ＋ 必须显式放行置前。**同样不重新实现输入**。
+    """按键（C 级）。**键名原样透传真源**（接线单 §二-1）＋ ctrl 组合 allowlist（§二-2）。
 
+    ★ 不再重新实现输入，也**不再自带一份键名表**：认键名是真源 act.py 的事。
+      改前 core 的白名单拦字母，真源认得的 v 到了 core 这里就被拒了。
     ★ 老脚本 do_keys 只有 ctrl 一路组合（shift / alt 要改 act.py，越界）。
       所以契约的 modifiers 只声明 ctrl —— **不声明一个永远报错的参数**。
     """
     hwnd = int(args.get("hwnd") or 0)
-    vk, why = _resolve_vk(args.get("keys"))
-    if vk is None:
-        return env(code=gate.CODE_UNSTABLE, warning=why)
+    _spec, why, _kname, kerr = _keys_spec(args.get("keys"), bool(args.get("ctrl")))
+    if kerr:
+        return kerr
     times = int(args.get("times") or 1)
     if not 1 <= times <= 50:
         return env(code=gate.CODE_UNSTABLE,
@@ -2697,18 +3204,34 @@ def t_keys(args: dict) -> dict:
     if err:
         return err
 
-    argv = ["keys", "--hwnd", str(hwnd), "--vk", "0x%X" % vk, "--times", str(times)]
+    argv = ["keys", "--hwnd", str(hwnd), "--vk", _spec, "--times", str(times)]
     if args.get("ctrl"):
         argv += ["--ctrl"]
     if args.get("scan_code"):
         argv += ["--scan-code"]
     if args.get("dry_run"):
         argv += ["--dry-run"]
+    # ★ 接线单 §二 5：敏感窗终判在**spawn 之前**。命中 ⇒ code=3，argv 不会被送出去。
+    err = _deny_sensitive_target(hwnd, "ctl_keys", "按键")
+    if err:
+        return err
     r = _act("keys", args, argv, scope="C")
+    # ★ 接线单 §二-3：真源 resolve_vk 认不出键名时走 rc=2（act.py:3043）。
+    #   改前这个码不在 core 的表里 ⇒ 落到「未知返回码」一支，报 code=5（UNSTABLE）。
+    #   而 code=5 的处方是「重新观测」 —— 对「键名写错了」这件事没任何意义 ⇒ 跟着转圈。
+    #   改成 code=4（NO_CTRL），与「找不到控件 / 键名不合法」同语。零新码。
+    if not r.get("ok") and (r.get("data") or {}).get("rc") == 2:
+        _raw = str((r.get("data") or {}).get("raw") or "").strip()
+        r["code"] = gate.CODE_NO_CTRL
+        r["ok"] = False
+        r["warning"] = ("keys=%r，真源 act.py 也认不出这个键名 ⇒ 本次**一个键都没发**。"
+                        "可用键名：a~z / A~Z / 0~9 / F1~F12 / Space·Enter·Tab·Esc·Backspace·Delete·Insert"
+                        "·Home·End·PageUp·PageDown / 方向键；或数值 0x41 / 65。%s"
+                        % (args.get("keys"), ("\n原文：" + _raw[:200]) if _raw else ""))
     if r.get("ok"):
         r["data"] = {**(r.get("data") or {}),
-                     "vk": "0x%X" % vk,
-                     "键名": KEY_VK_WHITELIST.get(vk),
+                     "vk": _spec,
+                     "键名": _kname,
                      "解析": why,
                      "ctrl": bool(args.get("ctrl")),
                      "次数": times}

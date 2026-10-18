@@ -609,6 +609,24 @@
           "expect_uid": {
             "type": "string",
             "description": "★可选，但**一旦给了就严格执行**（窗G3）：把 ctl_screen objects[].uid 原样回传。点击前会在本屏用同一口径**重算一次** uid，对不上 ⇒ 直接拒绝（code=4 + STALE_SCREEN 语义 + 明说「对象已变，建议重扫」），**一个像素都不点**。回执里的 expect_uid_校验 ∈ {匹配, 不匹配, 无法判定} 三值。★ 与 expect 的分工：expect 认「名字」，expect_uid 认「还是不是那个对象」（uid = 结构路径 + 文本指纹，跨调用可比）。"
+          },
+          "frame_id": {
+            "type": "string",
+            "description": "★屏版凭据（P0-A，2026-10-18）：把 ctl_screen 返回的 screen_version 原样回传，当作坐标路径的**第二种凭据**（第一种是 from_capture）。① **与 from_capture 至少给一个**：两者都缺 ⇒ code=12 且零像素（这条旧坐标点新画面的铁律不动）。② **必须与当前 screen_version 对得上**，不符 ⇒ code=12 + 零像素（画面已变就不能再点旧坐标）；本机还没过该窗的 ctl_screen 时同样拒绝。③ 适用于**屏幕是超大的窗口**（ctl_shot 截的图看不清要点哪）：此时只需确认「还是那个屏版」，不需要完整截图。⛔ screen_version 由服务端签发，**传不可能的值就会被拒**。"
+          },
+          "diff_ignore": {
+            "type": "object",
+            "properties": {
+              "caret_px": {
+                "type": "integer",
+                "description": "变化区**窄边**≤ 此值 ⇒ 归为忽略区（默认 8）。光标闪烁是 1~2px 宽的竖条，不忽略它的话每一次动作都报「变了」。单个字符大概 9~11px 宽 → 9 > 8 不会被误杀。"
+              },
+              "min_area_px": {
+                "type": "integer",
+                "description": "变化区面积 < 此值（像素²）⇒ 归为忽略区（默认 24）。用来过滤尾部尘落。"
+              }
+            },
+            "description": "★（接线单 §二-4，2026-10-18）after.diff 的忽略口径，默认 {caret_px:8, min_area_px:24}，**部分支持**（只传一个键另一个用默认值补齐）。★ changed 是**必要非充分**：真变了必须 changed=true（光标闪烁不算「变了」），零变化必须 false；被忽略的会在 diff.说明 里写明实情。"
           }
         },
         "required": [
@@ -616,12 +634,12 @@
         ],
         "additionalProperties": false
       },
-      "returns": "{ 点到: {eid,name,type,rect,uid,口径,expect_uid_校验}, changed: boolean, change_ratio, [expect_uid_校验{expect_uid,重算uid,判定:匹配|不匹配|无法判定,口径}], [after{uid_state:OK|TEXT_CHANGED|STALE|unknown, screen_version, uid, eid, 动作后uid, 依据, 口径}] }"
+      "returns": "{ 点到: {eid,name,type,rect,uid,口径,expect_uid_校验}, changed: boolean, change_ratio, [expect_uid_校验{expect_uid,重算uid,判定:匹配|不匹配|无法判定,口径}], [frame_id_校验{frame_id,当前 screen_version,判定:匹配|不匹配}], [after{uid_state:OK|TEXT_CHANGED|STALE|unknown, screen_version, uid, eid, 动作后uid, 依据, 口径, [diff{changed:boolean|null, bbox:[x,y,w,h]|null, crop_path?, dir?, 说明}]]}] }★ after.diff（P0-A）：**动作前后各拍一张直接比对**，变了就给 changed=true 与变化区 bbox（**屏幕绝对坐标**，与 xy/rect 同口径），crop_path 指向「变了的那块」的截图。before/after/crop 落 work\\_actions\\<frame_id>\\，只留最近 20 组。⛔ changed 三态：true=真变了 / false=确认没变 / null=**没测出来**（取不到画面）——null 不等于 false，别把「我没看见」当成「我看见了没变」。"
     },
     {
       "name": "ctl_type",
       "title": "打字",
-      "description": "往目标窗口打字。默认先 Ctrl+A 清空（改值变追加是本机踩过的坑）。中文走 KEYEVENTF_UNICODE。",
+      "description": "往目标窗口打字。默认先 Ctrl+A 清空（改值变追加是本机踩过的坑）。中文走 KEYEVENTF_UNICODE。★ mode=focus（P0-A）是**无元素打字**：不去找 UIA 元素，直接往**前台焦点窗**逐字符发（中文 / emoji / 密码框都通用）。用于往输入框打字：旧路径要先在窗口里找到那个元素才能对它打字，而很多输入框在树 / UIA 里根本不出现（那就是今天 QQ 现场的‘ctl_type 要元素’）。⛔ mode=focus 强制快照差分：发出去了但**画面没变** ⇒ code=8（**绝不当成功**），见 after.diff。",
       "annotations": {
         "readOnlyHint": false,
         "destructiveHint": false,
@@ -646,6 +664,34 @@
           "text": {
             "type": "string"
           },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "element",
+              "focus"
+            ],
+            "default": "element",
+            "description": "★ element（默认，回退兼容）：找 UIA 元素后对它打字。focus（P0-A）：**不找元素**，直接往前台焦点窗逐字符 SendInput(KEYEVENTF_UNICODE)。⛔ 失败口径（与模式无关，两模式都这样）：① **没前台** ⇒ code=5，可传 allow_foreground=true 置前后解决（目标窗已在前台时不需要放行）；② **发了但画面没变** ⇒ code=8，绝不当成功。⛔ 认不出的 mode 直接拒绝（不猜你意思。"
+          },
+          "allow_foreground": {
+            "type": "boolean",
+            "default": false,
+            "description": "★ mode=focus 且目标窗**不在前台**时必须显式置 true 才发得出去 —— 否则 code=5。目标窗已在前台时不需要放行（不会打断使用者正在做的事）。放行会写一条 action_allow_foreground 事件留痕。"
+          },
+          "diff_ignore": {
+            "type": "object",
+            "properties": {
+              "caret_px": {
+                "type": "integer",
+                "description": "变化区**窄边**≤ 此值 ⇒ 归为忽略区（默认 8）。光标闪烁是 1~2px 宽的竖条，不忽略它的话每一次打字都报「变了」。"
+              },
+              "min_area_px": {
+                "type": "integer",
+                "description": "变化区面积 < 此值（像素²）⇒ 归为忽略区（默认 24））。"
+              }
+            },
+            "description": "★（接线单 §二-4）after.diff 的忽略口径，默认 {caret_px:8, min_area_px:24}。mode=focus **强制快照差分**，所以这个参数对它始终生效。★ changed 是**必要非充分**：真变了必须 true，零变化必须 false。"
+          },
           "clear": {
             "type": "boolean",
             "default": true
@@ -666,7 +712,7 @@
         ],
         "additionalProperties": false
       },
-      "returns": "{ typed_chars, changed, frame_before, frame_after }"
+      "returns": "{ typed_chars, changed, frame_before, frame_after, [after.diff{changed:boolean|null, bbox:[x,y,w,h]|null, crop_path?, dir?, 说明}] }★ mode=focus 时**总是带** after.diff（强制，不依赖 frame_id）：发了字符但画面没变 ⇒ code=8、没测出来 ⇒ code=5，两者都不报 ok。before/after/crop 落 work\\_actions\\<frame_id 或动作名+时间戳>\\，只留最近 20 组。"
     },
     {
       "name": "ctl_fill",
@@ -794,12 +840,12 @@
           },
           "keys": {
             "type": "string",
-            "description": "白名单键名（`PageDown` 等），或这些键的十进制 / 十六进制虚拟键码（`34` / `0x22`）。非白名单一律拒绝并列出可用键。"
+            "description": "键名（如 `v` / `F5` / `PageDown`），或数值（`0x41` / `65`）。★ 键名**原样透传**真源 act.py（接线单 §二-1，2026-10-18）：键名表**只留真源一份**，a~z / A~Z / 0~9 不再被 core 拦下来。⛔ 认不出的键名返 **code=4（NO_CTRL）**而不是 code=5（§二-3）：code=4 的处方是「键名不合法」，而 code=5 的处方是「重新观测」——对键名写错了这件事没意义。⛔ 数值写法仍有护栏：16 位空间里绝大多数是切窗口/截屏/锁屏类组合键，不在放行名单的一律拒（字母/数字键除外）。"
           },
           "ctrl": {
             "type": "boolean",
             "default": false,
-            "description": "配 Ctrl（按住 Ctrl → 敲键 → 松开 Ctrl）。★只有这一路组合 —— 老脚本不支持 shift / alt。"
+            "description": "配 Ctrl（按住 Ctrl → 敲键 → 松开 Ctrl）。★只有这一路组合 —— 老脚本不支持 shift / alt。★ ★**组合 allowlist = {A, C, V, X, Z}**（接线单 §二-2，2026-10-18）：只放行编辑类五件套（全选/复制/粘贴/剪切/撤销），其余（如 Ctrl+W、Ctrl+F4）拒绝并报 code=4 。原因：ctrl 若是自由布尔就会放出破坏性组合。"
           },
           "times": {
             "type": "integer",

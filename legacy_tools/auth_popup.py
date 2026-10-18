@@ -13,7 +13,7 @@
 
 用法：
   python auth_popup.py --set                      # 首次设置/修改密钥（输两遍）
-  python auth_popup.py --request "A级 只读感知"    # 申请一次授权（默认 10 分钟）
+  python auth_popup.py --request "A级 只读感知"    # 申请一次授权（默认 30 分钟 / 60 次）
   python auth_popup.py --status                   # 看当前通行证
   python auth_popup.py --check "A级 只读感知"      # 校验通行证是否可用（供控制脚本调用）
 
@@ -26,13 +26,31 @@ T5 新增（可选，最小改动）：
         action/actions     只认这些动作名
     → **不填 --targets 就完全不写 targets 键** —— 与改前的证逐字节一致。
     → 校验（谁按目标放行）在 gate.py；本文件只管「签发时把目标写进证里」。
+
+── P1-A 新增（窗WB2-2 · 2026-10-18，分工书 §三 WorkBuddy-2 + 接线单 §二 7 + L 卡） ──
+  ① 默认范围 ABCD 一次给齐（--request 空/缺省时）；默认 30 分钟 / 60 次；
+     弹窗内 A/B/C/D 四个勾选框（**D 默认勾选 + 风险标注**，与 wB 绊线口径对齐：
+     产品开关未启用 D（--no-d）⇒ D 默认不勾且文案明说）；
+  ② 弹窗**列全候选窗口**（当前前台 + 调用方 --windows 声明）并支持**多选**，
+     选中即写入通行证 windows 列表（身份键 = exe+cls+created，hwnd 只作展示）；
+  ③ 写入改「读现有 → merge → 写回」（gate_lock 同一把锁，禁整文件替换）：
+     windows 只追加不去重丢、scopes 不被窄请求覆盖/抬高、acts 计数不重置、
+     父过期/急停 ⇒ 子全灭（写入时把每个 windows.exp 夹到父 exp）；
+     窗口追加模式（--window-ack，或 note 命中 rc=7 话术的过渡兜底）只动 windows。
+  ★ 待接 authstate：Codex-3 的 authstate.py 落地后，merge_* 系列改调它
+    （本文件按同 schema 实现并预留此注记，不建第二套账）。
+  ★ 需要别人改的（越界项，已上报 DSH）：core.py 的 _ask_then_retry 传 --window-ack
+    与 --windows；gate.py 读 pass.windows 做窗口放行终判（否则 windows 只记录不拦）。
 """
 import argparse
+import ctypes
+import ctypes.wintypes as _wt
 import datetime
 import hashlib
 import hmac
 import json
 import os
+import re
 import secrets
 import sys
 import time
@@ -42,6 +60,8 @@ import time
 from gate_lock import LockTimeout, lock_path  # noqa: E402
 from gate_lock import exclusive as _lock_exclusive  # noqa: E402
 from gate_lock import save_json  # noqa: E402
+# ★ P1-A：档位全名从 gate.py 取（唯一真相源），不在本文件复制第二份。
+import gate  # noqa: E402
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 AUTHDIR = os.path.join(BASE, "_auth")
@@ -53,6 +73,34 @@ LOCK_SECONDS = 60
 MIN_LEN = 4
 PBKDF_ITER = 200_000
 TITLE = "DSH电脑控制授权"          # 截图/感知层见到这个标题必须拒绝读取（见 perceive.py 黑名单）
+
+# ────────────────────── P1-A：默认值与口径常量 ──────────────────────
+# ① 分工书/L 卡：默认 ABCD 一次给齐、30 分钟、60 次。core.py 总是显式传参，
+#   这些默认值作用于缺省/手工 CLI；显式传参仍按传的来（旧行为不变）。
+DEFAULT_MINUTES = 30
+DEFAULT_ACTS = 60
+SCOPE_LETTERS = ("A", "B", "C", "D")
+SCOPE_FULL = {"A": gate.A, "B": gate.B, "C": gate.C, "D": gate.D}
+# 接线单 §二 7：D 默认勾选（用户明令 ABCD 全给）+ 风险标注；
+# wB 绊线口径 = 产品开关未启用 D（--no-d）⇒ 默认不含 D 且文案明说。
+D_RISK_NOTE = "D=拖拽：最高危档（可把窗口拖到任意位置、误触拖放释放）；本次不需要请取消勾选"
+WINDOW_CANDIDATE_MAX = 40          # 候选窗口列表上限（再多就让他先关几个窗）
+WINDOW_CHILD_MAX_MIN = 30 * 60     # ③ 子寿命：min(自身 30min, 父 exp)（L 卡 ③）
+
+# ③ 敏感窗口黑名单：与 act.py check_target 的硬拒层**同口径**
+#   （出处：dsh-viewer-plugin\tools\act.py:617-688 —— BLOCKED_CLASSES / BLOCKED_CLASSES_HARD_EXTRA
+#   / BLOCKED_PROCESSES_HARD。终端类（ConsoleWindowClass 等）**不在**本表：
+#   act.py 的语义是「默认拒 + 可经人当场确认 30 分钟临时放行」，故终端保留在候选里、只打标记。）
+BLOCKED_CLASSES_HARD = ("AgentCtlBrakePopup", "TkTopLevel")
+BLOCKED_EXE_HARD_LC = ("python.exe", "agentctl.exe", "consent.exe", "systemsettings.exe")
+TERMINAL_CLASSES = ("ConsoleWindowClass", "CASCADIA_HOSTING_WINDOW_CLASS",
+                    "UAC Input Indicator", "UAC_InputIndicatorOverlayWnd")
+TERMINAL_EXE_LC = ("cmd.exe", "powershell.exe", "pwsh.exe", "conhost.exe",
+                   "wt.exe", "windowsterminal.exe", "openconsole.exe")
+
+# note 命中这些 ⇒ 过渡兜底判为「窗口追加模式」（core 的 rc=7 话术：
+#   "要操作窗口属主进程是 …" / "要操作一个新窗口"；待 core 传 --window-ack 后本兜底可退场）
+_WINDOW_ACK_HINT = re.compile(r"要操作.{0,8}窗口|不在白名单")
 
 
 def _now():
@@ -161,9 +209,290 @@ def targets_note():
     return ""
 
 
+# ────────────────────── P1-A ①：范围勾选（默认 ABCD / D 风险标注） ──────────────────────
+
+def _letter_of(item):
+    """把一个 scope 项解析成 A/B/C/D 字母；认不出返回 None。
+    认 'A' / 'A级 只读感知' / 'a'（ strip 后首字母 + 后面跟 '级' 或结尾）。"""
+    s = str(item or "").strip()
+    if not s:
+        return None
+    up = s.upper()
+    if up in SCOPE_LETTERS:
+        return up
+    if up[0] in SCOPE_LETTERS and (len(up) == 1 or up[1] in "级 "):
+        return up[0]
+    return None
+
+
+def _split_scope(req):
+    """--request 串 → 项列表（与改前一致：按逗号切）。"""
+    return [s.strip() for s in str(req or "").split(",") if s.strip()]
+
+
+def _initial_scope_states(items, no_d):
+    """(每字母初始勾选状态, 非标准项列表)。
+    默认规则：--request 给的勾；没给（空）⇒ ABCD 全勾（分工书 ①）；
+    --no-d ⇒ D 默认不勾且文案明说（接线单 §二 7）。"""
+    std = [it for it in items if _letter_of(it)]
+    if items and not std:
+        # 全是非常规项：一个字母都不认识 ⇒ 不预设任何勾选（用户自己看着办）
+        states = {L: False for L in SCOPE_LETTERS}
+    elif not items:
+        states = {L: True for L in SCOPE_LETTERS}
+    else:
+        want = {_letter_of(it) for it in std}
+        states = {L: (L in want) for L in SCOPE_LETTERS}
+    if no_d:
+        states["D"] = False
+    extra = [it for it in items if not _letter_of(it)]
+    return states, extra
+
+
+# ────────────────────── P1-A ②：候选窗口枚举（只读，ctypes） ──────────────────────
+
+def _proc_exe_and_created(pid):
+    """(exe 名, 主窗创建时间 ISO)。读不到返回 '?' —— **不猜**。"""
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    k = ctypes.windll.kernel32
+    h = k.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid))
+    if not h:
+        return "?", "?"
+    try:
+        buf = ctypes.create_unicode_buffer(1024)
+        sz = _wt.DWORD(1024)
+        if not k.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(sz)):
+            return "?", "?"
+        exe = os.path.basename(buf.value)
+        created = _wt.FILETIME()
+        exit_t = _wt.FILETIME()
+        kernel_t = _wt.FILETIME()
+        user_t = _wt.FILETIME()
+        if not k.GetProcessTimes(h, ctypes.byref(created), ctypes.byref(exit_t),
+                                 ctypes.byref(kernel_t), ctypes.byref(user_t)):
+            return exe, "?"
+        # FILETIME（100ns 自 1601）→ ISO
+        v = (created.dwHighDateTime << 32) | created.dwLowDateTime
+        try:
+            iso = (datetime.datetime(1601, 1, 1)
+                   + datetime.timedelta(microseconds=v / 10)).strftime("%Y-%m-%d %H:%M:%S")
+        except Exception:
+            iso = "?"
+        return exe, iso
+    except Exception:
+        return "?", "?"
+    finally:
+        k.CloseHandle(h)
+
+
+def _enum_candidate_windows(limit=WINDOW_CANDIDATE_MAX):
+    """枚举可见顶层窗口 → 候选行（不含硬拒敏感窗）。
+    每行 {hwnd,title,cls,pid,exe,created,foreground,terminal,declared}。
+    纯只读（EnumWindows/GetWindowText/GetClassName/进程查询），不驱动桌面。"""
+    user32 = ctypes.windll.user32
+    rows = []
+
+    def _cb(hwnd, _lparam):
+        if len(rows) >= limit * 3:
+            return False
+        try:
+            if not user32.IsWindowVisible(hwnd):
+                return True
+            if user32.GetWindow(hwnd, 4):          # GW_OWNER：有属主的不是顶层
+                return True
+            n = user32.GetWindowTextLengthW(hwnd)
+            if n <= 0:
+                return True
+            title = ctypes.create_unicode_buffer(n + 1)
+            user32.GetWindowTextW(hwnd, title, n + 1)
+            cloaked = _wt.DWORD()
+            try:                                    # UWP 隐藏窗（ cloaked ）跳过
+                ctypes.windll.dwmapi.DwmGetWindowAttribute(
+                    _wt.HWND(hwnd), 14, ctypes.byref(cloaked), ctypes.sizeof(cloaked))
+                if cloaked.value:
+                    return True
+            except Exception:
+                pass
+            cls = ctypes.create_unicode_buffer(257)
+            user32.GetClassNameW(hwnd, cls, 257)
+            cls = cls.value
+            pid = _wt.DWORD()
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            exe, created = _proc_exe_and_created(pid.value)
+            # ③ 敏感窗硬拒层（与 act.py 同口径）—— L 卡红线：不进候选
+            if cls in BLOCKED_CLASSES_HARD or (exe or "?").lower() in BLOCKED_EXE_HARD_LC:
+                return True
+            rows.append({
+                "hwnd": int(hwnd), "title": title.value, "cls": cls, "pid": int(pid.value),
+                "exe": exe, "created": created,
+                "foreground": int(hwnd) == user32.GetForegroundWindow(),
+                "terminal": (cls in TERMINAL_CLASSES
+                             or (exe or "?").lower() in TERMINAL_EXE_LC),
+                "declared": False,
+            })
+        except Exception:
+            return True                          # 单个窗口读失败不能拖垮整个枚举
+        return True
+
+    proto = ctypes.WINFUNCTYPE(_wt.BOOL, _wt.HWND, _wt.LPARAM)
+    try:
+        user32.EnumWindows(proto(_cb), 0)
+    except Exception:
+        pass
+    rows = rows[:limit]
+    for r in rows:
+        r["declared"] = False
+    return rows
+
+
+def _declared_windows(raw):
+    """--windows 的 JSON（调用方声明）→ 候选行补充。形态错 ⇒ ValueError（宁缺毋滥）。"""
+    if raw is None or str(raw).strip() == "":
+        return []
+    try:
+        obj = json.loads(raw)
+    except Exception as e:
+        raise ValueError(f"--windows 不是合法 JSON：{e}")
+    if isinstance(obj, dict):
+        obj = [obj]
+    if not isinstance(obj, list):
+        raise ValueError("--windows 必须是 JSON 数组（或单个对象）")
+    out = []
+    for it in obj:
+        if not isinstance(it, dict):
+            raise ValueError("--windows 数组里必须是对象")
+        hwnd = it.get("hwnd")
+        try:
+            hwnd = int(hwnd) if hwnd is not None else 0
+        except Exception:
+            hwnd = 0
+        out.append({"hwnd": hwnd, "title": str(it.get("title") or "（调用方声明·无标题）"),
+                    "cls": str(it.get("cls") or it.get("class") or "?"),
+                    "pid": 0,
+                    "exe": str(it.get("exe") or it.get("process") or "?"),
+                    "created": str(it.get("created") or "?"),
+                    "foreground": False, "terminal": False, "declared": True})
+    return out
+
+
+def _merge_candidates(enumerated, declared):
+    """枚举结果 + 调用方声明：按 hwnd 去重（同 hwnd 以枚举行为准，只补 declared 标记）。"""
+    out = [dict(r) for r in enumerated]
+    by_hwnd = {r["hwnd"]: r for r in out if r["hwnd"]}
+    by_title = {r["title"]: r for r in out if r["title"]}
+    for d in declared:
+        hit = by_hwnd.get(d["hwnd"]) if d["hwnd"] else None
+        if hit is None:
+            hit = by_title.get(d["title"])
+        if hit is not None:
+            hit["declared"] = True
+            continue
+        out.append(d)
+    out.sort(key=lambda r: (not r["foreground"], not r["declared"], r["hwnd"]))
+    return out
+
+
+# ────────────────────── P1-A ③：读-改-写合并（禁整文件替换） ──────────────────────
+
+def _win_identity(w):
+    """窗口身份键（L 卡 ④）：(exe, cls, created)。hwnd 不进身份，只作展示。"""
+    return (str(w.get("exe")), str(w.get("cls")), str(w.get("created")))
+
+
+def _merge_windows(existing, new, *, clamp_exp):
+    """windows 只追加：按身份键去重合并，hwnds/titles 取并集；exp 一律夹到 clamp_exp
+    （⇒ 父过期/缩短，子全灭；L 卡 ③）。"""
+    out = []
+    index = {}
+    for w in list(existing or []) + list(new or []):
+        if not isinstance(w, dict):
+            continue
+        k = _win_identity(w)
+        if k in index:
+            cur = index[k]
+            cur["hwnds"] = sorted(set(cur.get("hwnds") or []) | set(w.get("hwnds") or []))
+            cur["titles"] = sorted(set(cur.get("titles") or []) | set(w.get("titles") or []))
+        else:
+            cur = {"exe": k[0], "cls": k[1], "created": k[2],
+                   "exp": int(w.get("exp") or clamp_exp),
+                   "hwnds": sorted(set(w.get("hwnds") or [])),
+                   "titles": sorted(set(w.get("titles") or []))}
+            index[k] = cur
+            out.append(cur)
+    for w in out:
+        w["exp"] = int(min(int(w.get("exp") or clamp_exp), clamp_exp))
+    return out
+
+
+def merge_pass(existing, new, *, window_ack):
+    """**读-改-写**合并：返回合并后的通行证 dict；拒绝时返回 None（附原因到 new['_why']）。
+
+    window_ack=True（窗口追加）：只动 windows；scope/scopes/expires/acts/acts_limit/nonce/
+      consumed 一律不碰；没有有效父证（不存在/已消费/已过期）⇒ 拒绝（fail-closed，
+      不借机签出一张窄证 —— 那正是 L 卡确诊的覆盖 bug）。
+    window_ack=False（任务授权）：refreshes issued/expires/acts_limit/nonce、consumed=False；
+      **scopes 一律取本次弹窗批准集**（勾选框是用户当场看得见的决定——用户取消勾选 D，
+      证就不能再含 D；"窗口放行不覆盖任务证"由 window_ack 模式负责，不靠这里的 ⊆ 试探）；
+      **acts 计数器原样保留（不重置）**；windows 只追加。
+      targets：传了才写；没传则保留现有（不静默放宽）。
+    """
+    base = dict(existing) if isinstance(existing, dict) else {}
+    now = time.time()
+    old_exp = float(base.get("expires_at") or 0)
+    old_valid = bool(base) and not base.get("consumed") and old_exp > now
+
+    if window_ack:
+        if not old_valid:
+            new["_why"] = ("窗口追加模式：没有可追加的**有效任务通行证**"
+                           "（不存在 / 已一次性消费 / 已过期）—— 不借机签发新证，拒绝")
+            return None
+        base["windows"] = _merge_windows(base.get("windows"), new.get("windows"),
+                                         clamp_exp=int(base["expires_at"]))
+        base["windows_updated"] = _now()
+        return base
+
+    new_scopes = list(new["scopes"])
+    base["scopes"] = new_scopes
+    base["scope"] = "、".join(new_scopes)
+    base["acts_limit"] = int(new["acts_limit"])
+    if "acts" in base:                      # gate 的动作计数器：只保留，不重置、不新建
+        base["acts"] = int(base.get("acts") or 0)
+    base["issued"] = new["issued"]
+    base["expires_at"] = new["expires_at"]
+    base["expires"] = new["expires"]
+    base["nonce"] = new["nonce"]
+    base["consumed"] = False
+    base.pop("consumed_at", None)
+    if new.get("targets") is not None:
+        base["targets"] = new["targets"]    # 没传 targets ⇒ 保留现有（不静默放宽）
+    base["windows"] = _merge_windows(base.get("windows"), new.get("windows"),
+                                     clamp_exp=int(base["expires_at"]))
+    return base
+
+
+def _windows_from_selection(rows, sel_idx, exp_at):
+    """勾选的候选行 → windows 条目（身份键 exe+cls+created；hwnds/titles 展示用）。"""
+    out = []
+    for i in sel_idx:
+        if not (0 <= i < len(rows)):
+            continue
+        r = rows[i]
+        out.append({"exe": r["exe"], "cls": r["cls"], "created": r["created"],
+                    "exp": int(exp_at), "hwnds": [r["hwnd"]] if r["hwnd"] else [],
+                    "titles": [r["title"]] if r["title"] else []})
+    return out
+
+
 # ────────────────────────── 弹窗 ──────────────────────────
-def _popup(kind, scope="", minutes=10, acts=20, note="", targets=None):
-    """kind: 'set' 设置密钥 / 'request' 申请授权。返回 (结果, 密钥文本或 None)。"""
+def _popup(kind, scope="", minutes=10, acts=20, note="", targets=None,
+           scope_states=None, scope_extra=None, no_d=False,
+           candidates=None, window_ack=False):
+    """kind: 'set' 设置密钥 / 'request' 申请授权。返回 (结果, 密钥文本或 None)。
+
+    P1-A：request 模式新增两块（都不新开窗 —— 一次任务仍只弹一次）：
+      · A/B/C/D 范围勾选框（D 默认勾选 + 风险标注；--no-d 默认不勾且文案明说）；
+      · 候选窗口多选框（EnumWindows 枚举 + --windows 调用方声明；敏感硬拒窗不进候选）。
+    """
     import tkinter as tk
     state = {"result": None, "key": None}
     root = tk.Tk()
@@ -171,7 +500,7 @@ def _popup(kind, scope="", minutes=10, acts=20, note="", targets=None):
     root.attributes("-topmost", True)
     root.resizable(False, False)
     root.configure(bg="#1e1e1e")
-    W = 460
+    W = 560
 
     def label(txt, size=11, fg="#dddddd", pady=4):
         tk.Label(root, text=txt, font=("Microsoft YaHei UI", size), fg=fg,
@@ -188,11 +517,53 @@ def _popup(kind, scope="", minutes=10, acts=20, note="", targets=None):
             # 2026-10-07 加：窗口审批要用。note 只**显示**，绝不混进 scope ——
             # scope 会被切分后存成通行证范围，塞别的东西进去会让范围对不上。
             label(note, 11, "#7ee787", 8)
-        label(f"本次申请范围：{scope}\n有效期：{minutes} 分钟（过期或撤销即失效）\n"
+        # ── P1-A ①：范围勾选（默认 ABCD 一次给齐；D 风险标注）──
+        label("请勾选本次授权范围（默认 ABCD 一次给齐，不需要的档位取消勾选）：", 11, "#ffd479")
+        scope_vars = {}
+        for L in SCOPE_LETTERS:
+            var = tk.BooleanVar(value=bool(scope_states.get(L)) if scope_states else False)
+            scope_vars[L] = var
+            suffix = "  ⚠ " + D_RISK_NOTE if L == "D" else ""
+            tk.Checkbutton(root, text=f"{L} · {SCOPE_FULL[L]}{suffix}", variable=var,
+                           bg="#1e1e1e", fg="#dddddd", selectcolor="#1e1e1e",
+                           activebackground="#1e1e1e", activeforeground="#ffffff",
+                           font=("Microsoft YaHei UI", 10), anchor="w",
+                           wraplength=W - 60, justify="left").pack(padx=32, anchor="w")
+        if no_d:
+            label("⚠ 产品开关未启用 D 级：默认不含 D（可手动勾选，风险该档自担）"
+                  "—— 与 wB 绊线同一口径的两面。", 10, "#ffb454")
+        if scope_extra:
+            label("其它申请项（原样保留，不参与 A-D 勾选）："
+                  + "、".join(scope_extra), 10, "#9aa0a6")
+        label(f"有效期：{minutes} 分钟（过期或撤销即失效）\n"
               f"动作次数上限：{acts} 次（用完即止）", 11, "#ffd479")
         if targets:
             label("本次限定目标（targets）：\n" + _sum_targets(targets)
                   + "\n目标对不上、或拿不到目标信息 → 一律拒绝", 10, "#8fd3f4")
+        if window_ack:
+            label("窗口追加模式：只把下面选中的窗口追加进现有通行证，"
+                  "不动范围 / 时限 / 次数。", 10, "#8fd3f4")
+
+        # ── P1-A ②：候选窗口多选 ──
+        cands = candidates or []
+        label(f"请选择本通行证覆盖的窗口（可多选；不选 = 不限定窗口）："
+              f"共 {len(cands)} 个候选（〔前台〕当前前台；〔终端〕高危需你明确勾选）", 11, "#ffd479")
+        lb = tk.Listbox(root, selectmode=tk.EXTENDED, height=min(9, max(4, len(cands))),
+                        width=W - 60, font=("Microsoft YaHei UI", 10),
+                        bg="#2a2a2a", fg="#dddddd", selectbackground="#2d7d46")
+        sb = tk.Scrollbar(root, command=lb.yview)
+        lb.configure(yscrollcommand=sb.set)
+        lb.pack(padx=32, pady=(0, 2), anchor="w")
+        for i, r in enumerate(cands):
+            marks = []
+            if r["foreground"]:
+                marks.append("前台")
+            if r["declared"]:
+                marks.append("调用方声明")
+            if r["terminal"]:
+                marks.append("终端")
+            mark = ("〔" + "·".join(marks) + "〕") if marks else ""
+            lb.insert(tk.END, f"{mark} [{r['hwnd']}] {r['title']}  — {r['exe']}")
 
     lock = _load(KEYFILE, {})
     locked_until = lock.get("locked_until", 0)
@@ -244,23 +615,46 @@ def _popup(kind, scope="", minutes=10, acts=20, note="", targets=None):
             tip.config(text="锁定中，稍后再试")
             return
         if hmac.compare_digest(verifier(key, rec["salt"]), rec["verifier"]):
+            # ── P1-A ①③：从勾选框取本次批准的范围（fail-closed：一个都不勾 ⇒ 拒）──
+            checked = [L for L in SCOPE_LETTERS if scope_vars.get(L) and scope_vars[L].get()]
+            if not checked and not scope_extra:
+                tip.config(text="至少勾选一个授权范围")
+                return
+            granted = [SCOPE_FULL[L] for L in checked] + list(scope_extra or [])
+            # ── P1-A ②③：勾选的窗口 → windows 条目 ──
+            sel = list(lb.curselection()) if cands else []
+            windows = _windows_from_selection(cands, sel, time.time() + minutes * 60)
             expires = time.time() + minutes * 60
-            scopes = [s.strip() for s in scope.split(",") if s.strip()]
-            pass_rec = {"scope": "、".join(scopes), "scopes": scopes, "issued": _now(),
-                        "expires_at": expires,
-                        "expires": datetime.datetime.fromtimestamp(expires).strftime("%Y-%m-%d %H:%M:%S"),
-                        "acts_limit": acts, "nonce": secrets.token_hex(8), "consumed": False}
+            new = {"scopes": granted, "acts_limit": acts, "issued": _now(),
+                   "expires_at": expires,
+                   "expires": datetime.datetime.fromtimestamp(expires).strftime("%Y-%m-%d %H:%M:%S"),
+                   "nonce": secrets.token_hex(8), "windows": windows}
             if targets is not None:
                 # ★ 只有用户真填了目标才写这个键。绝不能写成 targets=None ——
                 #   gate.py 用 `"targets" in p` 判存在，写了键就等于「声明了目标」，
                 #   会把一张不设限的老证变成受限证。
-                pass_rec["targets"] = targets
-            _save(PASSFILE, pass_rec)
-            rec["fail_count"] = 0
-            _save(KEYFILE, rec)
+                new["targets"] = targets
+            # ── P1-A ③：读-改-写在**同一把锁**里完成（禁整文件替换）──
+            try:
+                with _lock_exclusive(AUTHDIR):
+                    existing = _load(PASSFILE, {})
+                    merged = merge_pass(existing, new, window_ack=window_ack)
+                    if merged is None:
+                        tip.config(text=new.get("_why") or "拒绝签发")
+                        return
+                    _save(PASSFILE, merged)
+                    rec["fail_count"] = 0
+                    _save(KEYFILE, rec)
+            except LockTimeout as e:
+                tip.config(text=f"{e}，本次拒绝（不越权）")
+                return
+            scope_txt = merged.get("scope", "")
             state["result"] = "granted"
-            log(f"✅ 授权通过：范围「{scope}」 {minutes} 分钟，动作上限 {acts} 次"
-                + (f"，限定目标〔{_sum_targets(targets)}〕" if targets is not None else ""))
+            log(f"✅ 授权通过：范围「{scope_txt}」 {minutes} 分钟，动作上限 {acts} 次"
+                + (f"，限定目标〔{_sum_targets(targets)}〕" if targets is not None else "")
+                + (f"，覆盖窗口 {len(merged.get('windows') or [])} 个（读-改-写合并）"
+                   if merged.get("windows") else "（未限定窗口）")
+                + ("〔窗口追加模式〕" if window_ack else ""))
             e1.delete(0, "end")
             root.destroy()
         else:
@@ -325,8 +719,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--set", action="store_true")
     ap.add_argument("--request")
-    ap.add_argument("--minutes", type=int, default=10)
-    ap.add_argument("--acts", type=int, default=20, help="本张通行证的动作用量上限")
+    ap.add_argument("--minutes", type=int, default=DEFAULT_MINUTES)
+    ap.add_argument("--acts", type=int, default=DEFAULT_ACTS, help="本张通行证的动作用量上限")
     ap.add_argument("--note", default="", help="只显示在弹窗上的一句话（不进通行证范围）")
     ap.add_argument("--status", action="store_true")
     ap.add_argument("--check")
@@ -334,10 +728,23 @@ def main():
     ap.add_argument("--targets", help="T5 可选：把这张证再收紧到具体目标，JSON 形如 "
                                       '{"pids":[1234],"title_contains":["记事本"],"actions":["click"]}'
                                       "（只在 --request 时生效；不填则不写 targets 键）")
+    # ── P1-A 新增三个开关 ──
+    ap.add_argument("--no-d", action="store_true",
+                    help="产品开关未启用 D：D 默认不勾选且弹窗文案明说（接线单 §二 7；"
+                         "与默认 ABCD 全给是同一口径的两面）")
+    ap.add_argument("--window-ack", action="store_true",
+                    help="窗口追加模式：只把选中的窗口合并进现有通行证，不动范围/时限/次数"
+                         "（L 卡 ②③；没有有效父证则拒绝签发）。core 的 rc=7 路径将来传它")
+    ap.add_argument("--windows",
+                    help="调用方声明的候选窗口 JSON（P1-A ②）："
+                         '[{"hwnd":123,"title":"记事本","exe":"notepad.exe","cls":"Notepad"}]'
+                         "；与 EnumWindows 枚举结果合并去重")
     a = ap.parse_args()
 
-    if a.targets and not a.request:
+    if a.targets and a.request is None:
         print("⚠ --targets 只在 --request（签发新证）时才有意义，本次忽略")
+    if a.windows and a.request is None:
+        print("⚠ --windows 只在 --request 时才有意义，本次忽略")
 
     if a.set:
         return 0 if _popup("set") == "set" else 5
@@ -349,18 +756,36 @@ def main():
         ok, why = check_pass(a.check or None, a.consume)
         print((("✅ " + why) if ok else ("⛔ " + why)) + targets_note())
         return 0 if ok else 3
-    if a.request:
+    if a.request is not None:
         try:
             tg = _norm_popup_targets(a.targets)
+            declared = _declared_windows(a.windows)
         except ValueError as e:
             print(f"⛔ 不签发：{e}")
             return 4
-        r = _popup("request", a.request, a.minutes, a.acts, a.note, targets=tg)
+        req = a.request or ""
+        items = _split_scope(req)
+        # ① 缺省/空 request ⇒ ABCD 一次给齐（分工书 ①）
+        states, extra = _initial_scope_states(items, a.no_d)
+        cands = _merge_candidates(_enum_candidate_windows(), declared)
+        # ③ 窗口追加模式：显式开关，或 note 命中 rc=7 话术（过渡兜底，core 接开关后可退场）
+        window_ack = bool(a.window_ack) or bool(_WINDOW_ACK_HINT.search(a.note or ""))
+        r = _popup("request", req, a.minutes, a.acts, a.note, targets=tg,
+                   scope_states=states, scope_extra=extra, no_d=a.no_d,
+                   candidates=cands, window_ack=window_ack)
         if r == "granted":
             ok, why = check_pass()
             print("通行证已签发：" + why)
             if tg:
                 print("   └ 已写入限定目标：" + _sum_targets(tg))
+            p = _load(PASSFILE, {})
+            ws = p.get("windows") or []
+            if ws:
+                print("   └ 覆盖窗口 %d 个（身份=exe+cls+created；追加合并）：" % len(ws))
+                for w in ws:
+                    print("      · %s / %s / %s" % (w.get("exe"), w.get("cls"), w.get("created")))
+            if window_ack:
+                print("   └ 本次为窗口追加模式：范围/时限/次数未动")
             return 0
         print("未授权：" + (r or "窗口被关闭"))
         return 3
