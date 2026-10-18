@@ -1186,6 +1186,38 @@ INJECT_CONTRACT_ENV = '''
 ★ 窗B：把契约里「data.结果」那一句**删掉**（不是改错、是真的没有）⇒ 判据必须跑红。
 '''
 
+INJECT_EVAL_PORT = '''
+
+
+# ===== 以下为 窗E2 注入段（跑红自证专用，勿入产品代码）=====
+# 注入的缺陷：**退回窗E2 之前那道硬拒** —— port 不等于 9222 时直接拒绝；
+#   即便放行，也仍然**不把 port 递给 cdp.py**（argv 里没有 --port，cdp.py 只会去连默认 9222）。
+# 真实后果：ctl_browser launch port=9223 起的实例，ctl_screen 的 DOM 段永远连不上，
+#   R1 恒 false，agent 只好退回 VLM —— 而屏幕明明看得见。
+_real_cdp_eval_E2 = _cdp_eval
+
+
+def _inj_cdp_eval_E2(js, port=CDP_DEFAULT_PORT, timeout=CDP_EVAL_TIMEOUT_SEC,
+                     url_contains=""):          # noqa: F811  故意覆盖真版
+    if int(port) != CDP_DEFAULT_PORT:
+        return 124, None, ("cdp.py 的调试端口写死 %d，port=%s 走不了 DOM 通道"
+                           % (CDP_DEFAULT_PORT, port))
+    argv = ["eval", "--js", str(js)]
+    if url_contains:
+        argv += ["--url", str(url_contains)]
+    rc, out, e = _legacy("cdp.py", argv, timeout=int(timeout))
+    txt = (out or "").strip()
+    if rc != 0:
+        return int(rc), None, (e or out or "").strip()
+    try:
+        return 0, json.loads(txt), txt
+    except Exception:
+        return 0, None, txt
+
+
+_cdp_eval = _inj_cdp_eval_E2
+'''
+
 INJECT = {
     # ★ 窗G2 的四个新注入（R3 那条通道的四根骨头各断一次）
     "ocr_wired": ("R3 根本没接线（OCR 三要素一律不接）", "append", INJECT_OCR_WIRED),
@@ -1227,6 +1259,7 @@ INJECT = {
     "after_baseline": ("after 回读照旧推进基线（调用方看不见自己动作的变化）",
                     "append", INJECT_AFTER_BASELINE),
     # ★ 窗B 的两个新注入（不是接 core.py，是改 cdp.py / 契约的影子件）
+    "eval_port": ("_cdp_eval 退回硬拒（非 9222 不透传 --port）", "append", INJECT_EVAL_PORT),
     "cdp_port": ("cdp.py 把 --port 丢掉（非 9222 硬连 9222）", "cdp", INJECT_CDP_PORT),
     "contract_env": ("契约删掉「data.结果」那一句", "contract", INJECT_CONTRACT_ENV),
 }
@@ -1656,7 +1689,7 @@ def _cdp_probe(path, name, extra_argv):
     return rc, seen
 
 
-def check_cdp_port_and_contract():
+def check_cdp_port_and_contract(core=None):
     """(11) 窗B：cdp.py 的 --port 真被转发（起落都非 9222 也认），＋ 契约那两句在位。
 
     判四件事：
@@ -1719,6 +1752,37 @@ def check_cdp_port_and_contract():
     need("cdp.py --port" in portd,
          "ctl_browser 的 port 参数没写明与 cdp.py --port 同步", reds)
     ev["ctl_browser_port说明"] = portd[-120:]
+    # ── 窗E2：ctl_screen 传下来的 cdp_port，真要一路透到 cdp.py 的 --port ──
+    #   假 cdp 把 core._cdp_eval 换掉了（只换网络 I/O），所以真身从 ORIG 取回来；
+    #   再把 _legacy 换成录 argv 的探针 —— 判的是**交给 cdp.py 的命令行本身**，
+    #   不是「端口通不通」（判据里绝不连真端口，更不许起浏览器）。
+    real_eval = ORIG.get("_cdp_eval") if ORIG else None
+    if need(real_eval is not None, "ORIG 里没存到 _cdp_eval 真身，判据自身有问题", reds):
+        old_legacy = core.__dict__.get("_legacy")
+        seen_argv = []
+
+        def _rec(name, argv, **kw):
+            seen_argv.append([str(a) for a in (argv or [])])
+            return 0, "null", ""
+
+        core._legacy = _rec
+        try:
+            for tag, kw in (("cdp_port=9333", {"port": 9333}),
+                            ("不传cdp_port", {})):
+                seen_argv.clear()
+                real_eval("1+1", **kw)
+                argv = list(seen_argv[0]) if seen_argv else []
+                ev["argv_" + tag] = argv
+                want = "9333" if kw else str(core.CDP_DEFAULT_PORT)
+                need(argv != [],
+                     "%s：cdp.py 压根没被调用（argv 空）" % tag, reds)
+                need("--port" in argv,
+                     "%s：argv 里没有 --port（端口没透传下去）= %r" % (tag, argv), reds)
+                need(want in argv,
+                     "%s：argv 里没有 %s（端口值不对）= %r" % (tag, want, argv), reds)
+        finally:
+            core._legacy = old_legacy
+
     return "(11) cdp.py --port 与契约两句", reds, ev
 
 
@@ -2350,6 +2414,11 @@ def check_watch_width(core, fx):
     need("选项格0" in w1 and "9" in w1,
          "宽度拒绝没点名声明串与命中数：%s" % w1[:160], reds)
     need(r1.get("code") not in (0, None), "宽度拒绝时 code 竟为 0/None：%r" % r1.get("code"), reds)
+    _rj1 = r1.get("data") or {}
+    ev["宽度9_拒因"] = _rj1.get("拒因")
+    need(_rj1.get("拒因") == "width",
+         "宽度拒绝信封里 data.拒因 应为机器可读的 width，实得 %r（None = 只能去解析中文 warning）"
+         % (_rj1.get("拒因"),), reds)
     r1b, _ = call(core, top=500, watch_text=["选项格0"], watch_pending=True)
     need(r1b.get("ok") is False,
          "watch_pending=true 竟救回了超宽声明（它现在就命中，不存在「等它出现」）", reds)
@@ -2396,6 +2465,13 @@ def check_watch_reject_ctx(core, fx):
                        "对象总数": data.get("对象总数"),
                        "blind_spots": (r1.get("blind_spots") or [])[:3]}
     need(r1.get("ok") is False, "unmatched 该拒没拒", reds)
+    # ── 窗E2：拒因取值表的另一半 —— unmatched。契约的 returns 早就承诺
+    #   「声明校验拒绝信封: {watch_校验, screen_version, window, 对象总数, 拒因}」，
+    #   这里把它钉住：以前 data.拒因 是 None，agent 只能去解析中文 warning。
+    ev["unmatched_拒因"] = data.get("拒因")
+    need(data.get("拒因") == "unmatched",
+         "unmatched 拒绝信封里 data.拒因 应为机器可读的 unmatched，实得 %r"
+         % (data.get("拒因"),), reds)
     need(bool(data.get("screen_version")),
          "拒绝信封缺 screen_version（agent 分不清是哪一屏的账）", reds)
     win = data.get("window") or {}
@@ -3416,7 +3492,8 @@ def main():
                      ("S8 CDP 接线与 R1", lambda: check_cdp_r1(core, fx)),
                      ("S9 OCR 接线与 R3", lambda: check_ocr_r3(core, fx)),
                      ("S10 动作侧接线", lambda: check_action_side(core, fx)),
-                     ("S11 cdp.py --port 与契约两句", check_cdp_port_and_contract)):
+                     ("S11 cdp.py --port 与契约两句",
+                     lambda: check_cdp_port_and_contract(core))):
         title, reds, ev = fn()
         res[title] = reds
         print("")

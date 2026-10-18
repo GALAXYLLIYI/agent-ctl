@@ -450,7 +450,7 @@
           "cdp_port": {
             "type": "integer",
             "default": 9222,
-            "description": "CDP 调试端口。⚠️ cdp.py 的端口写死 9222 —— 填别的端口时 DOM 段会**如实报不可用**（R1 走不通），不会假装有。"
+            "description": "CDP 调试端口（默认 9222）。★ cdp.py 已认 `--port`，本工具也把 `cdp_port` **原样透传**给它 —— 所以**填非 9222 现在真的可用**：R1 照常成立，DOM 段不必迁就默认端口。（2026-10-18 之前这里写的是「cdp.py 端口写死 9222、填别的端口 DOM 段报不可用」—— 那句话是 cdp.py 时代的老账，窗B 改了 cdp.py、窗E2 拆了 core.py 那道闸门，已作废。）"
           },
           "cdp_url_contains": {
             "type": "string",

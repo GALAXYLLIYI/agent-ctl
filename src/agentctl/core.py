@@ -2753,6 +2753,10 @@ def t_browser(args: dict) -> dict:
         argv += ["--url", str(args["url_contains"])]
     if args.get("value") is not None:
         argv += [str(args["value"])]
+    # ★ 窗E2：这里原来**把 port 丢了** —— ctl_browser pages/eval/text... 传了
+    #   port=9333，cdp.py 却只会去连默认 9222。契约里「与本工具的 port 传同一个值
+    #   即可」（窗B 写的那句）就是这么不成立的。⇒ 同样**参数优先、默认 9222**。
+    argv += ["--port", str(int(args.get("port") or CDP_DEFAULT_PORT))]
     rc, out, e = _legacy("cdp.py", argv, timeout=int(args.get("timeout_sec") or 90))
     return _map_rc(rc, out, e)
 
@@ -2833,13 +2837,16 @@ def _cdp_eval(js: str, port: int = CDP_DEFAULT_PORT, timeout: int = CDP_EVAL_TIM
     """在目标页里跑一段 JS。返回 (rc, 解析后的值 or None, 原始输出)。
 
     ★ 走 cdp.py 的 ``eval`` 子命令 —— WebSocket 那段是现役真代码，本单不重写。
-    ⚠️ cdp.py 的调试端口**写死 9222**（没有 --port，且本单不许改 legacy_tools）
-      ⇒ port≠9222 时 DOM 通道不可用，**如实报不可用**，不假装有。
+    ★ 窗E2（2026-10-18）：cdp.py **已经认 --port**（窗B 改真源 + gen_legacy，
+      CHK-A 两腿 35/35 绿，提交 1abcdff）=> 这里把 port **原样透传**过去，
+      不再对 port≠9222 硬拒。以前那句硬拒的病根是「cdp.py 写死 9222」；
+      闸门拆了之后若还留着，只会让 ctl_browser launch port=9223 起的实例
+      的 DOM 段**永远**报不可用 —— 正是窗B 回执第 8 节自报的那个开口。
+    ★ 兼容：port 缺省仍是 CDP_DEFAULT_PORT(9222) => cdp.py 收到 --port 9222，
+      与改前（不传参、cdp.py 内部默认 9222）**逐字等效**。
     """
-    if int(port) != CDP_DEFAULT_PORT:
-        return 124, None, ("cdp.py 的调试端口写死 %d，port=%s 走不了 DOM 通道"
-                          % (CDP_DEFAULT_PORT, port))
-    argv = ["eval", "--js", str(js)]
+    _port = int(port or CDP_DEFAULT_PORT)
+    argv = ["eval", "--js", str(js), "--port", str(_port)]
     if url_contains:
         argv += ["--url", str(url_contains)]
     rc, out, e = _legacy("cdp.py", argv, timeout=int(timeout))
@@ -4606,7 +4613,13 @@ def t_screen(args: dict) -> dict:
             # ★ 窗E1 · F3：拒绝信封带**屏上下文**（screen_version/window/对象总数），
             #   blind_spots 明写「校验失败≠屏幕空」—— 声明写错/白屏/错窗/预算没扫到
             #   四类失败现在分得清。**仍不回 objects**：那会被当成「声明已兑现」。
-            data_rej = {"watch_校验": rej.get("watch_校验") or {}}
+            # ★ 窗E2（2026-10-18 · DSH 实测发现）：`拒因` 以前**只存在于 warning**，
+            #   data 里没有 => agent 拿到的 data.拒因 是 None，只能去解析中文。
+            #   => 提到 data 顶层，给**机器可读**的短码：
+            #     "unmatched"（声明一条都没命中）| "width"（命中节点数超上限）
+            #   中文 why 仍留在 warning / blind_spots（人读用），两份并存不冲突。
+            data_rej = {"watch_校验": rej.get("watch_校验") or {},
+                        "拒因": rej.get("拒因")}
             for k in ("screen_version", "window", "对象总数"):
                 if rej.get(k) is not None:
                     data_rej[k] = rej[k]
