@@ -61,6 +61,32 @@ BORDER_CLS = "AgentCtlCtrlBorder"
 BORDER_EDGE_CLS = "AgentCtlCtrlBorderEdge"
 BORDER_CLS_ALL = (BORDER_CLS, BORDER_EDGE_CLS)
 
+# ══ 窗F（2026-10-18）跑红自证注入口 ══════════════════════════════════════════
+#   把用例12 的「就绪轮询」整个旁路，退回**固定 sleep**（故意取短到边框还没上屏）
+#   => 12b「不带 WDA 抓得到边框」必须红。
+#   用法（PowerShell）：
+#     $env:T1_W3_INJECT_FIXED_SLEEP="0.2"; python -X utf8 tests\_T1_窗3_自证.py all
+#   ★ 不设这个变量 = 现役路径（有界就绪轮询）。这是**判据自身的开关**，
+#     不碰 src/ 一个字节，也不需要 tests\_inject.py（那个是往产品副本注缺陷用的，
+#     这里的缺陷在判据自己身上，注入到产品上证明不了「轮询有没有在干活」）。
+_INJECT_FIXED_SLEEP = os.environ.get("T1_W3_INJECT_FIXED_SLEEP")
+
+# ══ 窗F 补（2026-10-18 12:5x）：**强制启动延迟**开关 ══════════════════════════
+#   为什么要它：光把 sleep 取短，注入只在「慢的时候」有判别力 ——
+#   DSH 2026-10-18 12:49 实测：空载机器上 T1_W3_INJECT_FIXED_SLEEP=0.2 根本没红
+#   （0.2s 已经够边框上屏），绿67/红0。而「慢」正是偶发场景、不能指望复现
+#   ⇒ 那条注入会永远「碰运气绿」。
+#   治法：**把「慢」变成开关**。设了它，边框子进程在 import 之前先睡 N 秒
+#   （N 秒内屏幕上什么都没有），于是：
+#       现役有界就绪轮询（上限 10s / 间隔 0.2s）⇒ 照样等得到 ⇒ 仍绿；
+#       注入的固定 sleep（只要 < N）⇒ 必然抓空 ⇒ **确定性红**。
+#   ⚠ **不碰 src/**：延迟是靠 spawn 时把 `-m agentctl.ctrl_border`
+#     换成 `runpy.run_module` 的小包装实现的，延迟发生在 **import 之前**，
+#     产品代码一个字节没改、行为语义也没变（runpy.run_module(run_name='__main__')
+#     与 `-m` 等价）。
+#     用法：$env:T1_W3_FORCE_START_DELAY="3"（秒；不设 = 0 = 不延迟）
+_FORCE_START_DELAY = float(os.environ.get("T1_W3_FORCE_START_DELAY") or 0)
+
 OK, BAD, SKIP = [], [], []
 
 
@@ -366,6 +392,194 @@ def _border_owner_pids():
     return got
 
 
+# ═══════════════════════════════════════════════════════════════
+# 窗F（2026-10-18）：**就绪轮询** —— 替掉用例12 的固定 sleep(2.5)
+# ═══════════════════════════════════════════════════════════════
+#
+# 根因（窗C 用红/绿/单跑三份留档钉死）：原流程是
+#       spawn 边框 -> 固定 sleep(2.5) -> 抓屏 -> 数边框色像素
+# 而 ctrl_border.py:1383 的边框窗是「**初始隐藏、等判定**」，由 0.2s 轮询才 ShowWindow；
+# 红跑与绿跑的「已建边框」日志计数**逐字同为 7 次** => 两次 spawn 都建出了 8 个窗，
+# 缺的只是**抓屏那一瞬间屏幕上还没有像素**（首帧上屏晚于 2.5s，负载高时）。
+# => 固定 sleep 是拿「猜的时间」当「就绪的证据」—— 猜错了不是判红，是判运气。
+
+READY_LOG_MARK = "已建 8 个边框窗口"      # ctrl_border.py:1383 的原话
+READY_N_WINDOWS = 8                       # 主色 4 + 1px 反色描边 4（窗F 起）
+READY_TIMEOUT_SEC = 10.0                  # 派单：上限 10s
+READY_INTERVAL_SEC = 0.2                  # 派单：间隔 200ms
+
+
+def _descendant_pids(pid):
+    """pid 这棵进程树（含自己）。
+
+    ★ 必须带子孙：`--follow` 起的是**守望进程**，真正画窗的是它再拉起的那个子进程
+      （ctrl_border.py:790 `start_follow`）。只按 p.pid 数，属主对不上，会恒为 0。
+    """
+    got = {int(pid)}
+    try:
+        import psutil
+        got |= set(c.pid for c in psutil.Process(int(pid)).children(recursive=True))
+    except Exception:
+        pass
+    return got
+
+
+def _enum_border_hwnds_of(pids):
+    """只数**属主 pid 在 pids 里**的边框窗。
+
+    ★ `_enum_border_hwnds()` 不分属主 —— 屏幕上要是还有别的边框窗（上一轮漏下的、
+      用户自己起的），数出来的就不是「本轮建了几个」。派单要求「按属主 pid 自数」，
+      就是为了不让上一轮的残留把本轮的等待喂饱。
+    """
+    import ctypes
+    import ctypes.wintypes as wt
+    u = ctypes.windll.user32
+    u.GetClassNameW.argtypes = [wt.HWND, wt.LPWSTR, ctypes.c_int]
+    u.GetWindowThreadProcessId.argtypes = [wt.HWND, ctypes.POINTER(wt.DWORD)]
+    P = ctypes.WINFUNCTYPE(ctypes.c_int, wt.HWND, wt.LPARAM)
+    buf = []
+
+    def cb(h, l):
+        b = ctypes.create_unicode_buffer(256)
+        if u.GetClassNameW(h, b, 256) and b.value in BORDER_CLS_ALL:
+            pid = wt.DWORD(0)
+            u.GetWindowThreadProcessId(h, ctypes.byref(pid))
+            if int(pid.value) in pids:
+                buf.append(int(h))
+        return 1
+    u.EnumWindows(P(cb), 0)
+    return buf
+
+
+def _any_visible(hwnds):
+    """这批窗里有没有**已经真正显示**的（IsWindowVisible）。"""
+    import ctypes
+    import ctypes.wintypes as wt
+    u = ctypes.windll.user32
+    u.IsWindowVisible.argtypes = [wt.HWND]
+    u.IsWindowVisible.restype = wt.BOOL
+    return any(u.IsWindowVisible(wt.HWND(int(h))) for h in hwnds)
+
+
+def _kill_border_owner_pids(pids, exclude=()):
+    """把这批 pid **自己拥有的**边框窗对应的进程杀掉（属主 pid 在 pids 里且不在 exclude）。
+
+    ★ 为什么用例12 收尾要显式这么做：spawn 出来的 --follow 带的是
+      **--parent-pid = 自证进程**（防脚本崩了留孤儿），不是那个守望进程自己
+      ⇒ 调 p.terminate() **杀不到真正画窗的孙进程**。
+      平时看不出来 —— 后面 15 系列的 stop_follow 会顺手把它收掉；
+      一旦给用例12 加启动延迟（本文件的 T1_W3_FORCE_START_DELAY），清理就赶不上
+      建窗，先后顺序被颠倒 ⇒ 15f/15h/15l/16 一起红（实测：绿 63 / 红 4）。
+      那几条红与「就绪轮询对不对」无关，是延迟撞出来的收尾缺口 —— 这里按属主收干净。
+    """
+    import ctypes
+    import ctypes.wintypes as wt
+    u = ctypes.windll.user32
+    u.GetClassNameW.argtypes = [wt.HWND, wt.LPWSTR, ctypes.c_int]
+    u.GetWindowThreadProcessId.argtypes = [wt.HWND, ctypes.POINTER(wt.DWORD)]
+    P = ctypes.WINFUNCTYPE(ctypes.c_int, wt.HWND, wt.LPARAM)
+    victims = set()
+    pset = set(int(x) for x in pids)
+
+    def cb(h, l):
+        b = ctypes.create_unicode_buffer(256)
+        if u.GetClassNameW(h, b, 256) and b.value in BORDER_CLS_ALL:
+            pid = wt.DWORD(0)
+            u.GetWindowThreadProcessId(h, ctypes.byref(pid))
+            if int(pid.value) in pset and int(pid.value) not in set(exclude):
+                victims.add(int(pid.value))
+        return 1
+    u.EnumWindows(P(cb), 0)
+    for vp in sorted(victims):
+        try:
+            os.kill(vp, 9)
+        except Exception:
+            pass
+    return sorted(victims)
+
+
+def _rlog_since(log, off):
+    """读日志**从字节偏移 off 起**新追加的内容。
+
+    ★ 派单点名：「按本轮日志文件/偏移判断，**不要数历史累计**」。本文件是全程 append 的，
+      前面用例10/11/16 都往里写过「已建 8 个边框窗口」=> 直接 `in rlog()` 永远为真，
+      就绪条件①会变成永远满足，等于没有。
+    """
+    try:
+        with open(log, "rb") as f:
+            f.seek(int(off))
+            return f.read().decode("utf-8", "replace")
+    except Exception:
+        return ""
+
+
+def _wait_border_ready(log, off, pid, need_pixels, count_pixels,
+                       timeout=READY_TIMEOUT_SEC, interval=READY_INTERVAL_SEC):
+    """有界就绪轮询：**三件齐**才进断言；超时**如实红**并说清哪件没等到、等了多久。
+
+    三件：
+      (1) 本轮日志（off 之后新追加的那段）出现「已建 8 个边框窗口」
+      (2) 按属主 pid 自数：属于本轮 spawn 那棵进程树的 AgentCtlCtrlBorder* 窗 = 8
+      (3) 试抓命中：角里数到的边框色像素 > 0
+
+    ★ (3)**只对不带 WDA 那轮**开（need_pixels=True 时才查）：带 WDA 时窗被
+      SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE) 排除在截图外
+      （ctrl_border.py:1081-1083）=> **设计上就抓不到**。拿它当就绪条件，
+      带 WDA 那轮会每轮空等满 10 秒再报红 —— 而「抓不到」恰恰是那一轮的**期望结果**，
+      不是缺陷。带 WDA 那轮改等「窗已真正显示」(2b)，否则「带WDA 抓不到」
+      有可能只是因为窗压根还没画出来，断言会**假绿**。
+
+    返回 (就绪?, 用了多少秒, 诊断 dict)。
+    """
+    t0 = time.monotonic()
+    diag = {"log": False, "nwin": 0, "px": None}
+    轮询次数 = 0
+    while True:
+        轮询次数 += 1
+        pids = _descendant_pids(pid)             # 每轮重取：孙进程可能刚起来
+        hs = _enum_border_hwnds_of(pids)
+        c1 = READY_LOG_MARK in _rlog_since(log, off)     # (1) 本轮日志
+        c2 = len(hs) == READY_N_WINDOWS                    # (2) 按属主 pid 自数
+        c2b = _any_visible(hs)                             # (2b) 真的显示出来了
+        c3, px = True, None
+        if need_pixels:                                    # (3) 试抓命中
+            px = count_pixels()
+            c3 = px > 0
+        # ★ 窗F 补：把「轮询到底有没有在等」变成**看得见的数** ——
+        #   次数 / 等待毫秒 / 三件各等到没。以前只能从耗时反推，
+        #   空载机器上「等了 0 次就绿」和「等了 30 次才绿」长得一模一样。
+        diag = {"log": c1, "nwin": len(hs), "px": px, "vis": bool(hs) and _any_visible(hs),
+                "次数": 轮询次数,
+                "等待毫秒": int((time.monotonic() - t0) * 1000),
+                "间隔毫秒": int(interval * 1000), "上限毫秒": int(timeout * 1000),
+                "用了像素条件": bool(need_pixels)}
+        if c1 and c2 and (c3 if need_pixels else c2b):
+            diag["等待毫秒"] = int((time.monotonic() - t0) * 1000)
+            return True, time.monotonic() - t0, diag
+        if time.monotonic() - t0 >= timeout:
+            diag["等待毫秒"] = int((time.monotonic() - t0) * 1000)
+            return False, time.monotonic() - t0, diag
+        time.sleep(interval)
+
+
+def _ready_diag(tag, secs, diag, added_bytes):
+    """把「没等到哪件、等了多久、当时数到几个窗/几个像素」拼成一句人话。"""
+    miss = []
+    if not diag.get("log"):
+        miss.append("(1)本轮日志没有「%s」" % READY_LOG_MARK)
+    if diag.get("nwin") != READY_N_WINDOWS:
+        miss.append("(2)按属主 pid 自数边框窗=%d（要 %d）"
+                    % (diag.get("nwin") or 0, READY_N_WINDOWS))
+    if diag.get("px") is not None and not (diag.get("px") or 0) > 0:
+        miss.append("(3)试抓命中像素=0（边框还没上屏）")
+    if not diag.get("vis"):
+        miss.append("(2b)边框窗还没真正显示出来")
+    return ("%s 就绪超时 %.1fs（上限 %.0fs / 间隔 %.2fs）：%s；本轮日志新追加 %d 字节；"
+            "轮询 %d 次 / 等了 %d ms"
+            % (tag, secs, READY_TIMEOUT_SEC, READY_INTERVAL_SEC,
+               "；".join(miss) or "（三件都齐了却没进断言 —— 判据自身有问题）",
+               added_bytes, int(diag.get("次数") or 0),
+               int(diag.get("等待毫秒") or 0)))
 def _proc_alive(pid):
     import ctypes
     k = ctypes.windll.kernel32
@@ -419,14 +633,28 @@ def border(src_dir=None, keep_border=False):
                               text=True, encoding="utf-8", errors="replace",
                               timeout=timeout)
 
-    def spawn(extra):
+    def spawn(extra, delay=0.0):
         # ★ 每个 spawn 都带 --parent-pid（本自证进程）⇒ 万一脚本中途崩了、
         #   finally 没跑到，子进程也会跟着本进程一起死，**不会留下孤儿边框**。
         #   （实测踩过：脚本崩在中途 ⇒ 漏下一个 --follow 占着单例互斥量，
         #     后面每一轮 spawn 都秒退，判据全在测空气。）
-        cmd = [sys.executable, "-X", "utf8", "-m", "agentctl.ctrl_border",
-               "--poll", "0.2", "--pass-file", passf, "--brake-flag", brakef,
-               "--parent-pid", str(os.getpid())] + extra
+        argv = ["--poll", "0.2", "--pass-file", passf, "--brake-flag", brakef,
+                "--parent-pid", str(os.getpid())] + extra
+        delay = float(delay or 0.0)
+        if delay > 0:
+            # ★ 窗F 补：延迟发生在 **import 之前** ⇒ 那段时间里边框窗压根还不存在。
+            #   runpy.run_module(..., run_name="__main__") 与 `python -m` 等价
+            #   （含 __name__ == "__main__" 那条入口），所以产品行为一字不差。
+            _wrap = ("import time,runpy,sys;time.sleep(%r);"
+                     "sys.argv=['agentctl.ctrl_border']+%r;"
+                     "runpy.run_module('agentctl.ctrl_border',run_name='__main__')"
+                     % (delay, argv))
+            cmd = [sys.executable, "-X", "utf8", "-c", _wrap]
+            print("  [用例12] ⚠ 强制启动延迟 %.1fs：边框子进程 import 前先睡这么久"
+                  "（现役轮询会等得到；注入的固定 sleep 必然抓空）" % delay,
+                  flush=True)
+        else:
+            cmd = [sys.executable, "-X", "utf8", "-m", "agentctl.ctrl_border"] + argv
         lf = open(log, "a", encoding="utf-8", errors="replace")
         try:
             return subprocess.Popen(cmd, env=env, cwd=tmp, stdout=lf, stderr=lf,
@@ -723,10 +951,106 @@ def border(src_dir=None, keep_border=False):
             return all(bytes(buf[j:j + 4]) == first for j in range(0, len(buf), 4))
 
         results = {}
+        readiness = {}
         for tag, extra in (("带WDA", []), ("不带WDA", ["--no-wda"])):
-            p = spawn(["--follow"] + extra)
+            # ★ 窗F（2026-10-18）：本轮日志的**起点偏移**必须在 spawn **之前**取。
+            #   这个 log 全程 append，前面用例10/11/16 都往里写过「已建 8 个边框窗口」⇒
+            #   拿整份日志去 `in` 判断就永远是真的，等于没有这个条件。
+            try:
+                log_off = os.path.getsize(log)
+            except Exception:
+                log_off = 0
+            # ★ 窗F 补：延迟**只给用例12**。别的用例（13/14/16/17）走的还是固定
+            #   sleep，给它们也加上延迟会把它们一起打红 —— 那不是「现役轮询仍绿」，
+            #   是把延迟扩散到了不该延迟的地方（实测踩过：绿 62 / 红 5）。
+            p = spawn(["--follow"] + extra, delay=_FORCE_START_DELAY)
             procs.append(p)
-            time.sleep(2.5)
+
+            # ── ★ 就绪轮询（替掉原来的固定 sleep(2.5)）────────────────────
+            #   (3)「试抓命中像素>0」只对**不带 WDA** 那轮开：带 WDA 时窗被
+            #   SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE) 排除在截图外，
+            #   **设计上就抓不到**，而那正是带 WDA 那轮要断言的结果（见 12）。
+            need_pixels = bool(extra)          # extra 非空 == 不带 WDA
+
+            def _count_px():
+                return edge_looks_orange(_bitblt_edge())
+
+            if _INJECT_FIXED_SLEEP is not None:
+                # ── 反向注入（窗F 跑红自证）：把就绪轮询退回**固定 sleep**。
+                #   ★ 窗F 补（2026-10-18 12:5x）：这条分支现在**自己判就绪**。
+                #     改前它 sleep 完就把 ready 硬写成 True、就绪判定整个旁路 ——
+                #     空载机器上「0.2s 已经够上屏」就绿，注入**证明不了轮询在干活**
+                #     （DSH 12:49 实测：绿 67 / 红 0）。
+                #     现在 sleep 完按**同一套三件**探一次：齐 ⇒ 绿；不齐 ⇒ **红**，
+                #     红字直接说「固定 sleep 之后三件不齐 ⇒ 这一版没在等」。
+                #     ⇒ sleep 取多短都会被抓，判别力不再取决于机器快慢。
+                #   ★ 要**确定性红**（连快机器也必红）就配 T1_W3_FORCE_START_DELAY：
+                #     延迟 N 秒 > sleep 值 ⇒ 固定 sleep 必然抓空。
+                _inj = float(_INJECT_FIXED_SLEEP)
+                time.sleep(_inj)
+                secs = _inj
+                _hs = _enum_border_hwnds_of(_descendant_pids(p.pid))
+                _d = {"log": READY_LOG_MARK in _rlog_since(log, log_off),
+                      "nwin": len(_hs),
+                      "px": (_count_px() if need_pixels else None),
+                      "vis": bool(_hs) and _any_visible(_hs),
+                      "次数": 1, "等待毫秒": int(_inj * 1000),
+                      "间隔毫秒": 0, "上限毫秒": 0, "用了像素条件": bool(need_pixels)}
+                ready = bool(_d["log"] and _d["nwin"] == READY_N_WINDOWS
+                             and ((_d["px"] or 0) > 0 if need_pixels else _d["vis"]))
+                try:
+                    _added = os.path.getsize(log) - log_off
+                except Exception:
+                    _added = 0
+                readiness[tag] = ("注入·固定 sleep(%.2f)·探了 1 次·三件=%s"
+                                  "（轮询 %d 次 / 等待 %d ms）"
+                                  % (_inj, "齐" if ready else "不齐",
+                                     _d["次数"], _d["等待毫秒"]),)
+                print("  [用例12 %s] ⚠ 注入：就绪轮询被旁路，改成固定 sleep(%.2f)"
+                      % (tag, _inj), flush=True)
+                check("12-就绪 %s ★ 反向注入：固定 sleep 之后三件齐"
+                      "（这一条绿 ⇒ 说明 sleep 已经够长，注入**证明不了**轮询在干活）"
+                      % tag, ready,
+                      "" if ready else
+                      ("固定 sleep(%.2f) 之后三件不齐 ⇒ 这一版**没在等**：%s；"
+                       "本轮日志新追加 %d 字节。⚠ 光设 T1_W3_INJECT_FIXED_SLEEP 在空载"
+                       "机器上可能碰巧够（判别力依赖机器快慢）；要**确定性红**请配 "
+                       "T1_W3_FORCE_START_DELAY=3（边框晚 3s 才起，现役轮询照样绿）"
+                       % (_inj, _ready_diag(tag, _inj, _d, _added), _added)))
+            else:
+                ready, secs, diag = _wait_border_ready(
+                    log, log_off, p.pid, need_pixels, _count_px)
+                try:
+                    added = os.path.getsize(log) - log_off
+                except Exception:
+                    added = 0
+                readiness[tag] = ("三件齐，用了 %.2fs（轮询 %d 次 / 等待 %d ms / "
+                                  "间隔 %d ms / 上限 %d ms）；本轮日志新追加 %d 字节；"
+                                  "窗=%d 像素=%s"
+                                  % (secs, int(diag.get("次数") or 0),
+                                     int(diag.get("等待毫秒") or 0),
+                                     int(diag.get("间隔毫秒") or 0),
+                                     int(diag.get("上限毫秒") or 0),
+                                     added, diag["nwin"], diag["px"]),)
+                print("  [用例12 %s] 就绪=%s（%.2fs）：本轮日志「%s」%s / 按属主 pid 数到 %d 窗%s"
+                      % (tag, "齐" if ready else "超时", secs,
+                         READY_LOG_MARK, "有" if diag["log"] else "无", diag["nwin"],
+                         (" / 试抓 %s 像素" % diag["px"]) if diag["px"] is not None
+                         else " / 试抓不适用（带 WDA，设计上抓不到）"), flush=True)
+                print("  [用例12 %s] 轮询可观测：探了 %d 次 / 累计等待 %d ms / 间隔 %d ms"
+                      " / 上限 %d ms；三件 = (1)日志 %s (2)窗 %d/%d %s (3)像素 %s"
+                      % (tag, int(diag.get("次数") or 0), int(diag.get("等待毫秒") or 0),
+                         int(diag.get("间隔毫秒") or 0), int(diag.get("上限毫秒") or 0),
+                         "✔" if diag.get("log") else "✘", diag.get("nwin") or 0,
+                         READY_N_WINDOWS, "（已显示）" if diag.get("vis") else "（还没显示）",
+                         ("✔%s" % diag.get("px")) if diag.get("px") is not None
+                         else "不适用（带 WDA）"), flush=True)
+                if not ready:
+                    check("12-就绪 %s ★ 三件齐才进断言（上限 %.0fs / 间隔 %.2fs）"
+                          % (tag, READY_TIMEOUT_SEC, READY_INTERVAL_SEC),
+                          False, _ready_diag(tag, secs, diag, added))
+            # ───────────────────────────────────────────────────────────
+
             bmp = _bitblt_edge()
             pil_hit, pil_why = None, ""
             if PIL_OK:
@@ -746,12 +1070,46 @@ def border(src_dir=None, keep_border=False):
                      ("，PIL ImageGrab=%d" % pil_hit) if pil_hit is not None
                      else ("，PIL 本机抓不到屏（%s）" % (pil_why or "?"))),
                   flush=True)
+            # ★ 窗F 补：**必须在 terminate 之前**把这一轮的进程树取全 ——
+            #   守望进程一死，孙进程会被 reparent 掉，psutil 就再也找不到它了。
+            _own = _descendant_pids(p.pid) | {p.pid}
             p.terminate()
             try:
                 p.wait(timeout=10)
             except Exception:
                 p.kill()
+            # ★ 窗F 补：p.terminate() 杀不到真正画窗的**孙进程**（--parent-pid
+            #   指的是自证进程，不是守望进程）。平时靠 15 系列顺手收，这次按
+            #   **属主 pid** 显式收干净 —— 否则启动延迟会把「清理」排在「建窗」
+            #   后面，15f/15h/15l/16 会一起红（那几条红与轮询无关）。
+            #   ★ 按 pid 杀**整棵还活着的树**（不按窗口）：加了启动延迟之后，
+            #     收摊那一刻孙进程可能**还在 sleep、一个窗都还没建** ——
+            #     按窗口找就找不到它，它 3s 后醒来照样留一屏边框（实测：16 / 15o-4 红）。
+            _killed = []
+            for _vp in sorted(_own - {os.getpid()}):
+                if _proc_alive(_vp):
+                    try:
+                        os.kill(_vp, 9)
+                        _killed.append(_vp)
+                    except Exception:
+                        pass
+            for _vp in _kill_border_owner_pids(_own, exclude={os.getpid()}):
+                if _vp not in _killed:
+                    _killed.append(_vp)
+            if _killed:
+                print("  [用例12 %s] 收摊：按属主 pid 补杀 %s（守望进程退了、"
+                      "画窗的孙进程还活着的那种）" % (tag, _killed), flush=True)
+            print("  [用例12 %s] 收摊自证：本轮树 %s / 补杀 %s / 枚举到边框窗 %s"
+                  % (tag, sorted(_own - {os.getpid()}), _killed,
+                     _enum_border_hwnds_of(_own)), flush=True)
             time.sleep(1.2)
+
+        # 窗F：把两轮的就绪耗时摊开印出来 —— 「轮询有没有让正常路径变慢」
+        #   要靠这个实测数说话，不能靠估。
+        for _rtag in ("带WDA", "不带WDA"):
+            if _rtag in readiness:
+                print("  [用例12 就绪小结] %s：%s" % (_rtag, readiness[_rtag][0]),
+                      flush=True)
 
         blank = dict((t, is_blank(results[t][2])) for t in results)
         print("  [抓屏自检] 左下角 24x24 抓回来的是不是整片空白：%s" % blank, flush=True)
