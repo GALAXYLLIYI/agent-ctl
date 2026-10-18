@@ -259,6 +259,8 @@ class Fixture(object):
         self.quota = 3
         # ★ 窗F2：冷窗口期（0 = 不冷）—— 见 start_cold/shell_root。
         self._cold_until = 0.0
+        # ★ 窗F2b：半热窗口期（0 = 不半热）—— 见 start_half_cold/half_root。
+        self._half_until = 0.0
 
     def set_title(self, t):
         self.title = t
@@ -306,10 +308,55 @@ class Fixture(object):
         return _Ctrl("PaneControl", [0, 0, 1280, 200], "外壳窗格",
                      rid=[899, 1], children=inner)
 
+    def start_half_cold(self, ms=150):
+        """接下来 ms 毫秒里 walk 只拿到「**半热**」树（真页冷扫的形状，见 half_root）。
+
+        ★ 为什么按**时间**门控、而不是「接下来 n 次」：一次 ctl_screen 里
+          `_lib()` 不止被 walk 调（取窗口状态那条路也会要一次 root），
+          按趟数计数会被那些调用吃掉 —— 实测踩过：计数被窗口状态先扣掉，
+          等 walk 真正跑起来时已经是「热」的了。start_cold 当初也是按时间，稳妥。
+        """
+        self._half_until = time.time() + (float(ms) / 1000.0)
+
+    def is_half_cold(self):
+        return bool(getattr(self, "_half_until", 0.0)) and time.time() < self._half_until
+
+    def half_root(self):
+        """真页冷扫形状：**约 60 个原始节点，但可报对象只有 18 个**。
+
+        ★ 为什么要单独造一棵：`shell_root`（6 节点 / 0 可交互）三条依据能撞中②和③，
+          但**真页冷扫一个都撞不中** —— 它有可交互外壳（②不中）、耗时不短、节点也不少（③不中）。
+        ★ 比例照 2026-10-18 真页实测抄：冷扫 18 个可报对象 / 60 个原始节点（热扫 49 / 111）。
+          大半原始节点是**空壳 Pane**（没 label、也不可交互）—— 这正是「原始节点数」
+          骗人、必须按「可报对象数」卡门槛的原因。
+        """
+        rid = [800, 1]
+        inner = []
+        # (a) 12 段有 label 的文本块 —— 计入「可报对象」
+        for i in range(12):
+            rid[0] += 1
+            inner.append(_Ctrl("PaneControl", [20, 20 + 60 * i, 1200, 70 + 60 * i],
+                               "半热文本段%02d" % (i + 1), rid=list(rid)))
+        # (b) 6 个能点的按钮 —— 也计入「可报对象」
+        for i in range(6):
+            rid[0] += 1
+            inner.append(_Ctrl("ButtonControl", [100, 60 * i, 200, 40 + 60 * i],
+                               "半热按钮%02d" % (i + 1), rid=list(rid)))
+        # (c) 41 个空壳 Pane —— 不可交互也没 label，**只涨原始节点数**
+        for i in range(41):
+            rid[0] += 1
+            inner.append(_Ctrl("PaneControl", [400, 20 + 12 * i, 900, 30 + 12 * i],
+                               "", rid=list(rid)))
+        return _Ctrl("PaneControl", [0, 0, 1280, 900], "半热网页根",
+                     rid=[799, 1], children=inner)
+
     def root(self):
         # ★ 窗F2：冷窗口期只给外壳（walk() 仍是现役真代码，换的只是 _lib 这个 I/O 边界）。
         if self.is_cold():
             return self.shell_root()
+        # ★ 窗F2b：半热窗口期只给「半热」树（真页冷扫的形状）。
+        if self.is_half_cold():
+            return self.half_root()
         inner = []
         rid = [100, 1]
         # (1) query 命中的**大**文本（面积占客户区 88%）：打分 0.638，压过小按钮的 0.601
@@ -618,7 +665,7 @@ INJECT_WARMUP = """
 _real_ready_f2 = _screen_ready
 
 
-def _screen_ready(nodes, stats, *, elapsed_ms, prev_nodes=0):   # noqa: F811  故意覆盖真版
+def _screen_ready(nodes, stats, *, elapsed_ms, prev_nodes=0, is_web=False):   # noqa: F811  故意覆盖真版
     # 注入的缺陷：**没有就绪判定也没有暖机重试** —— 首扫拿到什么就交什么，
     # 并且对外谎称已热（= 治「首扫不可信」之前的样子）。
     return True, ["注入：永远当已热"]
@@ -634,6 +681,40 @@ def _screen_build(hwnd, args):                            # noqa: F811  故意�
     out["screen_ready"] = True      # 且对外谎称已热
     out["ready_证据"] = {"注入": "永远当已热"}
     return out
+"""
+
+# ===== 以下为 窗F2b 注入段（跑红自证专用，勿入产品代码）=====================
+INJECT_WARMUP_FIRST = """
+
+# ===== 以下为 窗F2b 注入段（跑红自证专用，勿入产品代码）=====
+_real_minprobes_f2b = _screen_min_probes
+_real_ready_f2b = _screen_ready        # ★ 必须在覆盖**之前**绑定，否则绑到自己 ⇒ 无限递归
+
+
+def _screen_min_probes(*, warmup, is_web, first_scan):   # noqa: F811  故意覆盖真版
+    # 注入的缺陷：**网页类首扫不强制探第二次**（把「至少两趟」这个下限抹成 1）——
+    # 真页上冷扫 18 个对象会被原样交出去，agent 拿着半屏当真屏。
+    return 1
+
+
+def _screen_ready(nodes, stats, *, elapsed_ms, prev_nodes=0, is_web=False):   # noqa: F811  故意覆盖真版
+    # 顺带把网页类门槛也去掉：真页冷扫形状（原始节点多、可报对象少）就没人判了。
+    return _real_ready_f2b(nodes, stats, elapsed_ms=elapsed_ms,
+                           prev_nodes=prev_nodes, is_web=False)
+"""
+
+INJECT_WARMUP_NB = """
+
+# ===== 以下为 窗F2b 注入段（跑红自证专用，勿入产品代码）=====
+_real_minprobes_f2b_nb = _screen_min_probes   # ★ 必须在覆盖**之前**绑定，否则绑到自己 ⇒ 无限递归
+
+
+def _screen_min_probes(*, warmup, is_web, first_scan):   # noqa: F811  故意覆盖真版
+    # 注入的缺陷：**忘了判窗口类**（把 `is_web and` 那个条件删掉）——
+    # 于是记事本、记事本、任何原生窗口的首扫也被迫多走一趟、白等 400ms。
+    if is_web:
+        return _real_minprobes_f2b_nb(warmup=warmup, is_web=True, first_scan=first_scan)
+    return 2 if (warmup and first_scan) else 1
 """
 
 INJECT = {
@@ -655,6 +736,9 @@ INJECT = {
     "watch_ctx": ("拒绝信封抠掉屏上下文（分不清校验失败与白屏）", "append", INJECT_WATCH_CTX),
     # ★ 窗F2 的新注入：去掉就绪判定与暖机重试
     "warmup": ("没有就绪判定也没有暖机（首扫直接当成品）", "append", INJECT_WARMUP),
+    # ★ 窗F2b 的两个新注入
+    "warmup_first": ("网页类首扫不探第二次（冷扫当热屏交出去）", "append", INJECT_WARMUP_FIRST),
+    "warmup_nb": ("首扫强制探测忘了判窗口类（非网页也白等 400ms）", "append", INJECT_WARMUP_NB),
 }
 
 
@@ -1844,6 +1928,111 @@ def check_screen_ready(core, fx):
     need(int(证据(sc5).get("重试") or 0) == 0,
          "热屏不该触发重试，实得 %r" % 证据(sc5).get("重试"), reds)
     fx._cold_until = 0.0
+
+    # ══ 窗F2b：真页冷扫是「三条依据一条都不中」的漏判（F2 自己就交代了这个风险面）══
+    #   真页实测（2026-10-18，work\_暖机真页复核_20261018.py）：
+    #     冷扫 ≈ 18 个可报对象 / 60 个原始节点 / 372ms  →  F2 的三条依据一条都没命中，被判成已热
+    #     热扫 ≈ 49 个可报对象 / 111 个原始节点 / 259ms
+    #   所以光「有基线时的 ①」不够：**首扫（无基线）必须强制探两次**。
+
+    # ── ⑥ 网页类窗口首扫（无基线）⇒ **必然探两次**，并把节点更多的那次交出去
+    fx._cold_until = 0.0
+    fx._half_until = 0.0
+    fx.cls = "Chrome_WidgetWin_1"
+    core._screen_forget(0)
+    fx.start_half_cold(150)       # 第一趟半热（真页冷扫形状）；暖机那 400ms 一睡，它就热了
+    t6 = time.time()
+    r6, sc6 = call(core, top=500)
+    dt6 = (time.time() - t6) * 1000.0
+    e6 = 证据(sc6)
+    t6n = e6.get("各次节点数") or []
+    ev["⑥网页类首扫"] = {"screen_ready": sc6.get("screen_ready"), "重试": e6.get("重试"),
+                     "等待毫秒": e6.get("等待毫秒"), "各次节点数": t6n,
+                     "窗口类别": e6.get("窗口类别"), "首扫强制探测": e6.get("首扫强制探测"),
+                     "耗时毫秒": int(dt6)}
+    need(int(e6.get("重试") or 0) >= 1,
+         "网页类窗口首扫**没有探第二次**（重试=%r，各次节点数=%r）—— 首扫没有上一屏可对比，"
+         "不探第二次就会把 18 个对象的半屏当热屏交出去" % (e6.get("重试"), t6n), reds)
+    need(len(t6n) >= 2 and int(t6n[-1]) > int(t6n[0]),
+         "探了两次却没把**节点更多的那次**交出去（各次=%r，交出的=%r）"
+         % (t6n, e6.get("节点数")), reds)
+    need(bool(t6n) and int(e6.get("节点数") or 0) == max(int(x) for x in t6n),
+         "交出的节点数不是各趟最大值：%r vs %r" % (e6.get("节点数"), t6n), reds)
+    need(sc6.get("screen_ready") is True,
+         "第二趟已经热了却还报未热（误报）：判定=%r" % e6.get("判定"), reds)
+    need(e6.get("窗口类别") == "网页类" and e6.get("首扫强制探测") is True,
+         "ready_证据 没写明这次是网页类首扫强制探测：窗口类别=%r 首扫强制探测=%r"
+         % (e6.get("窗口类别"), e6.get("首扫强制探测")), reds)
+
+    # ── ⑦ 首扫探了两次**都还是冷** ⇒ screen_ready=false，且明写「证据不足≠没有」
+    fx._half_until = 0.0
+    core._screen_forget(0)
+    fx.start_half_cold(8000)      # 一直半热：探几次都是真页冷扫那个形状
+    t7 = time.time()
+    r7, sc7 = call(core, top=500)
+    dt7 = (time.time() - t7) * 1000.0
+    e7 = 证据(sc7)
+    ev["⑦网页首扫两次都冷"] = {"screen_ready": sc7.get("screen_ready"),
+                         "重试": e7.get("重试"), "各次节点数": e7.get("各次节点数"),
+                         "判定": e7.get("判定"), "耗时毫秒": int(dt7)}
+    need(int(e7.get("重试") or 0) >= 1,
+         "网页类首扫压根没探第二次（重试=%r）—— 那两次都少就无从谈起" % e7.get("重试"), reds)
+    need(sc7.get("screen_ready") is False,
+         "网页类探完还是冷的（各趟原始节点=%r，真页冷扫是 60/18 对象）却报 screen_ready=true"
+         "—— 这正是 F2 漏判的那一屏" % e7.get("各次节点数"), reds)
+    need(any("网页" in str(x) for x in (e7.get("判定") or [])),
+         "screen_ready=false 却没点名网页类门槛（判定=%r）" % (e7.get("判定"),), reds)
+    need(r7.get("ok") is True and r7.get("code") in (0, None),
+         "网页首扫未热被当成了错误（ok=%r code=%r）—— 它是证据不足"
+         % (r7.get("ok"), r7.get("code")), reds)
+    bs7 = 盲点(r7)
+    need("未热" in bs7 and ("不等于" in bs7 or "不要当成" in bs7),
+         "网页首扫未热时 blind_spots 没明写「证据不足，不等于页面上没有」：%s" % bs7[:200], reds)
+    need(dt7 < 5000, "暖机**有界**：这次调用花了 %d ms" % int(dt7), reds)
+
+    # ── ⑧ 非网页类窗口首扫 ⇒ **不加延迟**（别给记事本这类白等 400ms）
+    fx._half_until = 0.0
+    fx.cls = "TkTopLevel"
+    core._screen_forget(0)
+    t8 = time.time()
+    r8, sc8 = call(core, top=500)
+    dt8 = (time.time() - t8) * 1000.0
+    e8 = 证据(sc8)
+    ev["⑧非网页类首扫"] = {"screen_ready": sc8.get("screen_ready"), "重试": e8.get("重试"),
+                     "等待毫秒": e8.get("等待毫秒"), "窗口类别": e8.get("窗口类别"),
+                     "首扫强制探测": e8.get("首扫强制探测"), "耗时毫秒": int(dt8)}
+    need(int(e8.get("重试") or 0) == 0 and int(e8.get("等待毫秒") or 0) == 0,
+         "非网页类窗口首扫也去探第二次了（重试=%r，等待=%r ms）—— 首扫强制探测**只该给网页类**，"
+         "原生窗口不该平白多等 400ms" % (e8.get("重试"), e8.get("等待毫秒")), reds)
+    need(dt8 < 800, "非网页类首扫耗时 %d ms，明显多等了一趟" % int(dt8), reds)
+    need(sc8.get("screen_ready") is True and e8.get("窗口类别") == "非网页类",
+         "非网页类热屏被误报未热/类别写错：screen_ready=%r 窗口类别=%r"
+         % (sc8.get("screen_ready"), e8.get("窗口类别")), reds)
+
+    # ── ⑨ 网页类 + warmup=false ⇒ 不探第二次，但 screen_ready **仍如实**判
+    fx.cls = "Chrome_WidgetWin_1"
+    fx._half_until = 0.0
+    core._screen_forget(0)
+    fx.start_half_cold(8000)
+    t9 = time.time()
+    r9, sc9 = call(core, top=500, warmup=False)
+    dt9 = (time.time() - t9) * 1000.0
+    e9 = 证据(sc9)
+    ev["⑨网页+warmup=false"] = {"screen_ready": sc9.get("screen_ready"), "重试": e9.get("重试"),
+                        "等待毫秒": e9.get("等待毫秒"), "各次节点数": e9.get("各次节点数"),
+                        "耗时毫秒": int(dt9)}
+    need(int(e9.get("重试") or 0) == 0 and int(e9.get("等待毫秒") or 0) == 0,
+         "warmup=false 却还是探了第二次（重试=%r，等待=%r ms）—— 这参数就是用来关掉重试的"
+         % (e9.get("重试"), e9.get("等待毫秒")), reds)
+    need(len(e9.get("各次节点数") or []) == 1,
+         "warmup=false 采了 %r 趟" % len(e9.get("各次节点数") or []), reds)
+    need(sc9.get("screen_ready") is False,
+         "warmup=false 时网页类首扫仍应**如实**判未热，实得 %r" % sc9.get("screen_ready"), reds)
+    need("未热" in 盲点(r9),
+         "warmup=false + 网页未热 ⇒ blind_spots 仍要点名：%s" % 盲点(r9)[:160], reds)
+    fx._half_until = 0.0
+    fx.cls = "TkTopLevel"
+    core._screen_forget(0)
     return "S7 首扫就绪判定", reds, ev
 
 
@@ -2087,7 +2276,10 @@ def main():
               "S4重叠声明全收（一个节点可同时命中多条）；"
               "S5单条声明命中节点数有上限，超宽拒绝；"
               "S6拒绝信封带屏上下文（分得清校验失败与白屏）；"
-              "S7首扫就绪判定：暖机有界（最多2次）、screen_ready 如实、未热≠拒绝。")
+              "S7首扫就绪判定：暖机有界（最多2次）、screen_ready 如实、未热≠拒绝；"
+              "⑥网页类首扫必探两次（重试≥1，取节点更多那趟）；"
+              "⑦首扫两次都冷⇒screen_ready=false（按可报对象数判，不看耗时）；"
+              "⑧非网页类首扫不加延迟（重试=0）；⑨warmup=false 不探第二次但就绪仍如实。")
     print("退出前 AgentCtlCtrlBorder* 窗 = %s（%s）" % count_border_windows())
     print("=" * 100)
     shutil.rmtree(tmp, ignore_errors=True)

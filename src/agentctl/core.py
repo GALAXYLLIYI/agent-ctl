@@ -3273,15 +3273,25 @@ SCREEN_WARMUP_GAP_MS = 400        # 重试间隔（派单要求 300~500ms，取�
 SCREEN_WARM_FAST_MS = 300         # 「采集太快」阈值：真树走 COM 不该这么快
 SCREEN_SHELL_MAX_NODES = 24       # 「节点极少」阈值（真页外壳实测 18 个）
 SCREEN_READY_SHRINK_RATIO = 0.6   # 节点数 < 上次的 60% ⇒ 疑心这趟是外壳
+# ★ 窗F2b：网页类窗口的「热」门槛，按**可报对象数**（可交互或有 label 的节点）算。
+#   ★ 出处是 2026-10-18 的**真 Chromium 页实测**（DSH，`work\_暖机真页复核_20261018.py`）：
+#       冷扫 ≈ 18 个可报对象 / 60 个原始节点 / 372ms   ← 三条旧依据一条都没命中，被判成「已热」
+#       热扫 ≈ 49 个可报对象 / 111 个原始节点 / 259ms
+#     40 取在 18 与 49 正中间。**为什么按对象数而不是原始节点数**：
+#     原始节点里大半是空壳 Pane（冷扫 60、热扫 111，60 并没低于 40 ⇒ 按节点数卡根本卡不住真页），
+#     而 agent 真正吃的就是 objects —— 门槛必须卡在它最终看到的那个尺度上。
+SCREEN_WEB_READY_MIN_OBJS = 40    # 网页类：可报对象 < 40 ⇒ 未热（不再看耗时）
 
 
-def _screen_ready(nodes, stats, *, elapsed_ms, prev_nodes=0) -> tuple:
+def _screen_ready(nodes, stats, *, elapsed_ms, prev_nodes=0, is_web=False) -> tuple:
     """这棵树**热了没有**。返回 (ready: bool, 依据: list[str])。
 
     ★ 三条依据（写死、可调；任一命中即判未热）：
       ① 节点数明显少于**上一次同窗口扫描**（< 60%）—— 树被抽走了（懒启动的典型形状）；
       ② 可交互节点数 == 0 而窗口客户区非零 —— 一屏连个能点的都没有，多半只拿到外壳；
       ③ 采集耗时很短却节点极少（外壳特征）—— 冷启动时树还没长出来，走一趟当然快。
+      ③b **网页类专属**：可报对象数 < SCREEN_WEB_READY_MIN_OBJS ⇒ 未热，**不看耗时**
+          （真页冷扫是 60 节点/372ms，旧的「过快+极少」永远撞不上；见 3276 附近出处注释）。
     ★ 全部三条都只在「客户区非零」时才有意义：零尺寸窗口的 0 节点不是「未热」。
     ★ 宁可**保守报未热**：报「可能没热」的代价是多扫几趟；反过来（把外壳当热屏交出去）
       的代价是 agent 据此断定「页面上没有这个东西」—— 那是事实层面的假绿。
@@ -3297,6 +3307,11 @@ def _screen_ready(nodes, stats, *, elapsed_ms, prev_nodes=0) -> tuple:
     n = len(nodes)
     n_int = sum(1 for x in nodes
                 if str(x.get("type") or "") in uia_tree.INTERACTIVE_TYPES)
+    # 可报对象数：与 _screen_build 里筛候选的口径**逐字一致**（可交互 或 有 label）——
+    # 门槛必须卡在 agent 最终真正看到的那个尺度上，否则测的是一棵没人吃的树。
+    n_obj = sum(1 for x in nodes
+                if (str(x.get("type") or "") in uia_tree.INTERACTIVE_TYPES)
+                or str(x.get("name") or "").strip())
     why = []
     if area > 0:
         if prev_nodes and n < prev_nodes * SCREEN_READY_SHRINK_RATIO:
@@ -3306,7 +3321,27 @@ def _screen_ready(nodes, stats, *, elapsed_ms, prev_nodes=0) -> tuple:
             why.append("可交互节点 0 个，而客户区非零（%d×%d）—— 多半只拿到外壳" % (w, h))
         if float(elapsed_ms) < SCREEN_WARM_FAST_MS and n <= SCREEN_SHELL_MAX_NODES:
             why.append("采集只用了 %.0fms 却只有 %d 个节点（外壳特征）" % (elapsed_ms, n))
+        if is_web and n_obj < SCREEN_WEB_READY_MIN_OBJS:
+            why.append("网页类窗口只有 %d 个可报对象（< %d）—— Chromium 无障碍树多半还没长全"
+                        % (n_obj, SCREEN_WEB_READY_MIN_OBJS))
+    if not why and is_web:
+        # 热了也要说清是**按哪把尺子**量的 —— 否则调用方没法判断这个 true 可不可信。
+        return True, ["网页类可报对象 %d 个（≥ %d），节点数/可交互/采集耗时三项也正常"
+                      % (n_obj, SCREEN_WEB_READY_MIN_OBJS)]
     return (not why), why
+
+
+def _screen_min_probes(*, warmup, is_web, first_scan) -> int:
+    """一次调用**至少**要采几趟。
+
+    ★ 窗F2b：**网页类窗口本进程首扫**（`_screen_snap_get` 为空 ⇒ 依据①没有基线可比）
+      强制 2 趟 —— 树是懒启用的，第一趟往往只拿到外壳，而此时**三条依据一条都判不出来**：
+      依据① 没基线跳过、依据② 冷屏仍有可交互外壳（≠0）、依据③ 真页是 372ms/60 节点撞不上阈值。
+      真页实测（2026-10-18）：冷扫 18 对象被当成热屏交出去，热扫才有 49 个。
+    ★ **非网页类维持 1 趟**：别给记事本这类原生窗口白加 400ms。
+    ★ 上限仍由 SCREEN_WARMUP_MAX_RETRY 兜着（最多 3 趟），这里只抬**下限**。
+    """
+    return 2 if (warmup and is_web and first_scan) else 1
 
 
 def _screen_build(hwnd: int, args: dict) -> dict:
@@ -3333,6 +3368,9 @@ def _screen_build(hwnd: int, args: dict) -> dict:
     warm_raw = args.get("warmup")
     warmup = True if warm_raw is None else bool(warm_raw)
 
+    # ★ 窗F2b：网页类（Chromium/FF/Electron）窗口 ⇒ 首扫要**强制探两次**（见 _screen_min_probes）。
+    is_web = _screen_is_web_window(win)
+
     # ★ 固定口径：roles=("all",) + include_offscreen=True。
     #   语义屏要的是**完整结构骨架**（uid 的路径必须在全树上算才有意义），
     #   视口过滤与 top-N 放在**之后**做 —— 否则同一控件滚出屏幕就会换 uid。
@@ -3341,6 +3379,8 @@ def _screen_build(hwnd: int, args: dict) -> dict:
     prev = _screen_snap_get(hwnd)
     prev_uids = (prev or {}).get("uids") or set()
     prev_nodes = int((prev or {}).get("节点数") or 0)
+    first_scan = not prev
+    min_probes = _screen_min_probes(warmup=warmup, is_web=is_web, first_scan=first_scan)
 
     best = None
     attempts = 0
@@ -3358,8 +3398,12 @@ def _screen_build(hwnd: int, args: dict) -> dict:
         if best is None or len(walked) > len(best["nodes"]):
             best = {"nodes": walked, "stats": st, "ms": walk_ms}
         ready, ready_why = _screen_ready(best["nodes"], best["stats"],
-                                         elapsed_ms=best["ms"], prev_nodes=prev_nodes)
-        if ready or not warmup or attempts > SCREEN_WARMUP_MAX_RETRY:
+                                         elapsed_ms=best["ms"], prev_nodes=prev_nodes,
+                                         is_web=is_web)
+        # ★ 窗F2b：ready 也得先满足 min_probes（网页类首扫要探够两次）；
+        #   上限不变 —— 最多仍是 3 趟，不许变成无界循环。
+        if (not warmup or attempts > SCREEN_WARMUP_MAX_RETRY
+                or (ready and attempts >= min_probes)):
             break
         time.sleep(SCREEN_WARMUP_GAP_MS / 1000.0)
         waited_ms += SCREEN_WARMUP_GAP_MS
@@ -3499,6 +3543,8 @@ def _screen_build(hwnd: int, args: dict) -> dict:
                                    else "基线（本进程没有上一次扫描）",
                      "等待毫秒": int(waited_ms), "重试": max(0, attempts - 1),
                      "各次节点数": list(n_tries_log), "采集毫秒": int(walk_ms),
+                     "窗口类别": "网页类" if is_web else "非网页类",
+                     "首扫强制探测": min_probes >= 2,
                      "重试上限": SCREEN_WARMUP_MAX_RETRY, "间隔毫秒": SCREEN_WARMUP_GAP_MS,
                      "判定": ready_why or ["节点数、可交互数、采集耗时三项都正常"],
                      "口径": "依据① 节点数<上次60% / ②可交互=0而客户区非零 / ③采集过快而节点极少；"
