@@ -70,6 +70,19 @@ BORDER_CLS_ALL = (BORDER_CLS, BORDER_EDGE_CLS)
 #     不碰 src/ 一个字节，也不需要 tests\_inject.py（那个是往产品副本注缺陷用的，
 #     这里的缺陷在判据自己身上，注入到产品上证明不了「轮询有没有在干活」）。
 _INJECT_FIXED_SLEEP = os.environ.get("T1_W3_INJECT_FIXED_SLEEP")
+# ★★ 窗G（2026-10-18）：这两个开关各自**作用到哪些用例**。
+#   · 延迟（T1_W3_FORCE_START_DELAY）：窗F 只给「12」加 —— 当时 13/14/16/17 还走固定
+#     sleep，一起加会被打红。窗G 给 13/16 补上就绪轮询了 ⇒ 把 13/16 加进这份名单，
+#     它们等得到。**14/15/17 本单没改**，继续不延迟：给它们加延迟那一跑必红，
+#     而那些红与「13/16 的就绪轮询对不对」无关，是把延迟扩散到了不该延迟的地方。
+#   · 注入（T1_W3_INJECT_FIXED_SLEEP + T1_W3_INJECT_CASES）：默认仍只给「12」，
+#     保持窗F 已验收的行为一字不变；要单独验 13/16 的注入就显式点名：
+#       $env:T1_W3_INJECT_CASES="13,16-第1轮,16-第2轮"
+_DELAY_CASES = ("12", "13", "16")
+_INJECT_CASES = tuple(x.strip() for x in
+                      (os.environ.get("T1_W3_INJECT_CASES") or "12").split(",")
+                      if x.strip())
+
 
 # ══ 窗F 补（2026-10-18 12:5x）：**强制启动延迟**开关 ══════════════════════════
 #   为什么要它：光把 sleep 取短，注入只在「慢的时候」有判别力 ——
@@ -580,6 +593,85 @@ def _ready_diag(tag, secs, diag, added_bytes):
                "；".join(miss) or "（三件都齐了却没进断言 —— 判据自身有问题）",
                added_bytes, int(diag.get("次数") or 0),
                int(diag.get("等待毫秒") or 0)))
+
+# ═══════════════════════════════════════════════════════════════
+# 窗G（2026-10-18）：13 / 16 的就绪门 —— 复用窗F 的零件，不重造
+# ═══════════════════════════════════════════════════════════════
+# 病因与 12 同族：13/16 也是「spawn → 固定 sleep(2.5) → 数窗」。
+# 窗F 实测（T1_W3_FORCE_START_DELAY=3 那一跑）13a/13b/16 全红、hs=0。
+
+
+def _logsize(log):
+    """当前日志字节数 —— 当作「本轮起点」用（读新内容一律配 `_rlog_since`）。"""
+    try:
+        return os.path.getsize(log)
+    except Exception:
+        return 0
+
+
+def _wait_case_ready(case, log, log_off, p):
+    """13/16 用的就绪门：现役走**有界轮询**，注入走「固定 sleep + 事后自判」。
+
+    ★ 就绪条件**按各自关心的那件事**定，**不用像素条件**：
+        13 问的是「窗口在不在、显示没显示」（WM_NCHITTEST 是发给窗口的消息），
+        16 问的是「这一轮建没建出 8 个窗」（治僵尸窗口类 / 互斥量漏释放）。
+        两者要的都是**窗本身**，不是「抓屏抓到边框色」⇒ need_pixels 恒为 False。
+        硬套像素条件＝拿截图当就绪凭证，与这两条的断言对不上。
+
+    返回 (就绪?, 属主过滤后的窗列表, 秒数, 诊断 dict)。
+    """
+    inject = case in _INJECT_CASES
+    if inject:
+        # ── 注入分支：**自己判就绪**，不齐就是红。
+        #   绝不「sleep 完把 ready 硬写成 True」—— 那样注入证明不了任何事
+        #   （窗F 已踩过：空载机器上 0.2s 就够用，注入绿，白注）。
+        _inj = float(_INJECT_FIXED_SLEEP)
+        time.sleep(_inj)
+        secs = _inj
+        hs = _enum_border_hwnds_of(_descendant_pids(p.pid))
+        diag = {"log": READY_LOG_MARK in _rlog_since(log, log_off),
+                "nwin": len(hs),
+                "px": None,
+                "vis": bool(hs) and _any_visible(hs),
+                "次数": 1,
+                "等待毫秒": int(_inj * 1000),
+                "间隔毫秒": 0,
+                "上限毫秒": 0,
+                "用了像素条件": False}
+        ready = bool(diag["log"] and diag["nwin"] == READY_N_WINDOWS
+                     and diag["vis"])
+        added = _logsize(log) - log_off
+        check("%s-就绪 ★ 反向注入：固定 sleep(%.2f) 之后三件齐"
+              "（这一条绿 ⇒ 说明 sleep 已经够长，注入**证明不了**轮询在干活）"
+              % (case, _inj), ready,
+              "" if ready else
+              ("固定 sleep(%.2f) 之后三件不齐 ⇒ 这一版**没在等**：%s；"
+               "本轮日志新追加 %d 字节。要确定性红请配 T1_W3_FORCE_START_DELAY=3"
+               "（边框晚 3s 才起，现役轮询照样绿）"
+               % (_inj, _ready_diag(case, _inj, diag, added), added)))
+        print("  [%s] ⚠ 注入：就绪轮询被旁路，改成固定 sleep(%.2f)·探了 1 次"
+              % (case, _inj), flush=True)
+    else:
+        ready, secs, diag = _wait_border_ready(
+            log, log_off, p.pid, False, None)      # need_pixels=False
+        hs = _enum_border_hwnds_of(_descendant_pids(p.pid))
+        added = _logsize(log) - log_off
+        if not ready:
+            check("%s-就绪 ★ 三件齐才进断言（上限 %.0fs / 间隔 %.2fs）"
+                  % (case, READY_TIMEOUT_SEC, READY_INTERVAL_SEC),
+                  False, _ready_diag(case, secs, diag, added))
+    # ★ 两处都要「看得见的数」：探了几次 / 累计等了多久 / 三件逐条 ✔✘
+    print("  [%s] 轮询可观测：探了 %d 次 / 累计等待 %d ms / 间隔 %d ms / 上限 %d ms；"
+          "三件 = (1)日志 %s (2)按属主 pid 自数窗 %d/%d %s (3)像素 不适用（本用例不靠像素）"
+          % (case, int(diag.get("次数") or 0), int(diag.get("等待毫秒") or 0),
+             int(diag.get("间隔毫秒") or 0), int(diag.get("上限毫秒") or 0),
+             "✔" if diag.get("log") else "✘",
+             diag.get("nwin") or 0, READY_N_WINDOWS,
+             "（已显示）✔" if diag.get("vis") else "（还没显示）✘"),
+          flush=True)
+    return ready, hs, secs, diag
+
+
 def _proc_alive(pid):
     import ctypes
     k = ctypes.windll.kernel32
@@ -633,7 +725,7 @@ def border(src_dir=None, keep_border=False):
                               text=True, encoding="utf-8", errors="replace",
                               timeout=timeout)
 
-    def spawn(extra, delay=0.0):
+    def spawn(extra, delay=0.0, label="用例12"):
         # ★ 每个 spawn 都带 --parent-pid（本自证进程）⇒ 万一脚本中途崩了、
         #   finally 没跑到，子进程也会跟着本进程一起死，**不会留下孤儿边框**。
         #   （实测踩过：脚本崩在中途 ⇒ 漏下一个 --follow 占着单例互斥量，
@@ -650,8 +742,8 @@ def border(src_dir=None, keep_border=False):
                      "runpy.run_module('agentctl.ctrl_border',run_name='__main__')"
                      % (delay, argv))
             cmd = [sys.executable, "-X", "utf8", "-c", _wrap]
-            print("  [用例12] ⚠ 强制启动延迟 %.1fs：边框子进程 import 前先睡这么久"
-                  "（现役轮询会等得到；注入的固定 sleep 必然抓空）" % delay,
+            print("  [%s] ⚠ 强制启动延迟 %.1fs：边框子进程 import 前先睡这么久"
+                  "（现役轮询会等得到；注入的固定 sleep 必然抓空）" % (label, delay),
                   flush=True)
         else:
             cmd = [sys.executable, "-X", "utf8", "-m", "agentctl.ctrl_border"] + argv
@@ -1164,10 +1256,18 @@ def border(src_dir=None, keep_border=False):
         import ctypes
         import ctypes.wintypes as wt
         u = ctypes.windll.user32
-        p = spawn(["--follow"])
+        # ── ★ 窗G：13 的固定 sleep(2.5) 换成有界就绪轮询 ────────────────
+        #   13 关心的是「窗口在不在、显示没显示」——WM_NCHITTEST 是**发给窗口**的
+        #   消息，与「抓屏能不能抓到边框色」无关 ⇒ 就绪条件用
+        #   (1)本轮日志有「已建 8 个」 (2)按属主 pid 自数窗=8 (3)窗已真正显示。
+        #   ★ hs 从 `_enum_border_hwnds()`（**全屏数、不分属主**）改成按属主过滤：
+        #     别人的边框窗混进来时，13a/13b 断言的是**不是本轮的窗**，等于在测空气。
+        log_off13 = _logsize(log)
+        p = spawn(["--follow"],
+                  delay=(_FORCE_START_DELAY if "13" in _DELAY_CASES else 0.0),
+                  label="用例13")
         procs.append(p)
-        time.sleep(2.5)
-        hs = _enum_border_hwnds()
+        ready13, hs, _s13, _d13 = _wait_case_ready("13", log, log_off13, p)
         # ★ 2026-10-15 修（GLM/ZCode 复检 刺2）：原来是 hs[:4] —— 那是**4 窗时代**的旧参数。
         #   窗F 之后每屏 8 窗（主色 4 + 1px 反色描边 4），而 EnumWindows 的顺序**不保证** ⇒
         #   只测前 4 个完全可能"恰好全是主色窗"，**edge 窗的 WM_NCHITTEST 从未被断言**，
@@ -1214,11 +1314,22 @@ def border(src_dir=None, keep_border=False):
         section("用例16 · 连着起两轮 --follow（治僵尸窗口类 / 互斥量漏释放）")
         _write_json(passf, {"scopes": ["C"], "expires_at": FUTURE})
         counts = []
+        round_logs = []
         for rnd in (1, 2):
-            p = spawn(["--follow"])
+            # ★ 窗G：每轮各取一次**本轮日志起点**（字节偏移）。
+            #   16b 要判的是「**第二轮**也建了自己的窗、不是被单例挡掉」，
+            #   拿整份 rlog() 去 count 就是**历史累计**——用例10/11/13 也都往同一份
+            #   log 里写过同一句话，累计数天然 ≥2，这条判据对「第二轮没建窗」完全瞎。
+            #   逐轮用 `_rlog_since(log, off)` 切本轮，才能既不漏也不**读成两次**。
+            off16 = _logsize(log)
+            p = spawn(["--follow"],
+                      delay=(_FORCE_START_DELAY if "16" in _DELAY_CASES else 0.0),
+                      label="用例16-第%d轮" % rnd)
             procs.append(p)
-            time.sleep(2.5)
-            counts.append(len(_enum_border_hwnds()))
+            _r16, _hs16, _s16, _d16 = _wait_case_ready(
+                "16-第%d轮" % rnd, log, off16, p)
+            counts.append(len(_hs16))
+            round_logs.append(_rlog_since(log, off16))
             p.terminate()
             try:
                 p.wait(timeout=10)
@@ -1231,10 +1342,18 @@ def border(src_dir=None, keep_border=False):
         check("16 ★ 连着起两轮 --follow，**两轮都**建出 8 个边框窗口"
               "（回归判据：僵尸窗口类 ⇒ 第二轮建不出窗口；建窗失败 ⇒ 单例互斥量漏释放）",
               counts == [8, 8], "第1轮 %d 个 / 第2轮 %d 个" % (counts[0], counts[1]))
-        lg16 = rlog()
-        check("16b 第二轮的日志里有自己的「已建 8 个边框窗口」（不是被单例挡掉）",
-              lg16.count("已建 8 个边框窗口") >= 2,
-              "日志里出现 %d 次" % lg16.count("已建 8 个边框窗口"))
+        # ★ 窗G：16b 改成**逐轮**数（每轮按自己的字节偏移切本轮新增），
+        #   并且要求「恰好 1 行」—— `>= 1` 抓不住「两轮读成同一段日志」这种错，
+        #   `>= 2`（原来那条）更是被历史累计喂饱，对「第二轮没建窗」完全瞎。
+        each = [t.count(READY_LOG_MARK) for t in round_logs]
+        print("  [用例16] 逐轮日志计数（按各轮字节偏移）= %s；"
+              "整份日志历史累计 = %d 次（本条**不**拿它当证据）"
+              % (each, rlog().count(READY_LOG_MARK)), flush=True)
+        check("16b 第二轮的日志里有**自己那一份**「已建 8 个边框窗口」"
+              "（不是被单例挡掉）｜逐轮按字节偏移各数一次，不得读成两轮同一段",
+              each == [1, 1],
+              "逐轮计数=%s（要 [1, 1]）；整份日志累计=%d"
+              % (each, rlog().count(READY_LOG_MARK)))
 
         # 14) 不抢焦点：显示前后 GetForegroundWindow 不变
         fg0 = int(u.GetForegroundWindow() or 0)
