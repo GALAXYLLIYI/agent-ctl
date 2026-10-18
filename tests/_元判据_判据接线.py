@@ -48,7 +48,7 @@ import tempfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 
-FRAMEWORK_DOC = "2026-10-16_安全补强四窗_进度.md"
+FRAMEWORK_DOC = "2026-10-17_桌面语义层与输入通道_框架.md"   # 当前进度文档（旧「安全补强四窗进度」已归档，不再作为现状来源）
 INVENTORY_DOC = os.path.join("work", "_判据有效性清单_20261017.md")
 
 # ══════════════════════════════════════════════════════════════════════════
