@@ -1940,7 +1940,134 @@ def snapshot_prod():
 
 
 # ═══════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════
+# 窗J（2026-10-18）：**跨进程互斥** —— 并发跑会互相污染（DSH 已实测）
+# ═══════════════════════════════════════════════════════════════
+# 实测现场（DSH 15:4x 并发压力自查，两份 all 同时跑）：
+#   A: 红 1 —— 10c「第二个没产生第二组窗口（EnumWindows 仍是 16 个）」
+#   B: 红 1 —— 15o-4「stop_follow 之后屏幕上没有边框」，列出的 8 个 hwnd 是**对方**的窗口
+# 不是判据坏了，是两份实例**共用同一块屏幕 + 同一套单例互斥量**，
+#   互相把对方的边框窗数进自己账上。run_all 是串行所以看不见；
+#   两个 agent 同时跑、或将来并行化就会踩。
+
+W3_MUTEX_NAME = "Local\\AgentCtlT1W3SelfTest_v1"
+W3_OWNER_FILE = os.path.join(tempfile.gettempdir(), "AgentCtlT1W3SelfTest.owner")
+
+
+def _proc_start_str(pid):
+    """pid 的启动时间（人读）。**拿不到就说「未知」，绝不猜**。"""
+    try:
+        import datetime as _dt
+        import psutil
+        return _dt.datetime.fromtimestamp(
+            psutil.Process(int(pid)).create_time()).strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return "未知"
+
+
+def w3_acquire_mutex():
+    """拿跨进程互斥。返回 (句柄 or None, 占用者 pid 或 0, 说明/占用者二元组)。
+
+    ★ 选**命名互斥量**（CreateMutexW）而不是锁文件：进程一死**内核自动释放**，
+      不会留下需要「猜 pid 死没死」的孤儿锁；锁文件被强杀后残留，还得做存活探测，
+      反而更容易误判成「有人在跑」而白挡一次。
+    ★ 本函数**只碰互斥量与一个 owner 小文件**，绝不建窗、不 spawn 任何东西
+      —— 判定必须发生在任何副作用之前（见 main）。
+    """
+    import ctypes
+    import ctypes.wintypes as wt
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.CreateMutexW.argtypes = [ctypes.c_void_p, wt.BOOL, wt.LPCWSTR]
+    k32.CreateMutexW.restype = wt.HANDLE
+    ERROR_ALREADY_EXISTS = 183
+    ctypes.set_last_error(0)
+    h = k32.CreateMutexW(None, True, W3_MUTEX_NAME)
+    err = ctypes.get_last_error()
+    if not h:
+        return None, 0, "CreateMutexW 失败（GetLastError=%d）——这不是「有人在跑」，" % err
+    if err != ERROR_ALREADY_EXISTS:
+        try:
+            io.open(W3_OWNER_FILE, "w", encoding="utf-8").write(
+                "%d\n%s\n" % (os.getpid(), _proc_start_str(os.getpid())))
+        except Exception:
+            pass            # 落盘失败不影响互斥本身，别因此误判成「有人在跑」
+        return h, 0, ""
+    other, started = 0, "未知"
+    try:
+        with io.open(W3_OWNER_FILE, encoding="utf-8") as f:
+            _ls = [x.strip() for x in f.read().splitlines() if x.strip()]
+        if _ls:
+            other = int(_ls[0])
+        if len(_ls) > 1:
+            started = _ls[1]
+    except Exception:
+        pass
+    k32.CloseHandle(h)
+    return None, other, (other, started)
+
+
+def w3_release_mutex(h):
+    """释放互斥（正常退出与异常退出都走这里）。句柄为空则什么都不做。"""
+    if not h:
+        return
+    try:
+        import ctypes
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.ReleaseMutex(h)
+        k32.CloseHandle(h)
+    except Exception:
+        pass
+    try:
+        if os.path.exists(W3_OWNER_FILE):
+            os.remove(W3_OWNER_FILE)
+    except Exception:
+        pass
+
+
+def w3_busy_report(other, started):
+    """拿不到锁时的文案：点名是谁、说清为什么不可信、给下一步。"""
+    return "\n".join([
+        "⛔ w3 自证 · 跨进程互斥**没拿到** —— 本次**不跑**（exit 2，不是红也不是绿）。",
+        "",
+        "另一份 w3 自证正在跑：pid=%s，启动于 %s。" % (other or "未知", started),
+        "",
+        "为什么必须挡住：border/wire 段要**真建边框窗**、并占用同一套单例互斥量",
+        "（AgentCtlCtrlBorderFollow）。两份同时跑 = **共用整块屏幕 + 共用单例**，",
+        "互相把对方的边框窗数进自己账上 ⇒ **结果不可信**。",
+        "实测现场（2026-10-18 15:4x DSH 并发压力自查）：",
+        "  · 一份红 10c「第二个没产生第二组窗口（EnumWindows 仍是 16 个）」",
+        "  · 另一份红 15o-4「stop_follow 之后屏幕上没有边框」，列出的 8 个 hwnd 是对方的窗",
+        "那两条红**不是判据坏了**，是并发造成的假账。",
+        "",
+        "下一步（二选一）：",
+        "  ① 等它跑完，再起这一份；",
+        "  ② 确定它卡住了，先 taskkill %s 再重跑。" % (other or "<那一份的 pid>"),
+        "",
+        "本次**一个窗口都没建、没 spawn 任何子进程** —— 互斥判定在 main() 最前面，",
+        "早于 argparse 与任何建窗动作，不会反过来污染那一份。",
+    ])
+
+
 def main(argv=None):
+    """脚本入口。窗J：跨进程互斥在这里拿 —— 早于 argparse、早于任何 spawn/建窗。
+
+    拿不到锁 -> 打印点名文案并 return 2（既不是红也不是绿），一个窗都不建。
+    正常/异常退出都经 finally 释放（进程死时内核也会兜底释放）。
+    """
+    _h, _other, _info = w3_acquire_mutex()
+    if not _h:
+        if isinstance(_info, tuple):
+            print(w3_busy_report(_info[0], _info[1]), flush=True)
+        else:
+            print("w3 自证 · 互斥不可用：%s" % _info, flush=True)
+        return 2
+    try:
+        return _main_locked(argv)
+    finally:
+        w3_release_mutex(_h)
+
+
+def _main_locked(argv=None):
     ap = argparse.ArgumentParser(description="T1 窗3 自证（W3-A 坐标标注 / W3-B 边框）")
     ap.add_argument("what", choices=("coords", "border", "wire", "all"))
     ap.add_argument("--src", default=None,
