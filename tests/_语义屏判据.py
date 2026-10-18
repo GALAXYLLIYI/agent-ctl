@@ -1109,6 +1109,20 @@ def _click_after_state(hwnd, hit, pre_ctx=None):         # noqa: F811  故意覆
     return out
 '''
 
+INJECT_CAP_DETAIL = '''
+
+# ===== 以下为 窗G3b 注入段（跑红自证专用，勿入产品代码）=====
+_real_eid_put_g3b = _eid_sessions_put
+
+
+def _eid_sessions_put(tok, hwnd, nodes, walk=None, 无明细=False):   # noqa: F811  故意覆盖真版
+    # 注入的缺陷：**capture 一律不写元素明细** ——
+    #   屏幕照样交出 eid，旁表却空空如也，点下去永远 code=12。
+    #   真实后果：这就是 G3b 单要治的那条真门路缺口（DSH 2026-10-18 真 Edge 实跑撞到），
+    #   光看返回信封完全看不出来 —— objects[].eid 明明在那儿，一喂就断。
+    return _real_eid_put_g3b(tok, hwnd, [], walk, 无明细=True)
+'''
+
 
 INJECT = {
     # ★ 窗G2 的四个新注入（R3 那条通道的四根骨头各断一次）
@@ -1145,6 +1159,8 @@ INJECT = {
     "eid_link": ("ctl_screen 的 eid 换成自造号（旁表查无此号）", "append", INJECT_EID_LINK),
     "expect_uid": ("expect_uid 收下但不校验（对不上照样点）", "append", INJECT_EXPECT_UID),
     "after_state": ("after.uid_state 恒报 OK（点错对象也说达成）", "append", INJECT_AFTER_STATE),
+    # ★ 窗G3b 的新注入：capture 不带元素明细（真门路上 eid 直接断）
+    "cap_detail": ("capture 一律不写元素明细（eid 在真门路上点不了）", "append", INJECT_CAP_DETAIL),
 }
 
 
@@ -2374,6 +2390,74 @@ def check_action_side(core, fx):
     need(v4.get("判定") == "匹配",
          "滚出视口后 uid 竟然对不上了（%r）—— 复核取超集时结构键口径应当一致" % v4, reds)
     fx.scroll(0)
+
+    # ── ⑤ 真门路（窗G3b）：capture 必须**带元素明细**。
+    #   ★ 关键：**取外层 data.capture_id**，不是 data.结果.capture_id。
+    #     上一单判据取的是后者（call() 返回 结果）⇒ 拿到的是 ctl_screen 自己签的那张，
+    #     于是真门路上 _uia_gate 拿 res 重签的空快照把明细盖掉了，判据却全绿
+    #     （DSH 2026-10-18 真 Edge 实跑逮到：code=12「这次观测没有元素明细」）。
+    #   这里走**真的 t_screen → 真信封**，用的就是调用方会拿到的那个 capture_id。
+    fx.g3_click_effect = "none"
+    fx.n_extra_btn = 0
+    r5s = core.dispatch("ctl_screen", {"hwnd": FAKE_HWND, "top": 500,
+                                   "cdp": False, "ocr": False}, actor="判据G3b")
+    d5 = r5s.get("data") or {}
+    sc5 = d5.get("结果") or {}
+    tok5 = d5.get("capture_id")                 # ★ 外层：真调用方拿的就是这个
+    o5 = 找对象(sc5, "选项格01")
+    ev["⑤真门路capture"] = {"外层capture_id": tok5, "内层capture_id": sc5.get("capture_id"),
+                        "capture_指纹": d5.get("capture_指纹"),
+                        "外层==内层": tok5 == sc5.get("capture_id")}
+    need(bool(tok5), "ctl_screen 没在外层给 capture_id", reds)
+    need(tok5 == sc5.get("capture_id"),
+         "外层 capture_id（%r）与内层（%r）不是同一张 —— 调用方拿的是外层，"
+         "两张并存就意味着其中一张的明细根本没生效" % (tok5, sc5.get("capture_id")), reds)
+    need("未采集节点" not in str(d5.get("capture_指纹") or ""),
+         "capture_指纹 明写「本次未采集节点」（%r）—— ctl_screen 做的是全量 walk，"
+         "它的节点明细是顺带的，不该说没采集" % (d5.get("capture_指纹") or ""), reds)
+    n5 = len(点过)
+    r5 = core.dispatch("ctl_click", {"hwnd": FAKE_HWND, "eid": o5.get("eid"),
+                                 "from_capture": tok5, "actor": "判据G3b"}, actor="判据G3b")
+    ev["⑤真门路点它"] = {"ok": r5.get("ok"), "code": r5.get("code"),
+                     "点了": len(点过) - n5, "warning": (r5.get("warning") or "")[:220]}
+    need(r5.get("ok") is True,
+         "拿**外层** capture_id 喂 ctl_click 被拒（code=%s）：%s —— "
+         "ctl_screen 的 capture 没带元素明细，旁表查不到 eid"
+         % (r5.get("code"), (r5.get("warning") or "")[:180]), reds)
+    need(len(点过) - n5 == 1, "真门路那次没真点（点了 %d 次）" % (len(点过) - n5), reds)
+
+    # ── ⑥ 无明细时要 code=12，且**文案点名来源**（不能只说 ctl_tree 轻量）。
+    #   造法走**真链路**：ctl_tree 默认轻量（不传 detail）天然就是空快照那张。
+    #   这不是 mock —— 是真的调 ctl_tree，真的点一个文本树里的 eid。
+    r6t = core.dispatch("ctl_tree", {"hwnd": FAKE_HWND}, actor="判据G3b")
+    tok6 = (r6t.get("data") or {}).get("capture_id")
+    r6 = core.dispatch("ctl_click", {"hwnd": FAKE_HWND, "eid": "e1",
+                                 "from_capture": tok6, "actor": "判据G3b"}, actor="判据G3b")
+    w6 = str(r6.get("warning") or "")
+    ev["⑥无明细文案"] = {"ok": r6.get("ok"), "code": r6.get("code"), "warning": w6[:260]}
+    need(r6.get("code") == 12,
+         "空快照那次没给 code=12（给了 %r）" % r6.get("code"), reds)
+    need("没有元素明细" in w6, "文案没明说「没有元素明细」：%s" % w6[:160], reds)
+    need("ctl_tree" in w6,
+         "文案没点名这次观测来自 ctl_tree（%r）—— 空口说「轻量模式」，"
+         "换个工具来的调用方会照着去调一个自己压根没用过的开关" % w6[:160], reds)
+    need("ctl_find" in w6 and "detail" in w6,
+         "文案没给可执行出路（要能看出「改用 ctl_find」或「带 detail」）：%s" % w6[:200], reds)
+
+    # ── ⑦ 老路回归（不许被这次改动带坏）：ctl_find 的 eid 直点。
+    r7f = core.dispatch("ctl_find", {"hwnd": FAKE_HWND, "query": "选项格02"},
+                     actor="判据G3b")
+    #   ⚠ ctl_find 的「命中」也在 data.结果 里（_uia_gate 统一套一层），别取错层。
+    hit7 = ((r7f.get("data") or {}).get("结果") or {}).get("命中") or []
+    tok7 = (r7f.get("data") or {}).get("capture_id")
+    n7 = len(点过)
+    r7 = core.dispatch("ctl_click", {"hwnd": FAKE_HWND, "eid": (hit7[0] or {}).get("eid"),
+                                 "from_capture": tok7, "actor": "判据G3b"}, actor="判据G3b")
+    ev["⑦ctl_find老路"] = {"命中": len(hit7), "ok": r7.get("ok"), "点了": len(点过) - n7,
+                       "warning": (r7.get("warning") or "")[:160]}
+    need(r7.get("ok") is True,
+         "ctl_find 老路的 eid 直点坏了（%s）—— 这一单不许动它的行为"
+         % (r7.get("warning") or "")[:160], reds)
 
     # 收尾：把 _act 等还原，别影响后面的组
     if ORIG.get("_act") is not None:

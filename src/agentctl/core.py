@@ -170,6 +170,11 @@ def _eid_sessions_put(tok: str, hwnd: int, nodes: list, walk: dict | None,
             S[str(tok)] = {"hwnd": int(hwnd), "issued_at": now,
                            "expires_at": now + float(gate.CAPTURE_TTL),
                            "walk": walk or {}, "eids": eids,
+                           # ★ 窗G3b：记下**这次观测是哪个工具发起的**。
+                           #   拒绝时要说得出「来自 ctl_screen」还是「来自 ctl_tree」——
+                           #   笼统说「轻量模式」对从 ctl_screen 来的人是误导
+                           #   （他压根没用过 ctl_tree，也没少传什么参数）。
+                           "工具": str((walk or {}).get("tool") or ""),
                            "节点明细": bool(eids)}
             _eid_save(p, S)
         return True
@@ -1088,21 +1093,36 @@ def _uia_gate(args: dict, tool: str, fn, walk_override: dict | None = None):
     #   口径必须来自签发侧（core.py 里 t_tree/t_find 各自的默认值），不能现场重算一遍。
     # ★ F4（窗B1）：walk_override 让 ctl_screen 把**自己那趟遍历的真实口径**记进去。
     #   旁表里的 walk 是点击侧重走时用来对坐标的；口径不同就等于拿不同的坐标系比坐标。
-    _walk = walk_override or {
+    _walk = dict(walk_override or {
         "roles": list(args.get("roles") or (("interactive", "text")
-                                              if tool == "ctl_tree" else ("all",))),
+                                            if tool == "ctl_tree" else ("all",))),
         "max_nodes": int(args.get("max_nodes") or
                          (uia_tree.DEFAULT_MAX_NODES if tool == "ctl_tree"
                           else uia_tree.FIND_MAX_NODES)),
-        "max_depth": int(args.get("max_depth") or uia_tree.DEFAULT_MAX_DEPTH)}
-    tok = _issue_capture_from_tree(h, res, _walk)
+        "max_depth": int(args.get("max_depth") or uia_tree.DEFAULT_MAX_DEPTH)})
+    # ★ 窗G3b：口径里带上**这次观测是哪个工具发起的** —— 旁表拒绝时要说得出
+    #   「这次观测（来自 ctl_screen）没有元素明细」，而不是笼统一句「轻量模式」。
+    _walk.setdefault("tool", tool)
+    # ★ 窗G3b · (a) 病根与治法。
+    #   病根：fn 自己签好的 capture 被**忽略**，这里拿 res **再签一张**。
+    #     而 ctl_screen 的 res 里**没有** 节点/命中 键（它交的是 objects/texts，
+    #     不是原始节点表）⇒ _issue_capture_from_tree 走的是**空快照**分支。
+    #     于是：屏幕交出了 eid、旁表却查无此号，真门路上永远 code=12。
+    #     （DSH 2026-10-18 真 Edge 实跑：ctl_screen ok=True eid=e43，ctl_click 报
+    #      「这次观测没有元素明细」。上一单判据全绿是因为它取的是内层那张。）
+    #   治法：**fn 已经签好的就用它**。ctl_screen 本来就做了一次全量 walk，
+    #     明细是**顺带**的（见 _screen_build 里的 eid 签发段）。
+    #   ⛔ 这**不是放宽校验**：旁表该有什么还是什么，查不到照样拒。
+    #     改的只是「别用一张废的**盖掉**本来带明细的那张」。
+    pre = res.get("capture_id") if isinstance(res, dict) else None
+    tok = pre if (isinstance(pre, str) and pre) else _issue_capture_from_tree(h, res, _walk)
     if tok:
         d["capture_id"] = tok
         d["capture_ttl_sec"] = gate.CAPTURE_TTL
         # ★ 2026-10-10 名副实（Codex 实测抓到「节点: [] 两个指纹都空还自称元素树」）：
         #   默认轻量模式不采集节点 ⇒ 没有元素指纹可算（凭据只绑定 hwnd/rect/前台）。
         #   改前这里一律写「元素树（不是图像）」，冒领了没采集到的东西。照实说。
-        if res.get("节点") or res.get("命中"):
+        if pre or res.get("节点") or res.get("命中"):
             d["capture_指纹"] = "元素树（不是图像）"
         else:
             d["capture_指纹"] = ("本次未采集节点（默认轻量模式），元素指纹不可用 —— "
@@ -2009,7 +2029,9 @@ def _click_after_state(hwnd: int, hit: dict, pre_ctx=None) -> dict:
             post.append((u1, n))
     # ── screen_version 单独签一次（它要的是**服务端**口径的整屏事实）。
     try:
-        fresh = _screen_build(int(hwnd), {"top": 200, "cdp": False, "ocr": False})
+        #   _不发capture：这次只借它签一个 screen_version，不该往旁表里塞一张没人用的凭据。
+        fresh = _screen_build(int(hwnd), {"top": 200, "cdp": False, "ocr": False,
+                                          "_不发capture": True})
         out["screen_version"] = fresh.get("screen_version")
         out["新屏对象数"] = len(fresh.get("objects") or [])
     except Exception:
@@ -2059,15 +2081,34 @@ def _eid_refuse_missing(eid, how, entry) -> dict:
                             "capture_id 用 --from_capture 一起传回来。"
                             "想重新定位就重新 ctl_find 一次，拿新的 capture_id。" % eid))
     if how == "空快照":
+        # ★ 窗G3b：文案必须**点名这次观测是谁发起的**。
+        #   改前只说「ctl_tree 默认是轻量模式」—— 对从 ctl_screen 来的调用方是误导：
+        #   他压根没用过 ctl_tree，也没少传什么参数，照着改只会越改越懵。
+        来自 = str((entry or {}).get("工具") or "") or "某个工具"
+        if 来自 == "ctl_tree":
+            缘由 = ("ctl_tree 默认是轻量模式，只给文本树、不把节点明细交出来，"
+                    "拿树文本里的 e1 来点是拿不到钥匙的（⚠️ 别怪号不存在）。")
+            出路 = ("① 用 ctl_find --hwnd <hwnd> --query <要找的字>（默认就带命中明细）；"
+                    "② 或者 ctl_tree 同一窗口再来一次，带 detail=true，"
+                    "然后用它的 capture_id + eid + --from_capture。")
+        elif 来自 == "ctl_screen":
+            缘由 = ("ctl_screen 这次观测没有元素明细（它交的是 objects/texts，"
+                    "不是原始节点表），所以里面没有 eid 可用 —— "
+                    "⚠️ **这不是你少传了什么参数**，别去调 ctl_tree 的开关。")
+            出路 = ("① 重新 ctl_screen 一次，拿新的 capture_id 与 objects[].eid 一起点；"
+                    "② 或者改用 ctl_find --hwnd <hwnd> --query <要找的字>（默认带命中明细）。")
+        else:
+            缘由 = ("这次观测没有元素明细（来源：%s），所以里面根本没有 eid 可用 —— "
+                    "⚠️ 别怪号不存在。" % 来自)
+            出路 = ("① 重新 ctl_find --hwnd <hwnd> --query <要找的字>（默认就带命中明细）；"
+                    "② 或者带 detail=true 的那次观测（ctl_tree/ctl_screen 都行）重来。")
         return env(code=gate.CODE_STALE_CAPTURE,
-                   warning=("这次观测**没有元素明细**，所以里面根本没有 eid 可用 — "
-                            "ctl_tree 默认是轻量模式，只给文本树、不把节点明细交出来，"
-                            "拿树文本里的 e1 来点是拿不到钥匙的（⚠️ 别怪号不存在）。"
-                            "两条出路："
-                            "① 改用 ctl_find --hwnd <hwnd> --query <要找的字>（默认就带命中明细）；"
-                            "② 或者 ctl_tree 同一窗口再来一次，带 --detail，"
-                            "然后用它的 capture_id + eid + --from_capture。"
-                            "（顺便一说：坐标路径不受影响 —— ctl_find 给的 center 原样发 --xy 就行。）"))
+                   warning=("这次观测**没有元素明细**（来自 %s），"
+                            "所以里面根本没有 eid 可用。%s"
+                            "两条出路：%s"
+                            "（顺便一说：坐标路径不受影响 —— "
+                            "ctl_find 给的 center 原样发 --xy 就行。）"
+                            % (来自, 缘由, 出路)))
     if not _eid_db_path():
         return env(code=gate.CODE_INTERNAL,
                    warning=("元素 %s 查不到：eid 旁表没有落盘位置（闸门状态目录定位失败）"
@@ -4213,10 +4254,13 @@ def _screen_build(hwnd: int, args: dict) -> dict:
     #   口径不对 = 拿不同的坐标系比坐标 ⇒ ctl_click 复核必然假失败（D1 那条教训）。
     #   include_offscreen=True 是**超集**，_eid_recheck 复核那趟也显式取超集（A2 要求），
     #   于是「签发在视口内、点之前滚了一下」不会被误报成「元素不见了」。
-    eid_walk = {"roles": ["all"], "include_offscreen": True,
+    #   tool 也记进去：旁表拒绝时要说得出「这次观测来自 ctl_screen」（见 _eid_refuse_missing）。
+    eid_walk = {"tool": "ctl_screen", "roles": ["all"], "include_offscreen": True,
                "max_nodes": int(max_nodes), "max_depth": int(max_depth)}
     screen_capture_id = None
-    if objects and any(o.get("eid") for o in objects):
+    # ★ 窗G3b：动作后回读那次**纯为拿 screen_version**，没人会拿它的 capture_id 去点 ——
+    #   白签一张就是往旁表里塞垃圾（15 秒寿命、还带全量明细），不许。
+    if objects and any(o.get("eid") for o in objects) and not args.get("_不发capture"):
         screen_capture_id = _issue_capture_from_tree(hwnd, {"命中": nodes}, eid_walk)
 
     out = {

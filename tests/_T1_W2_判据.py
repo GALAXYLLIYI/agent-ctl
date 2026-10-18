@@ -332,8 +332,11 @@ def j11_轻量树要对症处方():
     d1 = "ok=%s code=%s ；act.py 被调了 %d 次（必须 0 次）" % (
         r.get("ok"), r.get("code"), len(ACT_LOG))
     d1 += "\nwarning=%r" % (w[:260],)
+    # ★ 2026-10-18（窗G3b 改文案）：出路里的开关写法从「--detail」变成「detail=true」
+    #   （现在同时点名来源：来自 ctl_tree / 来自 ctl_screen）。判据守的是**意图**——
+    #   「说清这次观测没明细」＋「给出可执行出路」，两种写法都算数，不是放宽。
     cond = ((not r.get("ok")) and len(ACT_LOG) == 0
-            and "没有元素明细" in w and "--detail" in w)
+            and "没有元素明细" in w and ("--detail" in w or "detail=true" in w))
     return check("J11", "ctl_tree 不带 --detail ⇒ 说清「本次观测没明细」并给出路", cond, d1)
 
 
