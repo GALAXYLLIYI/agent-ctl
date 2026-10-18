@@ -1897,9 +1897,14 @@ def _eid_recheck(hwnd: int, feat: dict, walk: dict):
     mdep = int((walk or {}).get("max_depth") or uia_tree.DEFAULT_MAX_DEPTH)
     mnod = max(int((walk or {}).get("max_nodes") or 0), uia_tree.FIND_MAX_NODES)
     try:
-        nodes, trunc = uia_tree.walk(hwnd, roles=roles, max_nodes=mnod, max_depth=mdep)
+        # ★ 窗G3（A2 接线要求，复核这趟**显式取超集**）：复核必须 include_offscreen=True。
+        #   签发那次（ctl_screen）固定用超集口径，复核若只扫视口内，就会把
+        #   「签发时它在视口内、点之前滚了一下」误报成「元素不见了」——
+        #   **假报元素消失**比点不中更坏。取超集只会多扫候选，不会让匹配失败：
+        #   匹配靠「类型+名字+矩形」三重全等，不靠编号。
+        nodes, trunc = uia_tree.walk(hwnd, roles=roles, max_nodes=mnod, max_depth=mdep, include_offscreen=True)
     except Exception as e:
-        return None, "重走元素树失败 %s: %s" % (type(e).__name__, e)
+        return None, ("重走元素树失败 %s: %s" % (type(e).__name__, e)), None
     want_rect = [int(x) for x in (feat.get("rect") or ())]
     hits = [n for n in nodes
             if n.get("type") == feat.get("type")
@@ -1910,9 +1915,135 @@ def _eid_recheck(hwnd: int, feat: dict, walk: dict):
     if not hits:
         return None, ("现在扫到 %d 个节点，没有『类型 %s / 名字 %s / 矩形 %s』"
                       "同时对得上的那个%s"
-                      % (len(nodes), feat.get("type"), feat.get("name"), want_rect, note))
-    return hits[0], note
+                      % (len(nodes), feat.get("type"), feat.get("name"), want_rect, note)), None
+    # ★ 窗G3：把这趟复核树的**结构键表**带回去 —— 调用方要拿它算 uid
+    #   （expect_uid 复核、动作后 after.uid_state 都用），**不必再走第二趟**。
+    #   ⚠ 用**身份**（is）定位而不是 list.index 的**值相等**：一屏里完全相同的
+    #   节点（同类型/同名/同矩形）能有好几个，值相等会命中**头一个**，位置就错了。
+    idx = next(i for i, n in enumerate(nodes) if n is hits[0])
+    ctx = {"struct_keys": _screen_struct_keys(nodes), "index": idx, "nodes": nodes, "口径": {"roles": list(roles), "max_nodes": int(mnod), "max_depth": int(mdep), "include_offscreen": True}}
+    return hits[0], note, ctx
 
+
+def _screen_uid_at(ctx, node) -> str:
+    """用**复核那趟树**的结构键，给一个节点算出 uid（与 _screen_build 同口径）。
+
+    ★ 口径说明：_screen_build 里 exempted = volatile and not watched（声明制压过豁免）；
+      点击侧没有声明上下文，按 exempted = volatile 算 —— 这正是「没声明任何东西」那一档。
+    ★ ctx 为空 / 结构键缺失 ⇒ 返回空串，调用方据此报「**无法判定**」而不是硬猜。
+    """
+    try:
+        sk = (ctx or {}).get("struct_keys") or []
+        i = int((ctx or {}).get("index") or -1)
+        node = node or {}
+        role = str(node.get("type") or "")
+        label = str(node.get("name") or "").strip()
+        if i < 0 or i >= len(sk) or not role:
+            return ""
+        volatile = _screen_is_volatile(role, label)
+        return "%s@%s" % (sk[i], _screen_text_key(label, volatile))
+    except Exception:
+        return ""
+
+
+def _click_after_state(hwnd: int, hit: dict, pre_ctx=None) -> dict:
+    """动作后回读：把**被点的那个对象**在动作后的新一屏里落到哪一档。
+
+    三档（§⑫）：OK = 结构与文字都没变；TEXT_CHANGED = 同一个对象、内容变了
+    （**动作达成的证据**）；STALE = 结构变了 / 这个对象在新一屏里压根不在了
+    （可能点错了对象）。读不到（走树失败、算不出 uid）⇒ `unknown`，
+    并写清「**不等于动作成功**」—— **证据不足不是成功**。
+
+    ★ 基线用**点之前那一趟树**（`_eid_recheck` 已经走过的复核树，pre_ctx），
+      不另扫一遍：① 省一趟 walk；② 更要紧 —— 那一趟就是**点前那一瞬**的事实，
+      比事后回忆靠谱。
+    ★ 归因配对顺序（与 `_screen_uid_state_against` 同一套道理）：
+      先找**同名字**的后继（同一个对象还在，只是字变了或没变）；
+      找不到同名，说明它**连名字都改了** ⇒ 退到「同结构位置 + 矩形还压着」
+      （SCREEN_SAME_SLOT_IOU）才算 TEXT_CHANGED —— 那是「同一个位置上的东西换了内容」；
+      再不成立 ⇒ STALE（结构变了 / 对象没了 / 别的对象顶了上来）。
+    """
+    out = {"uid_state": "unknown", "screen_version": None, "uid": str(hit.get("uid") or ""),
+           "eid": str(hit.get("eid") or ""), "动作后uid": "", "依据": "",
+           "口径": "OK/TEXT_CHANGED/STALE 三档同 §⑫；unknown = 没读回来，**不等于动作成功**。"
+                   "配对：先同名字，再同结构位置+矩形重叠（IoU≥%.2f），否则 STALE"
+                   % SCREEN_SAME_SLOT_IOU}
+    uid0 = str(hit.get("uid") or "")
+    pre = pre_ctx or {}
+    pre_nodes = pre.get("nodes") or []
+    pre_sk = pre.get("struct_keys") or []
+    if not uid0:
+        out["依据"] = "点之前没算出 uid（没给 expect_uid，或走的不是 eid 复核路径），没法归因"
+        return out
+    if not pre_nodes:
+        out["依据"] = "没有点之前那一趟树做基线，没法归因"
+        return out
+    # ── 点前那一趟：把被点对象自己的自述抠出来（名字 / 矩形 / 结构位置）。
+    pre_label, pre_rect, pre_slot = "", [], ""
+    for i, n in enumerate(pre_nodes):
+        u0 = _screen_uid_at({"struct_keys": pre_sk, "index": i}, n)
+        if u0 != uid0:
+            continue
+        pre_label = str(n.get("name") or "")
+        pre_rect = list(n.get("rect") or [])
+        pre_slot = str((_screen_split_uid(u0) or [""])[0])
+        break
+    if not pre_label and not pre_slot:
+        out["依据"] = "点前那趟树里找不到这个 uid（口径对不上），没法归因"
+        return out
+    # ── 点后那一趟：同口径重走一遍（与复核一样取超集，屏外的也算）。
+    口 = hit.get("口径") or {}
+    try:
+        nodes, _t = uia_tree.walk(hwnd, roles=tuple(口.get("roles") or ("all",)),
+                                  max_nodes=int(口.get("max_nodes") or uia_tree.FIND_MAX_NODES),
+                                  max_depth=int(口.get("max_depth") or uia_tree.DEFAULT_MAX_DEPTH),
+                                  include_offscreen=True)
+    except Exception as e:
+        out["依据"] = "动作后重走元素树失败：%s: %s" % (type(e).__name__, e)
+        return out
+    post_sk = _screen_struct_keys(nodes)
+    post = []
+    for i, n in enumerate(nodes):
+        u1 = _screen_uid_at({"struct_keys": post_sk, "index": i}, n)
+        if u1:
+            post.append((u1, n))
+    # ── screen_version 单独签一次（它要的是**服务端**口径的整屏事实）。
+    try:
+        fresh = _screen_build(int(hwnd), {"top": 200, "cdp": False, "ocr": False})
+        out["screen_version"] = fresh.get("screen_version")
+        out["新屏对象数"] = len(fresh.get("objects") or [])
+    except Exception:
+        out["screen_version"] = None
+    # ── ① 同名字的后继：它还在那儿，只是字变了或没变。
+    same_name = [(u, n) for u, n in post if str(n.get("name") or "") == pre_label]
+    if same_name:
+        u1, n1 = same_name[0]
+        out["uid_state"] = screen_uid_state(uid0, u1)
+        out["动作后uid"] = u1
+        out["依据"] = ("动作后仍有同名对象『%s』，uid 由 %s 变成 %s（结构位置%s）⇒ %s"
+                       % (pre_label, uid0, u1,
+                          "没变" if out["uid_state"] != "STALE" else "变了", out["uid_state"]))
+        return out
+    # ── ② 连名字都改了 ⇒ 只有「同结构位置 + 还压在同一块地方」才算换个内容。
+    best, best_iou = None, 0.0
+    for u, n in post:
+        if str((_screen_split_uid(u) or [""])[0]) != pre_slot:
+            continue
+        iou = _screen_rect_iou(n.get("rect"), pre_rect)
+        if iou > best_iou:
+            best, best_iou = (u, n), iou
+    if best is not None and best_iou >= SCREEN_SAME_SLOT_IOU:
+        out["uid_state"] = "TEXT_CHANGED"
+        out["动作后uid"] = best[0]
+        out["依据"] = ("动作后原位置（矩形重叠 IoU=%.2f）上的对象从『%s』变成『%s』⇒ "
+                       "同一个对象换了内容" % (best_iou, pre_label, str(best[1].get("name") or "")))
+        return out
+    # ── ③ 兜底：结构变了 / 对象不见了 ⇒ STALE（可能点错了对象）。
+    out["uid_state"] = "STALE"
+    out["依据"] = ("动作后这一屏里既没有同名对象『%s』，原结构位置 %s 上也没有压着的对象"
+                   "（最高 IoU=%.2f）⇒ 结构变了，可能点错了对象"
+                   % (pre_label, pre_slot, best_iou))
+    return out
 
 def _eid_refuse_missing(eid, how, entry) -> dict:
     """旁表查无此号的**统一处方**。
@@ -2084,6 +2215,9 @@ def _click_by_name(hwnd: int, name: str, args: dict):
 
 def t_click(args: dict) -> dict:
     hwnd = int(args.get("hwnd") or 0)
+    # ★ 窗G3：点前那一趟复核树的上下文（nodes/struct_keys/口径）。
+    #   只有 eid 严格路径才有；name 路径与老线兜底留 None ⇒ after 如实报「没法归因」。
+    rctx = None
 
     # ★★ T1 窗2 · D1 治本（2026-10-14）。这一段整块重写，理由逐条：
     #   改前是「拿 eid 重新走一遍树、按**新编号**取坐标」——
@@ -2169,13 +2303,29 @@ def t_click(args: dict) -> dict:
                            warning="%s —— 重新 ctl_find 拿新的 capture_id 再点" % e.why)
 
         # ── ⑤身份复核（按签发口径重走一遍，特征三重全等，**不看编号**）。
-        cur, why = _eid_recheck(hwnd, feat, (entry or {}).get("walk"))
+        cur, why, rctx = _eid_recheck(hwnd, feat, (entry or {}).get("walk"))
         if cur is None:
             return env(code=gate.CODE_STALE_CAPTURE,
                        warning=("元素 %s『%s』已经不在原位了 —— %s。"
                                 "重新 ctl_find --query <要找的字> 拿新的 capture_id 重新定位，"
                                 "不要拿旧号硬点。" % (eid, feat.get("name"), why)))
 
+        # ★ 窗G3 · expect_uid：eid 说「上次那批里的哪个」，uid 说「还是不是那个对象」。
+        #   两者**不许互当前别名**：eid 会被重新编号，uid 是结构+文本的指纹。
+        #   给了 expect_uid 就**严格执行**：本屏重算一次，对不上就拒（STALE_SCREEN 语义）。
+        expect_uid = str(args.get("expect_uid") or "").strip()
+        expect_verdict = "未给"
+        cur_uid = ""
+        if expect_uid:
+            cur_uid = _screen_uid_at(rctx, cur)
+            if not cur_uid:
+                判 = {"expect_uid": expect_uid, "判定": "无法判定", "重算uid": "", "说明": "复核树没给出结构键，算不出 uid —— 不点"}
+                return env(code=gate.CODE_STALE_CAPTURE, warning=("给了 expect_uid=%s，但这趟复核取不到结构键，**无法判定是不是同一个对象** —— 宁可不算数也不点。" % expect_uid), data={"expect_uid_校验": 判})
+            expect_verdict = "匹配" if cur_uid == expect_uid else "不匹配"
+            口 = "uid = struct_key@text_key（与 ctl_screen 同口径）；不匹配 ⇒ 对象已变（STALE_SCREEN）"
+            args = {**args, "_expect_uid_校验": {"expect_uid": expect_uid, "重算uid": cur_uid, "判定": expect_verdict, "口径": 口}}
+            if expect_verdict != "匹配":
+                return env(code=gate.CODE_STALE_CAPTURE, warning=("这个元素现在算出来的 uid 是 %s，与你给的 expect_uid %s 不是同一个 —— **对象已经变了**（STALE_SCREEN），这次**一个像素都没点**。建议重扫一次 ctl_screen，拿新的 uid/eid 再点。" % (cur_uid, expect_uid)), data={"expect_uid_校验": args["_expect_uid_校验"]})
         want = args.get("expect")
         if want and str(want).strip() and str(want).strip() not in (cur.get("name") or ""):
             return env(code=gate.CODE_NO_CTRL,
@@ -2190,7 +2340,10 @@ def t_click(args: dict) -> dict:
         args = {**args, "xy": list(cur["center"]),
                 "_eid_hit": {"eid": eid, "name": cur.get("name"), "type": cur.get("type"),
                              "rect": cur.get("rect"), "enabled": _en, "capture_id": tok,
-                             "来源": "capture 旁表 + 身份复核"},
+                             "来源": "capture 旁表 + 身份复核",
+                             "uid": cur_uid,
+                             "口径": (rctx or {}).get("口径") or {},
+                             "expect_uid_校验": args.get("_expect_uid_校验"),},
                 **({"_enabled_unknown": True} if _en is None else {})}
     elif eid:
         got = _click_eid_legacy(hwnd, eid, args)
@@ -2227,10 +2380,19 @@ def t_click(args: dict) -> dict:
     if args.get("dry_run"):
         argv += ["--dry-run"]
     r = _act("click", args, argv)
+    if r.get("ok") and args.get("_eid_hit"):
+        # ★ 窗G3 · 动作后回读：「点下去了」不等于「点对了」。
+        #   after{uid_state, screen_version}：文字变了 = TEXT_CHANGED（动作达成的证据）；
+        #   结构变了/对象不见了 = STALE（可能点错对象）；什么都没变 = OK；
+        #   **读不到就写 unknown，不许当成功**。
+        #   基线 = 点之前那一趟复核树（rctx），不必另扫一遍，也更贴近「点前那一瞬」。
+        r["data"] = {**(r.get("data") or {}),
+                      "after": _click_after_state(hwnd, args.get("_eid_hit") or {}, rctx)}
     if r.get("ok"):
         r["data"] = {**(r.get("data") or {}), "frame_before": None, "frame_after": None,
                      "note": "按控件名/eid 点击不依赖观测；走坐标时已校验 capture_id",
                      "点到": args.get("_eid_hit"),
+                     "expect_uid_校验": args.get("_expect_uid_校验"),
                      # ★ W2-C：让程序能自证坐标系，不必靠人记得 SOP 怎么写。
                      "坐标口径": "屏幕物理像素（与 ctl_find/ctl_tree 的 rect/center 同源；"
                                   "不要减窗口原点）"}
@@ -3926,6 +4088,11 @@ def _screen_build(hwnd: int, args: dict) -> dict:
         is_new = bool(prev_uids) and uid not in prev_uids
         obj = {
             "id": oid,
+            # ★ 窗G3：eid 与 uid **并存、不互当前别名** ——
+            #   eid 说「上次那批里的哪个」（点哪），uid 说「还是不是那个对象」（身份）。
+            #   eid 是**遍历当场编的号**（ctl_tree/ctl_find 同一套旁表），
+            #   必须带着 from_capture 一起用；uid 是结构+文本指纹，跨调用可比。
+            "eid": (n.get("eid") if isinstance(n, dict) else None),
             "uid": uid,
             "label": label[:120],
             "role": role,
@@ -4042,6 +4209,16 @@ def _screen_build(hwnd: int, args: dict) -> dict:
     ch3["dpi_scale"] = (ocr.get("res") or {}).get("dpi_scale")
     ch3["source_confidence"] = dict(SCREEN_SOURCE_CONF["ocr"])
 
+    # ★ 窗G3 · ①：把这一屏的 eid 签进旁表，**口径必须就是这次 walk 的口径**。
+    #   口径不对 = 拿不同的坐标系比坐标 ⇒ ctl_click 复核必然假失败（D1 那条教训）。
+    #   include_offscreen=True 是**超集**，_eid_recheck 复核那趟也显式取超集（A2 要求），
+    #   于是「签发在视口内、点之前滚了一下」不会被误报成「元素不见了」。
+    eid_walk = {"roles": ["all"], "include_offscreen": True,
+               "max_nodes": int(max_nodes), "max_depth": int(max_depth)}
+    screen_capture_id = None
+    if objects and any(o.get("eid") for o in objects):
+        screen_capture_id = _issue_capture_from_tree(hwnd, {"命中": nodes}, eid_walk)
+
     out = {
         "screen_version": screen_version,                 # ← 修正②
         # ★ 窗F2：本屏**热了没有**。false 是「证据不足」，**不是错误码** ——
@@ -4064,6 +4241,13 @@ def _screen_build(hwnd: int, args: dict) -> dict:
         "viewport": viewport,
         "objects": objects,
         "texts": texts,
+        # ★ 窗G3：点哪一把钥匙 + 它是怎么签发的（口径写清楚，agent 才知道能怎么用）
+        "capture_id": screen_capture_id,
+        "eid_口径": {"capture_id": screen_capture_id, "签发口径": eid_walk,
+                     "用法": "ctl_click --eid <eid> --from_capture <capture_id> --expect_uid <uid>；uid 可选，给了就严格核对，对不上拒（STALE_SCREEN）",
+                     "eid 与 uid": "并存、不互当前别名：eid 定位，uid 认身份",
+                     "旁表": "与 ctl_tree/ctl_find 同一套（eid_sessions.json）",
+                     "复核口径": "_eid_recheck 显式 include_offscreen=True 取超集，滚出视口仍可点"},
         "channels": channels,                              # ← 修正⑤
         # ★ 窗G1：DOM 通道（**缩水版**，不做 UIA×DOM 融合 —— 先看得见，再谈合并）。
         #   没连上时是 {wired:false, objects:[]} 并带一句原因，**不假装有通道**。
@@ -4221,14 +4405,14 @@ def t_screen(args: dict) -> dict:
                                  "include_offscreen": True,
                                  "max_nodes": max_nodes, "max_depth": max_depth})
     if r.get("ok") and isinstance(r.get("data"), dict):
-        # ★ 照实说：语义屏**交出了对象**，但交的是裁剪+压缩后的 objects，
-        #   编号（id）不是 ctl_click 的 eid（口径不同，见 T1 窗2 的 D1）。
+        # ★ 照实说：语义屏交出的 objects 是**裁剪+压缩后**的（id 是屏内对象号），
+        #   但每个对象**另带 eid**（窗G3）—— 那是旁表钥匙，配 capture_id 能直接点。
         #   所以这里不许沿用「本次未采集节点」那句 —— 那会把「有对象但不可点」
         #   说成「压根没采集」，agent 会由此得出错误的下一步。
         if r["data"].get("capture_id"):
             r["data"]["capture_指纹"] = (
-                "语义屏元素指纹（不是图像）；⚠ objects[].id **不是** ctl_click 的 eid，"
-                "本版不接动作侧 —— 要点请用 ctl_find 拿 eid")
+                "语义屏元素指纹（不是图像）；⚠ objects[].id 是**屏内对象号**，不是 eid；"
+                "要动作请用 objects[].eid ＋ 本屏 capture_id（可再带 expect_uid 严核身份）")
         if args.get("version") or args.get("screen_version"):
             r["blind_spots"] = list(r.get("blind_spots") or []) + [
                 "screen_version 由服务端签发：你传的 version/screen_version 已被忽略；"

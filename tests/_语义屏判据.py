@@ -261,6 +261,20 @@ class Fixture(object):
         self._cold_until = 0.0
         # ★ 窗F2b：半热窗口期（0 = 不半热）—— 见 start_half_cold/half_root。
         self._half_until = 0.0
+        # ★ 窗G3：假点击器按什么脚本改这棵树 ——
+        #   none=不动 / advance=计时器与状态行换字（文字变） / insert=插一个按钮（结构变）
+        self.g3_click_effect = "none"
+        # ★ 窗G3：滚动量（像素）。「滚出视口」那组要靠它把按钮推到看不见的地方。
+        self.scroll_y = 0
+
+    def scroll(self, y):
+        """滚到 scroll_y（像素），返回 (scroll_percent, scroll_y)。
+
+        ★ 判据要造的是「签发在视口内、点之前滚了一下」—— 那就把 y 调大，
+          让原本可见的按钮真的落到视口外；**节点仍在树里**（in_view=False）。
+        """
+        self.scroll_y = int(y or 0)
+        return int(round(float(self.scroll_y) / 10.0)), int(self.scroll_y)
 
     def set_title(self, t):
         self.title = t
@@ -1045,6 +1059,57 @@ def _cdp_version(port=CDP_DEFAULT_PORT):              # noqa: F811  故意覆盖
 
 
 
+INJECT_EID_LINK = '''
+
+# ===== 以下为 窗G3 注入段（跑红自证专用，勿入产品代码）=====
+_real_screen_build_g3 = _screen_build
+
+
+def _screen_build(hwnd, args):                          # noqa: F811  故意覆盖真版
+    # 注入的缺陷：**eid 换成自造号**（形如 o<hash>）——
+    #   看着还是"每个对象有个 id"，但它压根不在旁表里。
+    #   真实后果：agent 拿 ctl_screen 看到的号去点，旁表查无此号 ⇒ 每次都被拒，
+    #   或者更坏：哪天真有实现拿它当坐标兜底，就变成"点自己猜的位置"（D1 那条病）。
+    out = _real_screen_build_g3(hwnd, args)
+    for o in (out.get("objects") or []):
+        o["eid"] = "x%s" % str(o.get("id") or "")[1:]
+    return out
+'''
+
+INJECT_EXPECT_UID = '''
+
+# ===== 以下为 窗G3 注入段（跑红自证专用，勿入产品代码）=====
+_real_t_click_g3 = t_click
+
+
+def t_click(args):                                       # noqa: F811  故意覆盖真版
+    # 注入的缺陷：**expect_uid 收下但不校验** —— 对不上也照点。
+    #   真实后果：agent 拿一屏前的 uid 去点，界面早变了，点下去的是**另一个对象**，
+    #   而且回执还写着 ok=true —— 这正是 STALE_SCREEN 语义要挡的那一刀。
+    return _real_t_click_g3({**args, "expect_uid": ""})
+
+
+# ★ TOOLS 是 import 时按函数对象建的表（core.py:4496），覆盖模块名不覆盖表里的引用 ——
+#   不补这一行，dispatch 走的老实身 ⇒ 这个注入会假绿（实测踩过）。
+TOOLS["ctl_click"] = t_click
+'''
+
+INJECT_AFTER_STATE = '''
+
+# ===== 以下为 窗G3 注入段（跑红自证专用，勿入产品代码）=====
+_real_click_after_state_g3 = _click_after_state
+
+
+def _click_after_state(hwnd, hit, pre_ctx=None):         # noqa: F811  故意覆盖真版
+    # 注入的缺陷：**恒报 OK** —— 不管结构变了没变、对象还在不在，一律"没变化"。
+    #   真实后果：点错了对象、点了之后布局整个重排，回执都说"一切如常"；
+    #   "点下去了"被当成"点对了"，这正是本单要治的最后一层。
+    out = _real_click_after_state_g3(hwnd, hit, pre_ctx)
+    out["uid_state"] = "OK"
+    return out
+'''
+
+
 INJECT = {
     # ★ 窗G2 的四个新注入（R3 那条通道的四根骨头各断一次）
     "ocr_wired": ("R3 根本没接线（OCR 三要素一律不接）", "append", INJECT_OCR_WIRED),
@@ -1076,6 +1141,10 @@ INJECT = {
     "cdp_wired": ("R1 没接线（CDP 三要素一律不接）", "append", INJECT_CDP_WIRED),
     "cdp_cap": ("dom 段去掉 60 条上限", "append", INJECT_CDP_CAP),
     "cdp_steal": ("端口被占也照样抢（另起实例顶上去）", "append", INJECT_CDP_STEAL),
+    # ★ 窗G3 的三个新注入（eid 旁表 / expect_uid 闸 / after 归因各断一次）
+    "eid_link": ("ctl_screen 的 eid 换成自造号（旁表查无此号）", "append", INJECT_EID_LINK),
+    "expect_uid": ("expect_uid 收下但不校验（对不上照样点）", "append", INJECT_EXPECT_UID),
+    "after_state": ("after.uid_state 恒报 OK（点错对象也说达成）", "append", INJECT_AFTER_STATE),
 }
 
 
@@ -2144,6 +2213,180 @@ DOM_ONLY_QUERY = '只在DOM里出现的那个词'
 OCR_ONLY_QUERY = '只画在像素里的那个词'
 
 
+def check_action_side(core, fx):
+    '''S10 · 动作侧：eid 能直接点、expect_uid 严守、动作后 after 归因、滚出视口仍可点。
+
+    ★ 旁表**不 mock**：ctl_screen 真走 walk、真签 capture_id、真落旁表，
+      ctl_click 真按旁表 + 身份复核走一遍（D1 那条链原封不动）。
+    ★ 只换两个 I/O 边界：`_act`（它会去拉 act.py 子进程；判据里换成假点击器，
+      假点击器**会按脚本真改夹具**，好让 after 归因有东西可归）与 `uia_tree.window_state`。
+    '''
+    reds = []
+    ev = {}
+
+    if "_act" not in ORIG:
+        ORIG["_act"] = core.__dict__.get("_act")
+        ORIG["_win_rect"] = core.__dict__.get("_win_rect")
+        ORIG["_is_foreground"] = core.__dict__.get("_is_foreground")
+        ORIG["_window_state"] = getattr(core.uia_tree, "window_state", None)
+
+    点过 = []
+
+    def 假点击(action, args, argv, scope="B"):
+        """假点击器：记一笔，并**按脚本改夹具**（点的就是这个 eid 的那个按钮）。"""
+        点过.append({"action": action, "xy": list(args.get("xy") or [])})
+        if fx.g3_click_effect == "advance":
+            fx.advance()          # 计时器与状态行同时换字 ⇒ 文字型变化
+        elif fx.g3_click_effect == "insert":
+            fx.n_extra_btn = int(fx.n_extra_btn or 0) + 1   # 结构变了 ⇒ STALE
+        return {"ok": True, "code": 0, "data": {"假点击": True}, "warning": None,
+                "blind_spots": [], "event_id": None, "elapsed_ms": 1,
+                "session_id": "", "t_mono": 0.0, "t_wall": "", "notices": []}
+
+    core._act = 假点击
+    core._win_rect = lambda h: [0, 0, 1280, 900]
+    core._is_foreground = lambda h: True
+    core.uia_tree.window_state = lambda h: {"最小化": False, "根矩形宽": 1280,
+        "根矩形高": 900, "说明": "假窗口状态"}
+    # ★ 窗G3 · ④「滚出视口」要造得**真**：把客户区整体往下挪（等价于向下滚），
+    #   **节点矩形不动**（文档坐标不动）⇒ 那几个按钮真的落到客户区之外、
+    #   in_view=False，但它们**仍在树里**。这正是「签发在视口内、点之前滚了一下」。
+    #   ⚠ 只挪视口、不改节点矩形：改矩形会被认成「节点变了」，那是另一回事。
+    def _假客户区(handle):
+        return [CLIENT[0], CLIENT[1] + int(fx.scroll_y or 0),
+                CLIENT[2], CLIENT[3] + int(fx.scroll_y or 0)]
+    core.uia_tree._client_rect = _假客户区
+
+    def 重扫(**kw):
+        core._screen_forget(0)
+        return call(core, top=500, **kw)
+
+    def 找对象(sc, needle):
+        for o in (sc.get("objects") or []):
+            if str(o.get("label") or "").startswith(needle):
+                return o
+        return {}
+
+    # ── ① ctl_screen 的 eid 能直接喂 ctl_click，身份复核通过
+    fx.g3_click_effect = "none"
+    fx.n_extra_btn = 0
+    fx.timer_tick = 0
+    _, sc1 = 重扫()
+    o1 = 找对象(sc1, "选项格01")
+    ev["①对象字段"] = {k: o1.get(k) for k in ("id", "eid", "uid", "label")}
+    need(bool(o1.get("eid")), "对象没有 eid（%r）—— 这一单就是让它能直接点" % o1.get("eid"), reds)
+    need(bool(o1.get("uid")), "对象没有 uid（uid 与 eid 并存，不许互相顶替）", reds)
+    need(o1.get("id") != o1.get("eid"),
+         "id 与 eid 撞成同一个（%r）—— id 是本次屏内的对象号，eid 是旁表钥匙" % o1.get("id"), reds)
+    tok1 = sc1.get("capture_id")
+    need(bool(tok1), "这一屏没有签发 capture_id，eid 就是无根之木", reds)
+    r1 = core.dispatch("ctl_click", {"hwnd": FAKE_HWND, "eid": o1.get("eid"),
+                                 "from_capture": tok1, "actor": "判据G3"}, actor="判据G3")
+    ev["①点它"] = {"ok": r1.get("ok"), "code": r1.get("code"),
+                   "warning": (r1.get("warning") or "")[:200], "真的点了": len(点过)}
+    need(r1.get("ok") is True, "拿 ctl_screen 的 eid 直接点失败：%s" % (r1.get("warning") or "")[:200], reds)
+    need(len(点过) == 1,
+         "点击没真发出去（点过 %d 次）—— 这条证明 eid→旁表→复核→坐标整条链是通的" % len(点过), reds)
+
+    # ── ② expect_uid：匹配能点；不匹配**拒且不点**
+    _, sc2 = 重扫()
+    o2 = 找对象(sc2, "选项格02")
+    tok2 = sc2.get("capture_id")
+    n0 = len(点过)
+    r2ok = core.dispatch("ctl_click", {"hwnd": FAKE_HWND, "eid": o2.get("eid"),
+                                   "from_capture": tok2, "expect_uid": o2.get("uid"),
+                                   "actor": "判据G3"}, actor="判据G3")
+    v2 = ((r2ok.get("data") or {}).get("expect_uid_校验") or {})
+    ev["②匹配"] = {"ok": r2ok.get("ok"), "expect_uid_校验": v2, "点了": len(点过) - n0}
+    need(r2ok.get("ok") is True and v2.get("判定") == "匹配",
+         "uid 对得上却没点成：ok=%r 判定=%r" % (r2ok.get("ok"), v2.get("判定")), reds)
+    need(len(点过) - n0 == 1, "uid 匹配那次没真点（点了 %d 次）" % (len(点过) - n0), reds)
+
+    n1 = len(点过)
+    r2no = core.dispatch("ctl_click", {"hwnd": FAKE_HWND, "eid": o2.get("eid"),
+                                   "from_capture": tok2, "expect_uid": "完全不是这个对象的uid",
+                                   "actor": "判据G3"}, actor="判据G3")
+    v2n = ((r2no.get("data") or {}).get("expect_uid_校验") or {})
+    ev["②不匹配"] = {"ok": r2no.get("ok"), "code": r2no.get("code"), "expect_uid_校验": v2n,
+                    "点了": len(点过) - n1, "warning": (r2no.get("warning") or "")[:200]}
+    need(r2no.get("ok") is False, "uid 对不上却照样点了（ok=%r）—— 那正是本单要治的" % r2no.get("ok"), reds)
+    need(r2no.get("code") not in (0, None), "拒了却没给非 0 码：%r" % r2no.get("code"), reds)
+    need(v2n.get("判定") == "不匹配", "三值判定没报「不匹配」：%r" % v2n, reds)
+    need(len(点过) == n1, "拒了却还是点了（点了 %d 次）—— 必须一个像素都没动" % (len(点过) - n1), reds)
+    need("没点" in str(r2no.get("warning") or "") or "STALE" in str(r2no.get("warning") or ""),
+         "拒绝文案没把「没点」/STALE_SCREEN 说清：%s" % (r2no.get("warning") or "")[:160], reds)
+
+    # ── ③ 动作后 after.uid_state 归因：文字变 ⇒ TEXT_CHANGED，结构变 ⇒ STALE
+    #   ★ 两组点的**不是同一个对象**，因为要打的靶子本来就不同：
+    #     advance（点计时器）：计时器是 volatile 节点，它的 text_key 恒为 ~ 
+    #       （改了字 uid 也不变，这是 §⑫ 豁免的设计）⇒ 只能靠「同一结构位置上的
+    #       东西换了字」来归因 —— 正好证明 after 不是只比 uid。
+    #     insert（在按钮队列最前面插一个）：后面每个按钮的 struct_key 整体后移
+    #       ⇒ 同一个按钮换了个路径 ⇒ STALE（可能点错对象）。
+    for effect, want_state, target in (("advance", "TEXT_CHANGED", "剩余 00"),
+                                       ("insert", "STALE", "选项格01")):
+        fx.g3_click_effect = effect
+        fx.n_extra_btn = 0
+        fx.timer_tick = 0
+        fx.tick = 0
+        _, sc3 = 重扫()
+        o3 = 找对象(sc3, target)
+        need(bool(o3.get("eid")),
+             "③ %s：靶场里找不到『%s』这组要点的对象" % (effect, target), reds)
+        tok3 = sc3.get("capture_id")
+        r3 = core.dispatch("ctl_click", {"hwnd": FAKE_HWND, "eid": o3.get("eid"),
+                                   "from_capture": tok3, "expect_uid": o3.get("uid"),
+                                   "actor": "判据G3"}, actor="判据G3")
+        af = (r3.get("data") or {}).get("after") or {}
+        ev["③after_%s" % effect] = {"want": want_state, "got": af.get("uid_state"),
+                                "screen_version": af.get("screen_version"),
+                                "依据": (af.get("依据") or "")[:160]}
+        need(r3.get("ok") is True,
+             "③ %s 那次点击没成功：%s" % (effect, (r3.get("warning") or "")[:160]), reds)
+        need(af.get("uid_state") == want_state,
+             "③ %s：点完 uid_state 应是 %s，实得 %r（依据：%s）"
+             % (effect, want_state, af.get("uid_state"), (af.get("依据") or "")[:120]), reds)
+        need(bool(af.get("screen_version")), "③ %s：after 没给 screen_version" % effect, reds)
+        if af.get("uid_state") == "unknown":
+            need("不等于动作成功" in str(af.get("口径") or ""),
+                 "uid_state=unknown 时口径里必须写明「不等于动作成功」", reds)
+
+    # ── ④ 滚出视口的对象仍可点：复核必须取**超集**（A2 要求）
+    fx.g3_click_effect = "none"
+    fx.n_extra_btn = 0
+    fx.scroll(0)
+    _, sc4 = 重扫()
+    o4 = 找对象(sc4, "选项格01")
+    tok4 = sc4.get("capture_id")
+    fid, at = fx.scroll(600)      # ★ 真的把那个按钮滚出视口（客户区整体下移 600px）
+    need(o4.get("label") == "选项格01", "④ 靶场里没有『选项格01』", reds)
+    r4 = core.dispatch("ctl_click", {"hwnd": FAKE_HWND, "eid": o4.get("eid"),
+                                 "from_capture": tok4, "expect_uid": o4.get("uid"),
+                                 "actor": "判据G3"}, actor="判据G3")
+    v4 = ((r4.get("data") or {}).get("expect_uid_校验") or {})
+    ev["④滚出视口"] = {"滚了": fid, "scroll_y": at, "ok": r4.get("ok"),
+                   "expect_uid_校验": v4.get("判定"),
+                   "warning": (r4.get("warning") or "")[:200]}
+    need(r4.get("ok") is True,
+         "元素滚出视口后点不了（%s）—— 复核那趟必须显式 include_offscreen=True 取超集，"
+         "「签发在视口内、点之前滚一下」不该被误报成「元素不见了」"
+         % (r4.get("warning") or "")[:160], reds)
+    need(v4.get("判定") == "匹配",
+         "滚出视口后 uid 竟然对不上了（%r）—— 复核取超集时结构键口径应当一致" % v4, reds)
+    fx.scroll(0)
+
+    # 收尾：把 _act 等还原，别影响后面的组
+    if ORIG.get("_act") is not None:
+        core._act = ORIG["_act"]
+    if ORIG.get("_window_state") is not None:
+        core.uia_tree.window_state = ORIG["_window_state"]
+    core.uia_tree._client_rect = ORIG["_client_rect"]
+    fx.n_extra_btn = 0
+    fx.timer_tick = 0
+    fx.g3_click_effect = "none"
+    core._screen_forget(0)
+    return 'S10 动作侧接线', reds, ev
+
 def check_ocr_r3(core, fx):
     '''S9 · OCR 通道（R3）：命中才算、不可用就如实说、words 有上限、bbox 越界就不算锚、超时不挂。
 
@@ -2806,7 +3049,8 @@ def main():
                      ("S6 拒绝信封带屏上下文", lambda: check_watch_reject_ctx(core, fx)),
                      ("S7 首扫就绪判定", lambda: check_screen_ready(core, fx)),
                      ("S8 CDP 接线与 R1", lambda: check_cdp_r1(core, fx)),
-                     ("S9 OCR 接线与 R3", lambda: check_ocr_r3(core, fx))):
+                     ("S9 OCR 接线与 R3", lambda: check_ocr_r3(core, fx)),
+                     ("S10 动作侧接线", lambda: check_action_side(core, fx))):
         title, reds, ev = fn()
         res[title] = reds
         print("")
@@ -2900,6 +3144,10 @@ def main():
               "S8CDP接线：DOM命中⇒R1真且must_vlm=false（R2不成立时单独扛）、"
               "CDP不可达⇒如实false并写进blind_spots（不等于「页面没有」）、"
               "dom段≤60条且逐条带role/name/rect/selector、端口被别人占⇒明确拒绝不抢；"
+              "S10动作侧：ctl_screen 的 eid 能直接喂 ctl_click 且身份复核通过、"
+              "expect_uid 对得上才点、对不上拒且一个像素没点、"
+              "点完 after.uid_state 归因正确（文字变 TEXT_CHANGED、结构变 STALE）、"
+              "滚出视口的对象仍可点（复核取超集）；"
               "S9OCR接线：像素里认出且框能当锚⇒R3真且must_vlm=false（R2不成立时单独扛）、"
               "引擎不可用/超时⇒如实false并写进blind_spots（不等于「页面没有」）、"
               "words≤80且omitted.total诚实、dpi_scale在、bbox越界⇒usable=false、"
