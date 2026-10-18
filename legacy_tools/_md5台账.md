@@ -9,7 +9,7 @@
 | `gate_lock.py` | `5b2c5ef3fa17e7ba505ed50705211385` | 4876 | `5b2c5ef3fa17e7ba505ed50705211385` | 4876 | 无规则 |
 | `act.py` | `6b4a61405ae592a7ed3211368d92cdc8` | 168240 | `6b4a61405ae592a7ed3211368d92cdc8` | 168240 | 无规则 |
 | `perceive.py` | `ea08ff72e22ce1db97cfecebf17ee97a` | 39929 | `ac8309d0c28234ce74e685c25bc8afcc` | 40351 | 截图目录：不写死本机路径=命中；树差量缓存目录：同上=命中 |
-| `auth_popup.py` | `852f03c1a2b708d4cc0c478355203217` | 39618 | `852f03c1a2b708d4cc0c478355203217` | 39618 | 无规则 |
+| `auth_popup.py` | `fc5e13e12b070504a1f6df55bca7f033` | 41580 | `fc5e13e12b070504a1f6df55bca7f033` | 41580 | 无规则 |
 | `brake.py` | `714cc345ecb9177935c783b6a99a2d7b` | 7973 | `714cc345ecb9177935c783b6a99a2d7b` | 7973 | 无规则 |
 | `cdp.py` | `ef567b0e1adacd5d3e00982a40c493b6` | 18439 | `f576af3856361ced91a5da9cfd982a11` | 18518 | 浏览器 profile：不写死本机路径=命中；净化引入的 os/subprocess 用法：就地补 import os=已补 |
 | `coord.py` | `72d921b3fd29dc9cc747153433b6b3cd` | 5365 | `6ad092da4f6012571b9df0c605a98eaf` | 5365 | 自插老线路径：包内要指向自己=命中 |

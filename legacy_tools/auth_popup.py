@@ -29,10 +29,8 @@ T5 新增（可选，最小改动）：
 
 ── P1-A 新增（窗WB2-2 · 2026-10-18，分工书 §三 WorkBuddy-2 + 接线单 §二 7 + L 卡） ──
   ① 默认范围 ABCD 一次给齐（--request 空/缺省时）；默认 30 分钟 / 60 次；
-     弹窗内 A/B/C/D 四个勾选框（**D 默认勾选 + 风险标注**，与 wB 绊线口径对齐：
-     产品开关未启用 D（--no-d）⇒ D 默认不勾且文案明说）；
-  ② 弹窗**列全候选窗口**（当前前台 + 调用方 --windows 声明）并支持**多选**，
-     选中即写入通行证 windows 列表（身份键 = exe+cls+created，hwnd 只作展示）；
+  ② 候选窗口 = EnumWindows 枚举（当前前台等）+ 调用方 --windows 声明，
+     合并去重后写入通行证 windows 列表（身份键 = exe+cls+created，hwnd 只作展示）；
   ③ 写入改「读现有 → merge → 写回」（gate_lock 同一把锁，禁整文件替换）：
      windows 只追加不去重丢、scopes 不被窄请求覆盖/抬高、acts 计数不重置、
      父过期/急停 ⇒ 子全灭（写入时把每个 windows.exp 夹到父 exp）；
@@ -41,6 +39,18 @@ T5 新增（可选，最小改动）：
     （本文件按同 schema 实现并预留此注记，不建第二套账）。
   ★ 需要别人改的（越界项，已上报 DSH）：core.py 的 _ask_then_retry 传 --window-ack
     与 --windows；gate.py 读 pass.windows 做窗口放行终判（否则 windows 只记录不拦）。
+
+── 第三轮 C（2026-10-18 用户拍板）：**弹窗外观回到改前**，只留参数与合并逻辑 ──
+  弹窗**不再有任何新增可见控件**：A/B/C/D 勾选框、D 警示 Label、「其它申请项」标签、
+  候选窗口 Listbox、「窗口追加模式」标签、「请勾选本次授权范围」这类引导文案**全部撤掉**。
+  弹窗只显示**纯文本摘要**；两个按钮之外没有任何可操作控件（set 模式另有原有的密钥输入框
+  与原有的「显示密钥」勾选，那是改前就有的，不动）：
+    · 本次授权范围（由 --request + --no-d 归一化得出：默认 ABCD，--no-d 时不含 D）；
+    · 有效期 / 动作数；
+    · --window-ack（或调用方 --windows 声明）时，将追加/纳入的窗口清单（多行文本，不可勾选）。
+  ⇒ 用户**不能在此选档位或选窗口**：档位由 --request/--no-d 定，窗口由 --windows/--window-ack 定。
+  后端口径一字不动：三个参数、候选窗口枚举、_merge_candidates/_win_identity/_merge_windows/
+  merge_pass/clamp_exp、scope 归一化全部保留；fail-closed（范围为空 ⇒ 拒绝签发）仍在。
 """
 import argparse
 import ctypes
@@ -81,9 +91,8 @@ DEFAULT_MINUTES = 30
 DEFAULT_ACTS = 60
 SCOPE_LETTERS = ("A", "B", "C", "D")
 SCOPE_FULL = {"A": gate.A, "B": gate.B, "C": gate.C, "D": gate.D}
-# 接线单 §二 7：D 默认勾选（用户明令 ABCD 全给）+ 风险标注；
-# wB 绊线口径 = 产品开关未启用 D（--no-d）⇒ 默认不含 D 且文案明说。
-D_RISK_NOTE = "D=拖拽：最高危档（可把窗口拖到任意位置、误触拖放释放）；本次不需要请取消勾选"
+# 第三轮 C：D 的**风险文案与勾选框一并撤掉**（弹窗回到改前，范围只作纯文本展示）；
+# --no-d 的口径仍在 _initial_scope_states 里生效：该开关打开时 D 不计入本次范围。
 WINDOW_CANDIDATE_MAX = 40          # 候选窗口列表上限（再多就让他先关几个窗）
 WINDOW_CHILD_MAX_MIN = 30 * 60     # ③ 子寿命：min(自身 30min, 父 exp)（L 卡 ③）
 
@@ -209,7 +218,7 @@ def targets_note():
     return ""
 
 
-# ────────────────────── P1-A ①：范围勾选（默认 ABCD / D 风险标注） ──────────────────────
+# ────────────────────── P1-A ①：范围归一化（默认 ABCD / --no-d 不含 D） ──────────────────────
 
 def _letter_of(item):
     """把一个 scope 项解析成 A/B/C/D 字母；认不出返回 None。
@@ -231,9 +240,11 @@ def _split_scope(req):
 
 
 def _initial_scope_states(items, no_d):
-    """(每字母初始勾选状态, 非标准项列表)。
-    默认规则：--request 给的勾；没给（空）⇒ ABCD 全勾（分工书 ①）；
-    --no-d ⇒ D 默认不勾且文案明说（接线单 §二 7）。"""
+    """(每字母的初始状态, 非标准项列表)。
+    默认规则：--request 给的算；没给（空）⇒ ABCD 全给（分工书 ①）；
+    --no-d ⇒ D 不计入（接线单 §二 7）。
+    第三轮 C：返回值仍叫 states（＝本次范围内含哪些字母），只是弹窗不再用勾选框承载它 ——
+    它直接由参数算出，展示与落盘用同一份。"""
     std = [it for it in items if _letter_of(it)]
     if items and not std:
         # 全是非常规项：一个字母都不认识 ⇒ 不预设任何勾选（用户自己看着办）
@@ -471,7 +482,9 @@ def merge_pass(existing, new, *, window_ack):
 
 
 def _windows_from_selection(rows, sel_idx, exp_at):
-    """勾选的候选行 → windows 条目（身份键 exe+cls+created；hwnds/titles 展示用）。"""
+    """候选行 → windows 条目（身份键 exe+cls+created；hwnds/titles 展示用）。
+    第三轮 C：弹窗不再有勾选框，调用方传**全集下标**（覆盖哪些窗口全由参数决定）；
+    本函数本身没动 —— 判定口径仍在这里，只换了「谁来定 sel_idx」。"""
     out = []
     for i in sel_idx:
         if not (0 <= i < len(rows)):
@@ -483,15 +496,40 @@ def _windows_from_selection(rows, sel_idx, exp_at):
     return out
 
 
+def _sum_window_lines(rows):
+    """候选窗口行 → 弹窗上的**多行纯文本**清单（不可勾选；纯只读展示）。
+
+    第三轮 C：原来的 Listbox 撤掉了，但「要授权哪些窗口」必须让用户**看得见、能核对** ——
+    这里就是那一眼。每行形如：`〔前台〕[123456] 记事本 — notepad.exe／Notepad`。
+    与 `_windows_from_selection` 同源同序，**显示的就是将要写进证里的那一份**。"""
+    lines = []
+    for r in rows or []:
+        marks = []
+        if r.get("foreground"):
+            marks.append("前台")
+        if r.get("declared"):
+            marks.append("调用方声明")
+        if r.get("terminal"):
+            marks.append("终端")
+        mark = ("〔" + "·".join(marks) + "〕") if marks else ""
+        lines.append("  · %s[%s] %s — %s／%s"
+                     % (mark, r.get("hwnd"), r.get("title"), r.get("exe"), r.get("cls")))
+    return "\n".join(lines)
+
+
 # ────────────────────────── 弹窗 ──────────────────────────
 def _popup(kind, scope="", minutes=10, acts=20, note="", targets=None,
            scope_states=None, scope_extra=None, no_d=False,
            candidates=None, window_ack=False):
     """kind: 'set' 设置密钥 / 'request' 申请授权。返回 (结果, 密钥文本或 None)。
 
-    P1-A：request 模式新增两块（都不新开窗 —— 一次任务仍只弹一次）：
-      · A/B/C/D 范围勾选框（D 默认勾选 + 风险标注；--no-d 默认不勾且文案明说）；
-      · 候选窗口多选框（EnumWindows 枚举 + --windows 调用方声明；敏感硬拒窗不进候选）。
+    第三轮 C（2026-10-18 用户拍板）：**弹窗外观回到改前** —— 本函数不再放任何新增可见控件，
+    只把**参数决定的结果**作纯文本只读展示：
+      · 本次授权范围（由 scope_states / scope_extra 定；默认 ABCD，--no-d 时不含 D）；
+      · 有效期 / 动作数；
+      · --window-ack（或调用方 --windows 声明）时，将追加/纳入的窗口清单（多行文本）。
+    用户不能在此选档位或选窗口 —— 只有原有的「允许 / 拒绝」两个按钮与原有的密钥输入框。
+    参数与合并逻辑一字不动（no_d 仍按 P1-A 口径生效，取值在 _initial_scope_states）。
     """
     import tkinter as tk
     state = {"result": None, "key": None}
@@ -517,53 +555,29 @@ def _popup(kind, scope="", minutes=10, acts=20, note="", targets=None,
             # 2026-10-07 加：窗口审批要用。note 只**显示**，绝不混进 scope ——
             # scope 会被切分后存成通行证范围，塞别的东西进去会让范围对不上。
             label(note, 11, "#7ee787", 8)
-        # ── P1-A ①：范围勾选（默认 ABCD 一次给齐；D 风险标注）──
-        label("请勾选本次授权范围（默认 ABCD 一次给齐，不需要的档位取消勾选）：", 11, "#ffd479")
-        scope_vars = {}
-        for L in SCOPE_LETTERS:
-            var = tk.BooleanVar(value=bool(scope_states.get(L)) if scope_states else False)
-            scope_vars[L] = var
-            suffix = "  ⚠ " + D_RISK_NOTE if L == "D" else ""
-            tk.Checkbutton(root, text=f"{L} · {SCOPE_FULL[L]}{suffix}", variable=var,
-                           bg="#1e1e1e", fg="#dddddd", selectcolor="#1e1e1e",
-                           activebackground="#1e1e1e", activeforeground="#ffffff",
-                           font=("Microsoft YaHei UI", 10), anchor="w",
-                           wraplength=W - 60, justify="left").pack(padx=32, anchor="w")
-        if no_d:
-            label("⚠ 产品开关未启用 D 级：默认不含 D（可手动勾选，风险该档自担）"
-                  "—— 与 wB 绊线同一口径的两面。", 10, "#ffb454")
-        if scope_extra:
-            label("其它申请项（原样保留，不参与 A-D 勾选）："
-                  + "、".join(scope_extra), 10, "#9aa0a6")
+        # ── 第三轮 C ①：范围 → **纯文本摘要**（没有勾选框；这里与 submit 同一口径）──
+        #   范围由参数决定：--request 里的 A/B/C/D + --no-d（不含 D）+ 非标准项原样保留。
+        granted_preview = [SCOPE_FULL[L] for L in SCOPE_LETTERS
+                           if scope_states and scope_states.get(L)]
+        granted_preview += list(scope_extra or [])
+        label("本次授权范围：" + ("、".join(granted_preview) or "（无）")
+              + "（由参数决定，本窗不可改）", 11, "#ffd479")
         label(f"有效期：{minutes} 分钟（过期或撤销即失效）\n"
               f"动作次数上限：{acts} 次（用完即止）", 11, "#ffd479")
         if targets:
             label("本次限定目标（targets）：\n" + _sum_targets(targets)
                   + "\n目标对不上、或拿不到目标信息 → 一律拒绝", 10, "#8fd3f4")
-        if window_ack:
-            label("窗口追加模式：只把下面选中的窗口追加进现有通行证，"
-                  "不动范围 / 时限 / 次数。", 10, "#8fd3f4")
-
-        # ── P1-A ②：候选窗口多选 ──
+        # ── 第三轮 C ②：候选窗口 → **多行纯文本清单**（没 Listbox、不可勾选）──
+        #   窗口集合同样由参数决定：EnumWindows 枚举 ∪ 调用方 --windows 声明（合并去重）。
+        #   写进证里的就是这里显示的这一份（都是 cands 全集），用户无从挑选 ——
+        #   所以只在真正要动窗口的两种情形下才占版面（默认路径外观＝改前）。
         cands = candidates or []
-        label(f"请选择本通行证覆盖的窗口（可多选；不选 = 不限定窗口）："
-              f"共 {len(cands)} 个候选（〔前台〕当前前台；〔终端〕高危需你明确勾选）", 11, "#ffd479")
-        lb = tk.Listbox(root, selectmode=tk.EXTENDED, height=min(9, max(4, len(cands))),
-                        width=W - 60, font=("Microsoft YaHei UI", 10),
-                        bg="#2a2a2a", fg="#dddddd", selectbackground="#2d7d46")
-        sb = tk.Scrollbar(root, command=lb.yview)
-        lb.configure(yscrollcommand=sb.set)
-        lb.pack(padx=32, pady=(0, 2), anchor="w")
-        for i, r in enumerate(cands):
-            marks = []
-            if r["foreground"]:
-                marks.append("前台")
-            if r["declared"]:
-                marks.append("调用方声明")
-            if r["terminal"]:
-                marks.append("终端")
-            mark = ("〔" + "·".join(marks) + "〕") if marks else ""
-            lb.insert(tk.END, f"{mark} [{r['hwnd']}] {r['title']}  — {r['exe']}")
+        declared_rows = [r for r in cands if r.get("declared")]
+        win_rows = cands if (window_ack or declared_rows) else []
+        if window_ack or declared_rows:
+            label(("本次将追加的窗口清单" if window_ack else "本次将纳入的窗口清单")
+                  + "（%d 个；身份 = exe + 类名 + 创建时间，本窗不可勾选）：\n" % len(win_rows)
+                  + (_sum_window_lines(win_rows) or "  （无候选窗口）"), 10, "#dddddd")
 
     lock = _load(KEYFILE, {})
     locked_until = lock.get("locked_until", 0)
@@ -615,16 +629,19 @@ def _popup(kind, scope="", minutes=10, acts=20, note="", targets=None,
             tip.config(text="锁定中，稍后再试")
             return
         if hmac.compare_digest(verifier(key, rec["salt"]), rec["verifier"]):
-            # ── P1-A ①③：从勾选框取本次批准的范围（fail-closed：一个都不勾 ⇒ 拒）──
-            checked = [L for L in SCOPE_LETTERS if scope_vars.get(L) and scope_vars[L].get()]
+            # ── 第三轮 C：范围/窗口**全从参数取**（弹窗上已无可点的档位/窗口控件）；
+            #    fail-closed 不变：一个范围都拿不到 ⇒ 拒绝签发 ──
+            checked = [L for L in SCOPE_LETTERS
+                       if scope_states and scope_states.get(L)]
             if not checked and not scope_extra:
-                tip.config(text="至少勾选一个授权范围")
+                tip.config(text="本次没有可授权的范围（参数为空）—— 拒绝签发")
                 return
             granted = [SCOPE_FULL[L] for L in checked] + list(scope_extra or [])
-            # ── P1-A ②③：勾选的窗口 → windows 条目 ──
-            sel = list(lb.curselection()) if cands else []
-            windows = _windows_from_selection(cands, sel, time.time() + minutes * 60)
+            # ── 第三轮 C：窗口条目 = 上面展示的 win_rows（参数决定，用户不选）──
+            #    win_rows 为空（默认任务授权、且调用方没声明窗口）⇒ windows=[]，
+            #    与改前的证一致（不写窗口限制）。
             expires = time.time() + minutes * 60
+            windows = _windows_from_selection(win_rows, range(len(win_rows)), expires)
             new = {"scopes": granted, "acts_limit": acts, "issued": _now(),
                    "expires_at": expires,
                    "expires": datetime.datetime.fromtimestamp(expires).strftime("%Y-%m-%d %H:%M:%S"),
@@ -730,11 +747,12 @@ def main():
                                       "（只在 --request 时生效；不填则不写 targets 键）")
     # ── P1-A 新增三个开关 ──
     ap.add_argument("--no-d", action="store_true",
-                    help="产品开关未启用 D：D 默认不勾选且弹窗文案明说（接线单 §二 7；"
+                    help="产品开关未启用 D：本次授权范围默认不含 D（接线单 §二 7；"
                          "与默认 ABCD 全给是同一口径的两面）")
     ap.add_argument("--window-ack", action="store_true",
-                    help="窗口追加模式：只把选中的窗口合并进现有通行证，不动范围/时限/次数"
-                         "（L 卡 ②③；没有有效父证则拒绝签发）。core 的 rc=7 路径将来传它")
+                    help="窗口追加模式：只把本次候选窗口（--windows 声明 ∪ 枚举）追加进现有通行证，"
+                         "不动范围/时限/次数（L 卡 ②③；没有有效父证则拒绝签发）。"
+                         "core 的 rc=7 路径将来传它")
     ap.add_argument("--windows",
                     help="调用方声明的候选窗口 JSON（P1-A ②）："
                          '[{"hwnd":123,"title":"记事本","exe":"notepad.exe","cls":"Notepad"}]'
