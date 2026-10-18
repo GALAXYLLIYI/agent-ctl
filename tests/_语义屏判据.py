@@ -55,6 +55,16 @@ r"""判据 · F4 语义屏 ctl_screen（窗B1 · 2026-10-17）
        ★ 判据盯的是**服务端终判**，不是老线 act.py 那层：拒绝必须发生在 act.py 之前
          ⇒ 可观察判据 = `data.raw` 为空 **或** warning 点名"终判/服务端"；两样都没有 ⇒ 红。
        ★ 现状预期：Codex-3 把终判接进 core 之前，本条**红**（接线单明说未落地可红）。
+    S12 P0 神经层（窗Z · 2026-10-18，派单 `work\dispatch_Z_神经层P0.md`）：
+        ① 归属**前置闸**：`WindowFromPoint` 的顶层 ∉ 目标窗树 ⇒ **发送之前**就拒、回执点名遮挡者、
+           且 act.py 一次都没被 spawn（「零像素」）；
+        ② **因果判词**：变化区与判定区求交为空 ⇒ `changed_outside_target`（不许报 met/成功）；
+           观测失败（changed=None）⇒ `unknown`（**≠ no_effect**，不许报没变化）；
+        ③ 同步 `ctl_windows` 快照**代际**：窗口移动 ⇒ gen 递增，带旧 gen 的查询/动作 ⇒ code=12；
+        ④ `expect_region` 声明在目标窗之外 ⇒ 前置拒（不延长 TTL、不另造计时器）。
+        ★ 只换 I/O 边界（`_legacy`/`_act_grab`/`_act_diff_of`/`_act_diff_store`/
+          `_win_rect`/`_win_at_point`/`_windows_snapshot`/`_perceive`），
+          `_ownership_precheck`/`_causal_verdict`/`_windows_gen_bump` 全是现役真代码。
 
 跑法：
     python -X utf8 tests\_语义屏判据.py                # 合成夹具（无桌面也能跑）
@@ -74,6 +84,11 @@ r"""判据 · F4 语义屏 ctl_screen（窗B1 · 2026-10-17）
     python -X utf8 tests\_语义屏判据.py --inject frame_skip_check    # 必红⑪③（frame_id 校验被整段跳过）
     python -X utf8 tests\_语义屏判据.py --inject diff_always_true    # 必红⑪④（after.diff 恒报"变了"）
     python -X utf8 tests\_语义屏判据.py --inject deny_window_bypass  # 必红⑫（敏感窗终判被旁路）
+    python -X utf8 tests\_语义屏判据.py --inject hit_after_send       # 必红S12①（归属改成事后判）
+    python -X utf8 tests\_语义屏判据.py --inject verdict_always_met   # 必红S12②（窗外变化也报 met）
+    python -X utf8 tests\_语义屏判据.py --inject unknown_as_noeffect  # 必红S12③（观测失败写成没变化）
+    python -X utf8 tests\_语义屏判据.py --inject gen_frozen           # 必红S12④（快照代际钉死）
+    python -X utf8 tests\_语义屏判据.py --inject expect_outside_ok    # 必红S12⑤（区域声明到别人窗里）
     python -X utf8 tests\_语义屏判据.py --inject all                 # 一起注，逐条报红
 ★ (11) 组**只在有交互桌面的会话里跑**：它要真拉起记事本、真 SendInput。跑不了 ⇒ 如实说"环境受限"
   （退出码 2），**不把"没验"算成绿**。
@@ -1354,6 +1369,88 @@ def _inj_cdp_eval_E2(js, port=CDP_DEFAULT_PORT, timeout=CDP_EVAL_TIMEOUT_SEC,
 _cdp_eval = _inj_cdp_eval_E2
 '''
 
+# ──────────────────────── 窗Z（P0 神经层）的五个注入 ────────────────────────
+# 三件被测事实（归属前置闸 / 因果判词 / 同步窗快照代际）各断一次骨头，
+# 四条钉 S12 的四根骨头，第五条钉「expect_region 前置拒」。
+# 全部只落在 %TEMP% 的副本上，产品代码一个字节都不改。
+INJECT_HIT_AFTER_SEND = '''
+
+# ===== 以下为 窗Z 注入段（跑红自证专用，勿入产品代码）=====
+# 注入的缺陷：**归属改成"事后判"** —— 发送瞬间那道前置闸被拿掉，
+#   改成 act.py 跑完再回头问"这点现在归谁"。
+# 真实后果：点击的激活副作用在调用方看到回执之前就已经发生（ZCode 钉的那条），
+#   拿旧坐标点进遮挡者，回执再点名也救不回来。
+_real_act_Z = _act
+_real_op_Z = _ownership_precheck
+
+
+def _ownership_precheck(args, hwnd, tool="ctl_click"):      # noqa: F811  故意覆盖真版
+    return None, []
+
+
+def _act(action, args, argv, scope="B"):                    # noqa: F811  故意覆盖真版
+    r = _real_act_Z(action, args, argv, scope)              # 先发出去
+    _err, _blind = _real_op_Z(args, int(args.get("hwnd") or 0))   # 再回头判归属
+    if _err:
+        return _err
+    return r
+'''
+
+INJECT_VERDICT_ALWAYS_MET = '''
+
+# ===== 以下为 窗Z 注入段（跑红自证专用，勿入产品代码）=====
+# 注入的缺陷：变化区与判定区**求交为空**时也报 met —— 「世界自己动了」
+#   被冒充成「我这次动作的后果」。
+_real_verdict_Z = _causal_verdict
+
+
+def _causal_verdict(diff, *, hit_rect=None, expect_region=None):   # noqa: F811
+    out = _real_verdict_Z(diff, hit_rect=hit_rect, expect_region=expect_region)
+    if out.get("verdict") == "changed_outside_target":
+        out["verdict"] = "met"
+    return out
+'''
+
+INJECT_UNKNOWN_AS_NOEFFECT = '''
+
+# ===== 以下为 窗Z 注入段（跑红自证专用，勿入产品代码）=====
+# 注入的缺陷：观测失败（抓屏失败 / 没测出来）被写成 no_effect ——
+#   「我没看见」冒充「我看见了没变」（w3 12c 同款纪律）。
+_real_verdict_N = _causal_verdict
+
+
+def _causal_verdict(diff, *, hit_rect=None, expect_region=None):   # noqa: F811
+    out = _real_verdict_N(diff, hit_rect=hit_rect, expect_region=expect_region)
+    if out.get("verdict") == "unknown":
+        out["verdict"] = "no_effect_in_region"
+    return out
+'''
+
+INJECT_GEN_FROZEN = '''
+
+# ===== 以下为 窗Z 注入段（跑红自证专用，勿入产品代码）=====
+# 注入的缺陷：窗口快照代际**钉死** —— 窗口动过、清单变了，gen 也不进位。
+# 真实后果：带旧 gen 的坐标照样放行 ⇒ 拿旧坐标点新画面（本仓头号事故）。
+_real_gen_Z = _windows_gen_bump
+
+
+def _windows_gen_bump(wins):                                # noqa: F811  故意覆盖真版
+    return 1
+'''
+
+INJECT_EXPECT_OUTSIDE_OK = '''
+
+# ===== 以下为 窗Z 注入段（跑红自证专用，勿入产品代码）=====
+# 注入的缺陷：expect_region 与目标窗求交为空**不拒** —— 声明写到别人窗里也照发。
+# 真实后果：agent 学会「少声明混过验证」；成本护栏形同虚设。
+_real_op_E = _ownership_precheck
+
+
+def _ownership_precheck(args, hwnd, tool="ctl_click"):      # noqa: F811  故意覆盖真版
+    a2 = {k: v for k, v in args.items() if k != "expect_region"}
+    return _real_op_E(a2, hwnd, tool)
+'''
+
 INJECT = {
     # ★ 窗G2 的四个新注入（R3 那条通道的四根骨头各断一次）
     "ocr_wired": ("R3 根本没接线（OCR 三要素一律不接）", "append", INJECT_OCR_WIRED),
@@ -1405,6 +1502,17 @@ INJECT = {
     "diff_always_true": ("after.diff 恒报 changed=True", "append", INJECT_DIFF_ALWAYS_TRUE),
     "deny_window_bypass": ("敏感窗终判被旁路（永远判未命中）", "authstate",
                           INJECT_DENY_WINDOW_BYPASS),
+    # ★ 窗Z（P0 神经层）的五个注入：三条钉「归属/判词」，两条钉「代际/区域声明」
+    "hit_after_send": ("归属改成事后判（发送瞬间的前置闸被拿掉）", "append",
+                       INJECT_HIT_AFTER_SEND),
+    "verdict_always_met": ("变化全在判定区外也报 met（世界自己动的冒充成我做的）", "append",
+                           INJECT_VERDICT_ALWAYS_MET),
+    "unknown_as_noeffect": ("观测失败写成 no_effect（我没看见冒充我看见了没变）", "append",
+                            INJECT_UNKNOWN_AS_NOEFFECT),
+    "gen_frozen": ("窗口快照代际钉死（窗口移动了 gen 也不进位）", "append",
+                   INJECT_GEN_FROZEN),
+    "expect_outside_ok": ("expect_region 声明到别人窗里也不拒", "append",
+                          INJECT_EXPECT_OUTSIDE_OK),
 }
 
 
@@ -4308,6 +4416,217 @@ def check_auth_merge(core, fx):
 
 
 # ======================================================================
+# S12 · P0 神经层（窗Z）
+# ======================================================================
+def check_neural_p0(core, fx):
+    '''S12 · P0 神经层（窗Z）：发送瞬间归属前置闸 + 因果判词 + 同步窗快照代际。
+
+    三件被测事实（只换 I/O 边界，产品判定逻辑一行不改）：
+      ① 归属前置闸：`WindowFromPoint` 的顶层 ∉ 目标窗树 ⇒ **发送之前**就拒，
+         回执点名遮挡者，且 act.py 一次都没被 spawn（「零像素」）；
+      ② 因果判词：变化区与判定区求交为空 ⇒ `changed_outside_target`（不许报 met）；
+         观测失败（changed=None）⇒ `unknown`（≠ no_effect，不许报 no_effect）；
+      ③ 同步窗快照代际：窗口移动 ⇒ gen 递增，带旧 gen 的动作/查询 ⇒ code=12。
+
+    ★ 只换 I/O 边界：`_legacy`（不起真子进程）、`_act_grab`/`_act_diff_of`/
+      `_act_diff_store`（不截图不落盘）、`_win_rect`/`_win_at_point`/`_windows_snapshot`/
+      `_perceive`（真窗环境假）。**`_ownership_precheck`/`_causal_verdict`/
+      `_windows_gen_bump` 全是现役真代码** —— 换掉的只有「怎么拿事实」，判定口径没换。
+    '''
+    reds = []
+    ev = {}
+    H = FAKE_HWND
+    RECT = [0, 0, 1280, 900]
+    OCC = 777001
+
+    _saved = {}
+    for _k in ("_act", "_legacy", "_act_grab", "_act_diff_of", "_act_diff_store",
+               "_win_rect", "_win_at_point", "_windows_snapshot", "_perceive"):
+        _saved[_k] = core.__dict__.get(_k)
+    _saved["WIN_GEN"] = core.__dict__.get("WIN_GEN")
+
+    spawns = []
+    box = {"hit": None, "diff": None, "snap": None}
+
+    def 假legacy(name, argv, timeout=60):
+        spawns.append((name, list(argv)))
+        return 0, "假 act.py：动作发出去了", ""
+
+    def 假diff(before, after, win_off=None, ignore=None):
+        return dict(box["diff"] or {})
+
+    def 假snapshot():
+        return list(box["snap"] or [])
+
+    # 归属事实：OWNED = 顶层就是目标窗自身；OCCLUDED = 顶层是另一个窗。
+    OWNED = {"hwnd": H, "root": H, "class": "Tk", "title": "靶窗",
+             "chain": [{"hwnd": H, "class": "Tk", "title": "靶窗"}]}
+    OCCLUDED = {"hwnd": OCC, "root": OCC, "class": "#32770", "title": "本地搜索",
+                "chain": [{"hwnd": OCC, "class": "#32770", "title": "本地搜索"}]}
+
+    core._legacy = 假legacy
+    core._win_rect = lambda h: list(RECT)
+    core._win_at_point = lambda x, y: box["hit"]
+    core._windows_snapshot = 假snapshot
+    core._act_grab = lambda h: None
+    core._act_diff_of = 假diff
+    core._act_diff_store = lambda fid, b, a, d: {}
+    core._perceive = lambda args, extra: {"ok": True, "code": 0,
+                                          "data": {"窗口数": 1, "窗口": []}}
+    core.WIN_GEN = {"n": 0, "sig": ""}
+
+    ARGV = ["click", "--hwnd", str(H), "--xy", "500,400", "--coord"]
+
+    def 动手(extra=None):
+        a = {"hwnd": H, "xy": [500, 400], "actor": "判据S12",
+             "frame_id": "fv1", "_need_diff": True}
+        if extra:
+            a.update(extra)
+        return core._act("click", a, list(ARGV))
+
+    try:
+        # ── ① 归属前置闸：归目标 ⇒ 放行；被盖住 ⇒ 发送之前就拒 + 点名遮挡者 + 零像素
+        box["hit"] = OWNED
+        box["diff"] = {"changed": True, "bbox": [60, 60, 20, 20], "_local": None,
+                       "说明": "命中区内变化"}
+        n0 = len(spawns)
+        r_ok = 动手()
+        af_ok = (r_ok.get("data") or {}).get("after") or {}
+        ev["①归目标"] = {"ok": r_ok.get("ok"), "code": r_ok.get("code"),
+                     "verdict": af_ok.get("verdict"), "spawn": len(spawns) - n0}
+        need(r_ok.get("ok") is True,
+             "① 落点归目标却被拒（code=%s）：%s"
+             % (r_ok.get("code"), (r_ok.get("warning") or "")[:160]), reds)
+        need(len(spawns) - n0 == 1,
+             "① 归目标的那次没把动作发出去（spawn %d）" % (len(spawns) - n0), reds)
+
+        box["hit"] = OCCLUDED
+        n1 = len(spawns)
+        r_bad = 动手()
+        d_bad = r_bad.get("data") or {}
+        occ = ((d_bad.get("归属") or {}).get("遮挡者") or {})
+        ev["①被盖住"] = {"ok": r_bad.get("ok"), "code": r_bad.get("code"),
+                     "blocked_by": d_bad.get("blocked_by"), "遮挡者": occ,
+                     "spawn": len(spawns) - n1}
+        need(r_bad.get("ok") is False,
+             "① 目标窗被『%s』盖住，动作却照样发出去了（ok=%r）"
+             % (OCCLUDED["title"], r_bad.get("ok")), reds)
+        need(r_bad.get("code") == 12,
+             "① 归属拒绝该落 code=12，实得 %r" % r_bad.get("code"), reds)
+        need(d_bad.get("blocked_by") == "wrong_target",
+             "① 拒绝没点名 blocked_by=wrong_target：%r" % d_bad.get("blocked_by"), reds)
+        need(int(occ.get("hwnd") or 0) == OCC and occ.get("title") == OCCLUDED["title"],
+             "① 回执没点名遮挡者身份（%r）—— agent 得知道该关哪个窗" % occ, reds)
+        need(len(spawns) == n1,
+             "① 归属判定**不是发送之前**做的：拒了还是 spawn 了 act.py（%d 次）—— "
+             "点击的激活副作用早在看到回执前就发生了" % (len(spawns) - n1), reds)
+        need("遮挡" in str(r_bad.get("warning") or "")
+             or OCCLUDED["title"] in str(r_bad.get("warning") or ""),
+             "① 拒绝文案没把「被谁盖住」说清：%s" % (r_bad.get("warning") or "")[:160], reds)
+
+        # ── ② 因果判词：变化全在判定区之外 ⇒ changed_outside_target（不许报 met/成功）
+        box["hit"] = OWNED
+        box["diff"] = {"changed": True, "bbox": [2000, 2000, 60, 60], "_local": None,
+                       "说明": "变化全在窗口外"}
+        r2 = 动手()
+        af2 = (r2.get("data") or {}).get("after") or {}
+        vd2 = af2.get("verdict")
+        ev2 = af2.get("verdict_evidence") or {}
+        ev["②窗外变化"] = {"verdict": vd2, "ok": r2.get("ok"), "code": r2.get("code"),
+                      "changed_outside_pct": ev2.get("changed_outside_pct")}
+        need(vd2 == "changed_outside_target",
+             "② 变化区与判定区求交为空，判词应是 changed_outside_target，实得 %r" % vd2, reds)
+        need(r2.get("ok") is not True,
+             "② 世界自己动的变化被当成我这次动作的成功（ok=%r）" % r2.get("ok"), reds)
+        need(r2.get("code") == 8,
+             "② changed_outside_target 该落 code=8 伞码，实得 %r" % r2.get("code"), reds)
+        need(ev2.get("changed_outside_pct") == 100.0,
+             "② changed_outside_pct 应为 100.0，实得 %r" % ev2.get("changed_outside_pct"), reds)
+
+        # ── ③ 观测失败 ⇒ unknown（≠ no_effect）；对照：确认没变 ⇒ no_effect_in_region
+        box["diff"] = {"changed": None, "bbox": None, "说明": "抓屏失败/没测出来"}
+        r3 = 动手()
+        af3 = (r3.get("data") or {}).get("after") or {}
+        vd3 = af3.get("verdict")
+        ev["③观测失败"] = {"verdict": vd3, "ok": r3.get("ok"), "code": r3.get("code"),
+                      "warning": (r3.get("warning") or "")[:120]}
+        need(vd3 == "unknown",
+             "③ 抓屏失败（changed=None）判词应是 unknown，实得 %r —— "
+             "「我没看见」不许写成「我看见了没变」" % vd3, reds)
+        need(r3.get("code") != 8,
+             "③ 观测失败却落了 code=8（no_change 伞码）—— 把「没看见」说成了「没变」", reds)
+        box["diff"] = {"changed": False, "bbox": None, "说明": "逐像素比对无变化"}
+        r3b = 动手()
+        vd3b = ((r3b.get("data") or {}).get("after") or {}).get("verdict")
+        ev["③确认没变"] = {"verdict": vd3b, "ok": r3b.get("ok"), "code": r3b.get("code")}
+        need(vd3b == "no_effect_in_region",
+             "③ 确认没变（changed=False）判词应是 no_effect_in_region，实得 %r —— 三态塌了"
+             % vd3b, reds)
+
+        # ── ④ 同步窗快照代际：窗口移动 ⇒ gen 递增；带旧 gen 的查询/动作 ⇒ code=12
+        core.WIN_GEN = {"n": 0, "sig": ""}
+        SNAP_A = [{"hwnd": 5001, "pid": 0, "class": "Tk", "title": "靶窗",
+                   "rect": [0, 0, 400, 300], "z_index": 0, "is_foreground": True,
+                   "minimized": False, "cloaked": False}]
+        SNAP_B = [dict(SNAP_A[0], rect=[100, 50, 400, 300])]
+        box["snap"] = SNAP_A
+        r4a = core.t_windows({"limit": 40})
+        g1 = (r4a.get("data") or {}).get("gen")
+        box["snap"] = SNAP_B
+        r4b = core.t_windows({"limit": 40, "gen": g1})
+        d4b = r4b.get("data") or {}
+        ev["④gen"] = {"首次gen": g1, "移动后gen": d4b.get("gen"),
+                  "旧gen回传ok": r4b.get("ok"), "code": r4b.get("code"),
+                  "blocked_by": d4b.get("blocked_by")}
+        need(bool(g1), "④ 首次 ctl_windows 没给 gen", reds)
+        need(d4b.get("gen") == int(g1 or 0) + 1,
+             "④ 窗口移动后 gen 应递增到 %s，实得 %r"
+             % (int(g1 or 0) + 1, d4b.get("gen")), reds)
+        need(r4b.get("code") == 12 and d4b.get("blocked_by") == "stale_window_gen",
+             "④ 带旧 gen 的 ctl_windows 该拒 code=12/stale_window_gen，实得 code=%r by=%r"
+             % (r4b.get("code"), d4b.get("blocked_by")), reds)
+        box["hit"] = OWNED
+        r4c = 动手({"window_gen": g1})
+        d4c = r4c.get("data") or {}
+        ev["④带旧gen动作"] = {"ok": r4c.get("ok"), "code": r4c.get("code"),
+                        "blocked_by": d4c.get("blocked_by")}
+        need(r4c.get("code") == 12 and d4c.get("blocked_by") == "stale_window_gen",
+             "④ 带旧 gen 的坐标动作该被前置拒（code=12/stale_window_gen），实得 code=%r by=%r"
+             % (r4c.get("code"), d4c.get("blocked_by")), reds)
+
+        # ── ⑤ expect_region 声明在目标窗之外 ⇒ 前置拒；在目标窗里 ⇒ 放行
+        box["hit"] = OWNED
+        box["diff"] = {"changed": True, "bbox": [120, 120, 20, 20], "_local": None,
+                       "说明": "命中区内变化"}
+        r5 = 动手({"expect_region": [2000, 2000, 50, 50]})
+        d5 = r5.get("data") or {}
+        ev["⑤区域在别人窗里"] = {"ok": r5.get("ok"), "code": r5.get("code"),
+                          "blocked_by": d5.get("blocked_by")}
+        need(r5.get("ok") is False and r5.get("code") == 12,
+             "⑤ expect_region 与目标窗求交为空却没前置拒（ok=%r code=%r）"
+             % (r5.get("ok"), r5.get("code")), reds)
+        need(d5.get("blocked_by") == "expect_region_outside_target",
+             "⑤ 拒绝没点名 blocked_by=expect_region_outside_target：%r" % d5.get("blocked_by"), reds)
+        need("零像素" in str(r5.get("warning") or ""),
+             "⑤ 拒绝文案该明说本次零像素：%s" % (r5.get("warning") or "")[:160], reds)
+        r5b = 动手({"expect_region": [100, 100, 50, 50]})
+        ev["⑤区域在目标窗里"] = {"ok": r5b.get("ok"), "code": r5b.get("code"),
+                          "verdict": ((r5b.get("data") or {}).get("after") or {}).get("verdict")}
+        need(r5b.get("ok") is True,
+             "⑤ expect_region 落在目标窗里却被拒（code=%s）：%s"
+             % (r5b.get("code"), (r5b.get("warning") or "")[:160]), reds)
+    finally:
+        for _k, _v in _saved.items():
+            if _v is None:
+                continue
+            try:
+                setattr(core, _k, _v)
+            except Exception:
+                pass
+    return "S12 P0 神经层（归属/判词/gen）", reds, ev
+
+
+# ======================================================================
 # main
 # ======================================================================
 def main():
@@ -4365,7 +4684,9 @@ def main():
                      ("(11) P0 输入通道（focus/keys/frame_id/after.diff）",
                       lambda: check_input_channel(core, fx)),
                      ("(12) 授权合并 · 敏感窗服务端终判",
-                      lambda: check_auth_merge(core, fx))):
+                      lambda: check_auth_merge(core, fx)),
+                     ("S12 P0 神经层（归属/判词/gen）",
+                      lambda: check_neural_p0(core, fx))):
         _nb = len(W1_BLOCKED)
         title, reds, ev = fn()
         res[title] = reds
@@ -4477,6 +4798,9 @@ def main():
               "expect_uid 对得上才点、对不上拒且一个像素没点、"
               "点完 after.uid_state 归因正确（文字变 TEXT_CHANGED、结构变 STALE）、"
               "滚出视口的对象仍可点（复核取超集）；"
+              "S12P0神经层：目标窗被盖住⇒发送之前就拒且回执点名遮挡者（act.py 零 spawn）、"
+              "变化全在判定区外⇒changed_outside_target（不报成功）、观测失败⇒unknown（≠no_effect）、"
+              "窗口移动⇒gen 递增且带旧 gen 的动作/查询 code=12、expect_region 落在别人窗里⇒前置拒；"
               "S9OCR接线：像素里认出且框能当锚⇒R3真且must_vlm=false（R2不成立时单独扛）、"
               "引擎不可用/超时⇒如实false并写进blind_spots（不等于「页面没有」）、"
               "words≤80且omitted.total诚实、dpi_scale在、bbox越界⇒usable=false、"

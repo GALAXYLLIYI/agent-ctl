@@ -171,7 +171,9 @@ def find_options(im, verbose=False):
 if __name__ == "__main__":
     import glob
     import os
-    for p in sys.argv[1:] or sorted(glob.glob(os.path.join(os.environ.get("AGENTCTL_SHOTS_DIR", ""), "*_win2754900.png")))[-1:]:
+    _shots = os.environ.get("AGENTCTL_SHOTDIR") or os.path.join(
+        os.path.expanduser("~"), "Documents", "agent-manual", "_监控", "shots")
+    for p in sys.argv[1:] or sorted(glob.glob(os.path.join(_shots, "*_win2754900.png")))[-1:]:
         im = Image.open(p)
         print("=" * 66)
         print("图: %s  %s" % (os.path.basename(p), im.size))

@@ -41,8 +41,13 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # ★ 2026-10-17（用户裁：**不公开用户名**）：本文件会进公开仓，不能再把本机路径写死。
 #   工作区 = 仓根的上一级，由仓根推导；可用 AGENTCTL_WORKSPACE 覆盖（工作区搬走时）。
 WORKSPACE = os.environ.get("AGENTCTL_WORKSPACE") or os.path.dirname(ROOT)
+# ★ 窗 X（2026-10-18）**方向反转**：真源从「仓外」收进「仓内」。
+#   改前 SRC = <WORKSPACE>\dsh-viewer-plugin\tools（仓外），改后 = <ROOT>\legacy_tools\_src。
+#   为什么真源不能就放在 legacy_tools 根下：产物也在那里，
+#   下次 --out legacy_tools 会**覆写真源**（自我覆写自己）。只能用子目录分开。
+#   ⛔ AGENTCTL_LEGACY_SRC 保留为覆写口：要对照别的老线副本时仍能指回去。
 SRC = os.environ.get("AGENTCTL_LEGACY_SRC") or os.path.join(
-    WORKSPACE, "dsh-viewer-plugin", "tools")
+    ROOT, "legacy_tools", "_src")
 # ★ D1：双基线台账 —— A₀（上次生成时产物的规范化 md5）与 T₀（生成时真源的规范化 md5）记在这。
 #   台账**必须进 git**（G3 边界③：台账不在仓 = 基线可被无声篡改 = 共谋）。.gitignore 有专门白名单行。
 LEDGER_DEFAULT = os.path.join(ROOT, "tools", "legacy_ledger.json")

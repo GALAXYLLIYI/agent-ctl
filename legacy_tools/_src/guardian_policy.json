@@ -1,0 +1,141 @@
+{
+  "_说明": "守护脚本阈值与白名单。改这里就能调行为，无需改代码。给人审的文件。",
+  "_采样": {
+    "快采样秒": 2,
+    "慢采样秒": 15,
+    "进程扫描秒": 15
+  },
+  "_阈值说明": "三档：[注意, 偏高, 危险]；可用物理/零页表是『低于』触发，差额是『高于』触发 ｜2026-09-17 20:14 差额线由[5,8,12]改为[8,14,22]：实测健康基线4.7~5.0GB，原线贴着基线会反复误报；增速判据仍在0.8GB/h就报，早期预警不靠绝对值。",
+  "阈值": {
+    "可用物理MB": [
+      3500,
+      1500,
+      600
+    ],
+    "零页表MB": [
+      20,
+      8,
+      2
+    ],
+    "未归属差额GB": [
+      8,
+      14,
+      22
+    ],
+    "提交使用率百分比": [
+      65,
+      80,
+      90
+    ],
+    "单进程增速MB每分": [
+      300,
+      600,
+      1000
+    ],
+    "未归属差额增速GB每小时": [
+      0.8,
+      1.5,
+      3.0
+    ],
+    "单进程句柄数": [
+      20000,
+      50000,
+      100000
+    ],
+    "全系统句柄数": [
+      200000,
+      350000,
+      500000
+    ]
+  },
+  "_白名单说明": "只有 --enforce 模式才处置；只允许对下列『进程名 + 命令行关键字』都命中的进程动手；动作仅限清工作集/降优先级",
+  "白名单": [
+    {
+      "进程名": "python.exe",
+      "命令行含": "dsh-viewer-plugin",
+      "动作": [
+        "清工作集"
+      ]
+    },
+    {
+      "进程名": "python.exe",
+      "命令行含": "monitor_resources",
+      "动作": [
+        "清工作集"
+      ]
+    },
+    {
+      "进程名": "node.exe",
+      "命令行含": "agent-manual",
+      "动作": [
+        "清工作集"
+      ]
+    }
+  ],
+  "_永不触碰说明": "硬性保护：命中即跳过（哪怕在别的规则里被允许）",
+  "永不触碰": [
+    "explorer.exe",
+    "powershell.exe",
+    "pwsh.exe",
+    "cmd.exe",
+    "wps.exe",
+    "wpscloudsvr.exe",
+    "ksolaunch.exe",
+    "TRAE SOLO CN.exe",
+    "msedge.exe",
+    "msedgewebview2.exe",
+    "dwm.exe",
+    "MsMpEng.exe",
+    "sqlservr.exe",
+    "System",
+    "Registry",
+    "DeepSeek Harness.exe",
+    "ollama.exe",
+    "GameViewer.exe",
+    "GameViewerHealthd.exe",
+    "GameViewerServer.exe",
+    "GameViewerService.exe",
+    "NVDisplay.Container.exe",
+    "NVIDIA Overlay.exe",
+    "VNCef43SubProcess.exe",
+    "nvcontainer.exe",
+    "nvidia-smi.exe",
+    "bf6.exe",
+    "bf6",
+    "battlefield",
+    "leigod",
+    "leigodacc",
+    "uugame",
+    "uu.exe",
+    "steam.exe",
+    "steamwebhelper.exe",
+    "eaapp.exe",
+    "eadesktop.exe",
+    "origin.exe",
+    "bf6launcher",
+    "mstsc.exe",
+    "ToDesk.exe",
+    "ToDesk_Service.exe",
+    "ToDesk_Session.exe",
+    "SunloginClient.exe",
+    "AnyDesk.exe",
+    "RustDesk.exe"
+  ],
+  "急停文件": "%LOCALAPPDATA%/AgentCtl/_急停.flag",
+  "_急停说明": "此文件存在 = 立即停止一切处置（仍继续采样）",
+  "日志目录": "<工作区>/agent-manual/_监控",
+  "_DSH保护区间": "★ 保护区（2026-09-26 用户指示）：本体 DSH = DeepSeek Harness.exe（桌面端 8 进程，实测合计约 1.56GB）+ ollama.exe（跑本地模型时不得清其工作集，否则等于把模型赶出显存）。二者列入『永不触碰』，硬性跳过。内存区间：可用物理 >= 3.5GB 视为健康；< 3.5 / 1.5 / 0.6 GB 分别 注意 / 偏高 / 危险。提交使用率 < 65 / 80 / 90%。DSH 自身在告警时属『不受处置对象』，只提醒不触碰。",
+  "_远程与显卡保护说明": "★ 2026-09-26 用户指示追加：远程控制进程（GameViewer 系列）与显卡相关进程（NVIDIA Overlay、NVDisplay.Container 等）一律硬性保护。理由：远程进程被结束 = 用户的远程会话当场断开；显卡容器/驱动被处置会影响本地大模型推理（模型跑在 GPU 显存上）。教训：清单上「内存占用大」不等于「可以清」——动手前必须问清楚这个进程在替谁干活。",
+  "_命脉保护说明": "★★★ 绝对红线（2026-09-30 用户原话：「别把远程关了就行」）。本机通过 ToDesk 的 GameViewer 远程使用；GameViewer 四件套 + DeepSeek Harness.exe 已在『永不触碰』里，守护脚本硬性跳过。此外一律禁止：杀/停/禁这些进程或服务、断网、改 IP/DNS/代理、shutdown/logoff/重启/睡眠、改分辨率/刷新率/多屏、锁屏、跑全屏独占程序。冲突处理：停手并报告，不许『试一下再说』——远程一断无带外通道可救。自检口诀：『这一步会不会让我看不见屏幕？』会 → 不做。详见 tools\\★远程命脉保护清单.md",
+  "_命脉进程清单": [
+    "GameViewer.exe",
+    "GameViewerServer.exe",
+    "GameViewerService.exe",
+    "GameViewerHealthd.exe",
+    "ToDesk.exe",
+    "DeepSeek Harness.exe",
+    "ollama.exe",
+    "NVDisplay.Container.exe",
+    "dwm.exe"
+  ]
+}

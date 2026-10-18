@@ -17,6 +17,22 @@ r"""gate.py —— AgentCtl 的安全内核：闸门（原子）＋ 急停 ＋ �
     gate.require("B", "点击保存")            # 不过就抛 GateDenied
     lic = gate.acquire_lease("DSH", ["B"], 600)
     gate.release_lease(lic)
+
+★ 双 gate 分工契约（窗 X · 2026-10-18 写定，别再当成两份重复实现）
+   —— 本文件与 `legacy_tools\gate.py` **名字相同、职责不同**，是上下两层，不是第二真源：
+     · **本文件 = 编排层，唯一真相**：闸门原子性、租约（lease）、急停 set/clear、
+       观测-动作绑定（capture）、以及 `deny_target` 敏感窗终判。**改这些只改这里。**
+     · `legacy_tools\gate.py` = **随包执行层**，只做 act.py / perceive.py 直接 import 的那几件事
+       （读闸、放行、刹车、--status CLI）。**它随包发、装在别人机器上，不能反过来依赖 src\。**
+     · 两份的**跨进程锁唯一定义处都是 `gate_lock.py`**（D18），存储也都是 `_auth\auth_pass.json`，
+       所以「用户的授权」只有一份账。
+   ⚠ **已知分歧（未修，待 DSH 裁）**：两份的 AUTHDIR 解析方式**不同** ——
+     本文件 L379 `AUTHDIR = HOME/_auth`（HOME 走 `_resolve_home()` 四层查找：env / meipass /
+     指针 / 源码上溯）；老线 L43 `AUTHDIR = HERE/_auth`（HERE = gate.py 所在目录）。
+     两者**同处一个 legacy_tools 目录时相等**，一旦新线解析到别的 home（env 层或指针层指定了
+     另一份），就会读**两份不同的 auth_pass.json** ⇒ 判档口径当场分裂成两处。
+     急停不受影响：两份的 BRAKE_FLAG 都走 `AGENTCTL_APP_DIR`，恒同源。
+     要修的话改本文件的 HOME 解析或老线的 AUTHDIR，**不能各改一半**。
 """
 from __future__ import annotations
 

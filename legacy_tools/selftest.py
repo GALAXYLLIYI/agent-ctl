@@ -22,12 +22,9 @@ except Exception:
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PY = sys.executable
-# ★ 默认写进 %LOCALAPPDATA%\AgentCtl\shots，不写死本机路径。
-#   平台进程会用 AGENTCTL_SHOTS_DIR（或直接注入 SHOTDIR）指过来，
-#   这里只是「独立跑这个脚本时」的兜底，指向同一个地方。
-_APP_DIR = os.environ.get("AGENTCTL_APP_DIR") or os.path.join(
-    os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "AgentCtl")
-SHOTS = os.environ.get("AGENTCTL_SHOTS_DIR") or os.path.join(_APP_DIR, "shots")
+_MON = (os.environ.get("AGENTCTL_MONITOR_DIR")
+        or os.path.join(os.path.expanduser("~"), "Documents", "agent-manual", "_监控"))
+SHOTS = os.path.join(_MON, "shots")
 
 OK, FAIL, SKIP = [], [], []
 
@@ -167,7 +164,7 @@ def t_manual_footer():
     bad = []
     seen = 0                      # ★2026-10-12：数一遍到底查了几个文件
     for f in ("SKILLS.md", "LOG.md"):
-        p = os.path.join(os.environ.get("AGENTCTL_MANUAL_DIR", ""), f)
+        p = os.path.join(os.path.dirname(_MON), f)
         if not os.path.exists(p):
             continue
         seen += 1

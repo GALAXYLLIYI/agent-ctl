@@ -1014,8 +1014,406 @@ def _perceive(args: dict, extra: list[str]) -> dict:
     return env(ok=True, code=0, data=data)
 
 
+# ══════════════════════════════════════════════════════════════════════
+# P0 神经层（窗Z · 2026-10-18）—— 归属 / 代际 / 因果判词
+#
+# 依据：work\dispatch_Z_神经层P0.md ＋ work\_三方审议_神经层_合流_20261018.md
+#   · 根因不是「缺眼睛」，是缺**绑定**：像素↔结构化身份（这点归谁）、
+#     动作↔世界增量（我做的和我看到的对不对得上）；
+#   · 归属由**感知层报事实**（WindowFromPoint 只作证据，拿它当决策就是重犯老坑）；
+#   · 动作层只报「发了」（因果/预期），不许把「发了」冒充「成了」；
+#   · 协议必须**三态**：存在 / 确认缺席（只在覆盖区内成立）/ **未知**；
+#   · 决策前必须一次**原子快照对账**（轮询是真相，钩子只提示；本期不做 WinEventHook）。
+# ⛔ 本块只落在 core.py：不动 gate.py / legacy_tools\（另一窗独占）。
+#    只用 gate 的**既有**常量与函数，不新增 gate 侧定义。
+# ══════════════════════════════════════════════════════════════════════
+WIN_GEN = {"n": 0, "sig": ""}     # 窗口快照代际：**服务端签发、append-only（只增不减）**
+
+
+def _win_text_cls(hwnd):
+    """窗口的 (title, class)。取不到就给空串 —— **不编占位值**。"""
+    try:
+        import win32gui                                    # noqa: PLC0415
+        return (win32gui.GetWindowText(int(hwnd)) or "",
+                win32gui.GetClassName(int(hwnd)) or "")
+    except Exception:
+        pass
+    try:
+        import ctypes                                      # noqa: PLC0415
+        u32 = ctypes.WinDLL("user32", use_last_error=True)
+        t = ctypes.create_unicode_buffer(512)
+        c = ctypes.create_unicode_buffer(256)
+        u32.GetWindowTextW(int(hwnd), t, 512)
+        u32.GetClassNameW(int(hwnd), c, 256)
+        return (t.value or "", c.value or "")
+    except Exception:
+        return ("", "")
+
+
+def _windows_snapshot():
+    """**同步原子快照**：一次 EnumWindows 走完，逐窗取 rect / z 序 / 前台 / 最小化 / cloaked。
+
+    ★ 为什么是「快照」不是「事件流」：钩子只能当唤醒提示，决策前必须**对一次账**。
+      快照就是那一次对账（「无事件 = 没变」是本项目明令禁止的推理）。
+    ★ 事件清单要含**移动 / 最小化 / 飞出屏外**（`-21333` 那条现场就是「移动」，
+      既不是新建也不是改尺寸）⇒ rect 原样进快照，飞出屏外的窗**照收**。
+    ★ 取不到 ⇒ None。**观测失败不编** —— 绝不返回一张空列表冒充「桌面上没有窗口」。
+    """
+    try:
+        import ctypes                                      # noqa: PLC0415
+        from ctypes import wintypes                        # noqa: PLC0415
+        u32 = ctypes.WinDLL("user32", use_last_error=True)
+        dwm = ctypes.WinDLL("dwmapi", use_last_error=True)
+    except Exception:
+        return None
+
+    hwnds = []
+    _CB = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+    def _cb(h, _l):
+        hwnds.append(int(h))
+        return True
+
+    try:
+        if not u32.EnumWindows(_CB(_cb), 0):
+            return None
+    except Exception:
+        return None
+    try:
+        fg = int(u32.GetForegroundWindow() or 0)
+    except Exception:
+        fg = 0
+    out = []
+    for z, h in enumerate(hwnds):
+        try:
+            if not u32.IsWindowVisible(wintypes.HWND(h)):
+                continue
+        except Exception:
+            continue
+        try:
+            r = wintypes.RECT()
+            if not u32.GetWindowRect(wintypes.HWND(h), ctypes.byref(r)):
+                continue
+            rect = [int(r.left), int(r.top), int(r.right), int(r.bottom)]
+        except Exception:
+            continue
+        try:
+            mini = bool(u32.IsIconic(wintypes.HWND(h)))
+        except Exception:
+            mini = False
+        cl = 0
+        try:
+            v = wintypes.DWORD(0)
+            # DWMWA_CLOAKED = 14（UWP/虚拟桌面隐藏的窗：看得见「存在」，但不在屏上）
+            if dwm.DwmGetWindowAttribute(wintypes.HWND(h), wintypes.DWORD(14),
+                                         ctypes.byref(v), ctypes.sizeof(v)) == 0:
+                cl = int(v.value or 0)
+        except Exception:
+            cl = 0
+        t, c = _win_text_cls(h)
+        out.append({"hwnd": int(h), "pid": 0, "class": c, "title": t,
+                    "rect": rect, "z_index": int(z),
+                    "is_foreground": bool(fg and h == fg),
+                    "minimized": mini, "cloaked": bool(cl)})
+    return out
+
+
+def _windows_sig(wins) -> str:
+    """快照签名：只吃「事实字段」，不吃回显顺序（否则每调一次都像变了）。"""
+    import hashlib as _hl
+    blob = json.dumps([[w.get("hwnd"), w.get("class"), w.get("title"),
+                        list(w.get("rect") or []), int(w.get("z_index") or 0),
+                        bool(w.get("is_foreground")), bool(w.get("minimized")),
+                        bool(w.get("cloaked"))] for w in (wins or [])],
+                      ensure_ascii=False, sort_keys=True).encode("utf-8")
+    return _hl.sha256(blob).hexdigest()[:16]
+
+
+def _windows_gen_bump(wins) -> int:
+    """签一代：快照签名变了 ⇒ 进位一（**append-only**，从不回退）。
+
+    ★ 为什么必须单调：坐标/rect 都带 `gen N`，当前 gen 已 bump ⇒ 老坐标**直接作废**。
+      没有代际机制，加多少事件流都救不了「窗口动过、缓存坐标全死」这件事。
+    """
+    sig = _windows_sig(wins)
+    if sig != WIN_GEN.get("sig"):
+        WIN_GEN["n"] = int(WIN_GEN.get("n") or 0) + 1
+        WIN_GEN["sig"] = sig
+    return int(WIN_GEN.get("n") or 0)
+
+
+def _win_at_point(x, y):
+    """发送瞬间的归属**事实**：`WindowFromPoint(x,y)` → `GetAncestor(GA_ROOT)`。
+
+    ★ 只报事实，不作决策（三方共识第 3 条：归属由感知层报）。
+    ★ 我们自己的边框/高亮层是 `WS_EX_TRANSPARENT + HTTRANSPARENT`（w3 用例 13 实测穿透）
+      ⇒ `WindowFromPoint` **会自动跳过提示层**，不会污染归属判定。
+    ★ 取不到 ⇒ None。**不编一个「没有遮挡」** ——「没看见」不等于「没有」。
+    返回 {hwnd, root, class, title, chain}；chain = 从顶层到命中窗的那一串
+    （agent 一眼看出「该关哪个窗」）。
+    """
+    try:
+        import ctypes                                      # noqa: PLC0415
+        from ctypes import wintypes                        # noqa: PLC0415
+        u32 = ctypes.WinDLL("user32", use_last_error=True)
+
+        class POINT(ctypes.Structure):
+            _fields_ = [("x", wintypes.LONG), ("y", wintypes.LONG)]
+
+        h = int(u32.WindowFromPoint(POINT(int(x), int(y))) or 0)
+        if not h:
+            return None
+        root = int(u32.GetAncestor(wintypes.HWND(h), 2) or h)      # GA_ROOT = 2
+        chain, cur, guard = [], h, 0
+        while cur and guard < 16:
+            t, c = _win_text_cls(cur)
+            chain.append({"hwnd": int(cur), "class": c, "title": t})
+            if int(cur) == root:
+                break
+            cur = int(u32.GetParent(wintypes.HWND(cur)) or 0)
+            guard += 1
+        chain.reverse()                                    # 顶层在前
+        t0, c0 = _win_text_cls(h)
+        return {"hwnd": int(h), "root": root, "class": c0, "title": t0, "chain": chain}
+    except Exception:
+        return None
+
+
+def _rect_xyxy(r, *, wh: bool = False):
+    """归一化成 (x0,y0,x1,y1)。`wh=True` 时按 [x,y,w,h] 解（diff bbox / expect_region）。
+
+    非法 / 空矩形 ⇒ None（**没有面积就没有归属可言**，不拿它当「全屏」）。
+    """
+    if not r or len(r) < 4:
+        return None
+    try:
+        a, b, c, d = [int(v) for v in list(r)[:4]]
+    except Exception:
+        return None
+    if wh:
+        c, d = a + c, b + d
+    x0, x1 = (a, c) if a <= c else (c, a)
+    y0, y1 = (b, d) if b <= d else (d, b)
+    if x1 <= x0 or y1 <= y0:
+        return None
+    return (x0, y0, x1, y1)
+
+
+def _rect_inter(a, b):
+    """矩形求交（xyxy）。空 ⇒ None。"""
+    if not a or not b:
+        return None
+    x0, y0 = max(a[0], b[0]), max(a[1], b[1])
+    x1, y1 = min(a[2], b[2]), min(a[3], b[3])
+    if x1 <= x0 or y1 <= y0:
+        return None
+    return (x0, y0, x1, y1)
+
+
+CAUSAL_VERDICTS = ("met", "no_effect_in_region", "changed_outside_target", "unknown")
+
+
+def _causal_verdict(diff, *, hit_rect=None, expect_region=None) -> dict:
+    """因果判词（后置验）：把「发了」与「成了」分开，**四态不许两态**。
+
+    verdict：
+      met                    变化落在「判定区」里 ⇒ 这次动作在**我声明的地方**见效
+      no_effect_in_region    确认没变（`diff.changed is False`）—— 不是「没看见」
+      changed_outside_target 画面**真变了**，但变化区与判定区求交为空（世界自己动了）
+      unknown                **观测失败**（抓屏失败 / 全空白 / 没测出来）⇒ **≠ no_effect**
+
+    ★ 判定区 = `expect_region`（给了就与命中窗求交）∩ 命中窗；没给就是命中窗本身。
+    ★ 成本护栏：全帧 diff 照算、窗外变化照报；`expect_region` **只细化判词**，
+      不许让「别处的大变化」消失（否则 agent 学会「少声明混过验证」）。
+    """
+    region = None
+    er = _rect_xyxy(expect_region, wh=True) if expect_region else None
+    hr = _rect_xyxy(hit_rect) if hit_rect else None
+    if er and hr:
+        region = _rect_inter(er, hr)
+    elif er:
+        region = er
+    else:
+        region = hr
+    d = diff if isinstance(diff, dict) else {}
+    ch = d.get("changed")
+    bb = _rect_xyxy(d.get("bbox"), wh=True)
+    ev = {"region": list(region) if region else None,
+          "changed_bbox": list(d.get("bbox")) if d.get("bbox") else None,
+          "changed_outside_pct": None,
+          "channel_diag": ""}
+    if ch is None:
+        ev["channel_diag"] = ("观测失败：%s ⇒ **unknown（观测失败）≠ no_effect** —— "
+                              "不许把「我没看见」写成「我看见了没变」（w3 12c 同款纪律）"
+                              % (d.get("说明") or "没拍前后快照"))
+        return {"verdict": "unknown", "verdict_evidence": ev}
+    if ch is False:
+        ev["changed_outside_pct"] = 0.0
+        ev["channel_diag"] = "确认没变：%s" % (d.get("说明") or "逐像素比对无变化")
+        return {"verdict": "no_effect_in_region", "verdict_evidence": ev}
+    if not region:
+        ev["channel_diag"] = ("画面真变了，但**拿不到判定区**（命中窗矩形不可读）⇒ "
+                              "只能说 unknown，不能说 met")
+        return {"verdict": "unknown", "verdict_evidence": ev}
+    if bb and _rect_inter(bb, region):
+        ev["changed_outside_pct"] = 0.0
+        ev["channel_diag"] = "变化区与判定区有交 ⇒ 在我声明的地方见效"
+        return {"verdict": "met", "verdict_evidence": ev}
+    _ix = _rect_inter(bb, region) if bb else None
+    _a_all = ((bb[2] - bb[0]) * (bb[3] - bb[1])) if bb else 0
+    _a_in = ((_ix[2] - _ix[0]) * (_ix[3] - _ix[1])) if _ix else 0
+    ev["changed_outside_pct"] = (round(100.0 * (1.0 - (float(_a_in) / float(_a_all))), 1)
+                                 if _a_all else 100.0)
+    ev["channel_diag"] = ("画面真变了，但变化区 %s 与判定区 %s 求交为空 ⇒ "
+                          "**世界自己动了，不是我这次动作的后果**（不许报成功）"
+                          % (ev["changed_bbox"], ev["region"]))
+    return {"verdict": "changed_outside_target", "verdict_evidence": ev}
+
+
+def _ownership_precheck(args: dict, hwnd: int, tool: str = "ctl_click"):
+    """发送瞬间的**归属前置闸**：不过就不发（一个像素都不动）。
+
+    返回 `(错误信封 | None, blind_spots 列表)`。三件，全在**发送之前**：
+
+      ① 代际：`window_gen` 给了且 ≠ 当前快照代际 ⇒ 拒（窗口动过了，坐标全死）。
+      ② 归属：`WindowFromPoint(x,y)` 的顶层 ∉ 目标窗树 ⇒ 拒，回执**点名遮挡者**
+         （`{hwnd, class, title, chain}`，让 agent 一眼知道该关哪个窗）。
+      ③ 区域声明：`expect_region` 与目标窗矩形求交为空 ⇒ 拒（声明写到了别人窗里）。
+
+    ⛔ 不做「事后小票」：点击的激活副作用在调用方看到回执之前就已经发生
+       （ZCode 顶回 opencode 的那一条）。
+    ★ 观测不到就直接说「**未判定**」并进 blind_spots，绝不编「没有遮挡」——
+      「没看见」不等于「没有」（三态纪律）。production 上 `_win_at_point` 是能取到的。
+    """
+    if args.get("dry_run"):
+        return None, []
+    blind = []
+
+    # ── ① 代际（坐标/rect 带的 gen 必须等于当前 gen）────────────────────
+    want = args.get("window_gen")
+    if want in (None, ""):
+        want = args.get("gen")
+    if want not in (None, ""):
+        snap = _windows_snapshot()
+        cur = _windows_gen_bump(snap) if snap is not None else None
+        if cur is None:
+            blind.append("窗口快照取不到 ⇒ **代际未判定**（不是「代际没变」）；"
+                         "本次坐标上带的 window_gen=%s 无从核对" % want)
+        elif str(want) != str(cur):
+            return env(code=gate.CODE_STALE_CAPTURE,
+                       data={"blocked_by": "stale_window_gen",
+                             "gen_校验": {"window_gen": want, "当前gen": cur,
+                                          "判定": "不匹配"},
+                             "gen_口径": ("gen 由服务端签发、append-only；窗口清单一动"
+                                          "（移动/最小化/新建/销毁/飞出屏外）就进位。"
+                                          "带旧 gen 的坐标**直接作废**，不许硬用。")},
+                       warning=("坐标上带的 window_gen=%s 与**当前**桌面快照代际 %s 对不上 "
+                                "⇒ 窗口清单动过了（移动/最小化/新建/销毁）。这份坐标已经作废，"
+                                "本次**零像素**。重新 ctl_windows 拿新的 gen 与 rect 再动手。"
+                                % (want, cur))), []
+    # ── ② 归属（发送瞬间；WindowFromPoint 只作证据）─────────────────────
+    xy = args.get("xy")
+    if xy:
+        x, y = _xy(xy)
+        w_xyxy = _rect_xyxy(_win_rect(hwnd))
+        if w_xyxy is None:
+            blind.append("归属**未判定**：读不到目标窗 hwnd=%s 的矩形（窗口已销毁/夹具）"
+                         "⇒ 本次没做归属前置闸，但**这不等于落点归目标**" % int(hwnd))
+        elif not (w_xyxy[0] <= x <= w_xyxy[2] and w_xyxy[1] <= y <= w_xyxy[3]):
+            blind.append("归属**未判定**：落点 (%s,%s) 不在目标窗矩形 %s 内 ⇒ 无从比对归属"
+                         "（act.py 自己的包含校验会拦这种点）" % (x, y, list(w_xyxy)))
+        else:
+            hit = _win_at_point(x, y)
+            if hit is None:
+                blind.append("归属**未判定**：WindowFromPoint 取不到落点 (%s,%s) 上的窗口 "
+                             "⇒ 「没看见」不等于「没有遮挡」" % (x, y))
+            else:
+                chain_hwnds = [int(n.get("hwnd") or 0) for n in (hit.get("chain") or [])]
+                if (int(hit.get("root") or 0) != int(hwnd)
+                        and int(hwnd) not in chain_hwnds):
+                    occ = {"hwnd": hit.get("hwnd"), "class": hit.get("class"),
+                           "title": hit.get("title")}
+                    return env(code=gate.CODE_STALE_CAPTURE,
+                               data={"blocked_by": "wrong_target",
+                                     "归属": {"判定": "wrong_target",
+                                              "目标hwnd": int(hwnd),
+                                              "遮挡者": occ,
+                                              "chain": list(hit.get("chain") or []),
+                                              "落点": [x, y],
+                                              "口径": ("WindowFromPoint(落点) → "
+                                                       "GetAncestor(GA_ROOT) 与目标 hwnd 比对；"
+                                                       "**发送之前**判，不归目标就不发。"
+                                                       "提示层是 WS_EX_TRANSPARENT|"
+                                                       "HTTRANSPARENT，WindowFromPoint 天然跳过它。")}},
+                               warning=("落点 (%s,%s) 现在归属 hwnd=%s（class=%r title=%r）"
+                                        "——**不是**目标窗 hwnd=%d。目标窗被它**遮挡**了，"
+                                        "本次**零像素**：先在发送之前定位归属，不归目标就不发。"
+                                        "该关的窗：title=%r class=%r hwnd=%s。"
+                                        "先把它关掉/移开，重新 ctl_screen 拿新的 capture_id，"
+                                        "再用新的坐标点。"
+                                        % (x, y, occ.get("hwnd"), occ.get("class"),
+                                           occ.get("title"), int(hwnd),
+                                           occ.get("title"), occ.get("class"),
+                                           occ.get("hwnd")))), []
+    # ── ③ expect_region 必须在目标窗里 ────────────────────────────────
+    er_raw = args.get("expect_region")
+    if er_raw:
+        er = _rect_xyxy(er_raw, wh=True)
+        wr = _rect_xyxy(_win_rect(hwnd))
+        if er is None:
+            return env(code=gate.CODE_UNSTABLE,
+                       data={"blocked_by": "expect_region_malformed",
+                             "expect_region": er_raw},
+                       warning=("expect_region 要 [x,y,w,h]（与 xy 同口径、屏幕物理像素），"
+                                "这次收到 %r，没法判 —— 本次**零像素**" % (er_raw,))), []
+        if wr is not None and not _rect_inter(er, wr):
+            return env(code=gate.CODE_STALE_CAPTURE,
+                       data={"blocked_by": "expect_region_outside_target",
+                             "expect_region_校验": {"expect_region": list(er),
+                                                    "目标窗rect": list(wr),
+                                                    "判定": "与目标窗求交为空"}},
+                       warning=("expect_region=%s 与目标窗 hwnd=%d 的矩形 %s 求交为空 —— "
+                                "你声明「会变的那块」压根不在目标窗里（写到别的窗/桌面上去了）。"
+                                "本次**零像素**。要么改 expect_region，要么目标窗选错了。"
+                                % (list(er), int(hwnd), list(wr)))), []
+    return None, blind
+
+
 def t_windows(args: dict) -> dict:
-    return _perceive(args, ["--windows", "--limit", str(int(args.get("limit") or 40))])
+    """窗口清单（**同步原子快照 + 代际**）。
+
+    ★ 代际 `gen` 与 `screen_version` 同一套纪律：**服务端签发、append-only**；
+      调用方可以把上次的 gen 回传（`gen=N`）做对照，对不上 ⇒ code=12（清单动过了）。
+    ★ 快照取不到 ⇒ `windows=null`，**不返回空列表冒充「桌面上没有窗口」**。
+    """
+    limit = int(args.get("limit") or 40)
+    r = _perceive(args, ["--windows", "--limit", str(limit)])
+    if not isinstance(r, dict):
+        r = env(ok=False, code=gate.CODE_INTERNAL, warning="感知层没有返回信封")
+    d0 = r.get("data") if isinstance(r.get("data"), dict) else {}
+    snap = _windows_snapshot()
+    if snap is None:
+        r["data"] = {**d0, "windows": None, "gen": None}
+        r["blind_spots"] = list(r.get("blind_spots") or []) + [
+            "窗口快照没取到 ⇒ 本次**没有归属/代际基线**（不是「桌面上没有窗口」）—— "
+            "别拿它当「窗口都在这了」"]
+        return r
+    gen = _windows_gen_bump(snap)
+    r["data"] = {**d0, "windows": list(snap)[:limit], "gen": gen,
+                 "gen_口径": ("gen 由服务端签发、append-only：窗口清单一动"
+                              "（移动/最小化/新建/销毁/飞出屏外）就进位。"
+                              "坐标动作可带 window_gen=这个值；对不上 ⇒ code=12")}
+    want = args.get("gen")
+    if want not in (None, "") and str(want) != str(gen):
+        return env(code=gate.CODE_STALE_CAPTURE,
+                   data={"blocked_by": "stale_window_gen",
+                         "gen_校验": {"gen": want, "当前gen": gen, "判定": "不匹配"},
+                         "windows": r["data"]["windows"], "gen": gen,
+                         "gen_口径": r["data"]["gen_口径"]},
+                   warning=("你回传的 gen=%s 与当前代际 %s 对不上 ⇒ 窗口清单动过了。"
+                            "这份 rect/坐标已经作废，拿本次的 gen 与 windows 重新取坐标。"
+                            % (want, gen)))
+    return r
 
 
 def t_shot(args: dict) -> dict:
@@ -1940,6 +2338,15 @@ def _act(action: str, args: dict, argv: list[str], scope: str = "B") -> dict:
     if err:
         return err
 
+    # ★ P0 神经层 · ①（窗Z）：**发送瞬间的归属前置闸**。
+    #   位置就在这里（通行证→租约→观测绑定**之后**、任何动作**之前**）：
+    #   ① 项目的拒绝顺序不能乱（先报要通行证、再报要租约、再报凭据，最后才报归属）；
+    #   ② 归属是「凭据之后」的事实，必须早于**任何**动作 —— 点击的激活副作用
+    #      在调用方看到回执之前就已经发生，事后回执救不了（ZCode 钉的那条）。
+    _oerr, _oblind = _ownership_precheck(args, hwnd)
+    if _oerr:
+        return _oerr
+
     # ★ T17 闭环前半（2026-10-12）：声明了 verify_expect ⇒ 先确认判定器在，再拍「前」快照。
     #   必须在**动作之前**拍 —— 事后补拍无法归因（这是 T3 换来的教训）。
     #   判定器缺失时【拒绝执行】而不是静默跳过：声明了要验、却验不了，不算完成。
@@ -1974,6 +2381,9 @@ def _act(action: str, args: dict, argv: list[str], scope: str = "B") -> dict:
 
     rc, out, e = _legacy("act.py", argv, timeout=int(args.get("timeout_sec") or ACT_TIMEOUT_SEC))
     r = _map_rc(rc, out, e)
+    # ★ P0 神经层 · ①：归属前置闸「未判定」的那些一并如实交代（没看见 ≠ 没有）。
+    if _oblind and isinstance(r, dict):
+        r["blind_spots"] = list(r.get("blind_spots") or []) + list(_oblind)
 
     # ★ C4 缺口 A（2026-10-12）：把 rc=6 的**真原因**提到台面上。
     #   改前这条路径给的是 code=4「找不到控件」+ 一句「老脚本返回码 6」，
@@ -2032,7 +2442,11 @@ def _act(action: str, args: dict, argv: list[str], scope: str = "B") -> dict:
                 _pub[_k] = _st[_k]
         _d0 = r.get("data") or {}
         _a0 = _d0.get("after") or {}
-        r["data"] = {**_d0, "after": {**_a0, "diff": _pub}}
+        # ★ P0 神经层 · ②（窗Z）：**因果判词**。四态、结构化，进信封。
+        #   命中窗 = 目标窗本身（归属前置闸已保证落点归它）；expect_region 只**细化**判词。
+        _vd = _causal_verdict(_df, hit_rect=_win_rect(hwnd),
+                              expect_region=args.get("expect_region"))
+        r["data"] = {**_d0, "after": {**_a0, "diff": _pub, **_vd}}
 
         # ★ 契约 §二 · mode=focus 的第二种失败：「发了但画面没变 ⇒ code=8」。
         #   ⛔ **绝不当成功**。因为这一款就是「不要用「动作发出去了」冒充
@@ -2054,6 +2468,19 @@ def _act(action: str, args: dict, argv: list[str], scope: str = "B") -> dict:
                         warning=("★ 字符已发出来，但**没能比对画面**（%s）。"
                                  "本次不报成功 —— 不能把「我没看见」写成「我看见了没变」。"
                                  "请把目标窗到前台后重试，并用 ctl_screen 目测确认。" % _df.get("说明", "")))
+
+        # ★ P0 神经层 · ②（窗Z）：变化**全在判定区之外** ⇒ changed_outside_target。
+        #   「世界自己动了」（别的窗在动/桌面在动）**不许报成功** —— 这正是
+        #   「变了」被拿去冒充「我做的」的那个洞。仍落 code=8 伞码（向后兼容）。
+        if r.get("ok") and _vd.get("verdict") == "changed_outside_target":
+            _d9 = r.get("data") or {}
+            _ev9 = _vd.get("verdict_evidence") or {}
+            _w9 = ("★ 画面**确实变了**，但变化区 %s 与判定区 %s 求交为空 ⇒ "
+                   "`changed_outside_target`：**这是世界自己动的，不是我这次动作的后果**。"
+                   "本次**不报成功**（code=8 伞码）。要么把 expect_region 声明到真正会变的"
+                   "那块，要么先确认这个动作到底有没有落到目标上（ctl_screen 复核）。"
+                   % (_ev9.get("changed_bbox"), _ev9.get("region")))
+            r = env(code=gate.CODE_NO_CHANGE, data=_d9, warning=_w9)
 
     # ★ T17 闭环后半（2026-10-12）。四条硬约束：
     #   ① 不声明 expect 时，**一个字段都不加** ⇒ 输出与改前逐字节一致（非破坏性）
@@ -2803,8 +3230,11 @@ def t_click(args: dict) -> dict:
         #   结构变了/对象不见了 = STALE（可能点错对象）；什么都没变 = OK；
         #   **读不到就写 unknown，不许当成功**。
         #   基线 = 点之前那一趟复核树（rctx），不必另扫一遍，也更贴近「点前那一瞬」。
+        #   ★ P0 神经层（窗Z）：这里**合并**而不是覆盖 —— `_act` 刚写进 after 的
+        #     `diff`（前后快照比对）与 `verdict`（因果判词）不能被这一行吃掉。
+        _a_old = (r.get("data") or {}).get("after") or {}
         r["data"] = {**(r.get("data") or {}),
-                      "after": _click_after_state(hwnd, args.get("_eid_hit") or {}, rctx)}
+                      "after": {**_a_old, **_click_after_state(hwnd, args.get("_eid_hit") or {}, rctx)}}
     if r.get("ok"):
         r["data"] = {**(r.get("data") or {}), "frame_before": None, "frame_after": None,
                      "note": "按控件名/eid 点击不依赖观测；走坐标时已校验 capture_id",

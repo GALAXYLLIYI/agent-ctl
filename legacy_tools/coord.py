@@ -13,7 +13,7 @@ r'''坐标工具 —— 统一 DPI 口径，杜绝"手算坐标"这类错
   3. 不许再手算缩放 —— 用 `win_rect()` / `client_origin()` / `to_physical()`
 
 用法：
-  import sys, os; sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+  import sys; sys.path.insert(0, r"<老线 tools 目录>")   # 示例：换成你自己的路径
   import coord                                  # 导入即设好 DPI 感知
   print(coord.screen())                         # (2560, 1600) 物理
   print(coord.scale())                          # 1.75

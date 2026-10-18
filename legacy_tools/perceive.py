@@ -45,12 +45,10 @@ import win32process                                        # noqa: E402
 import win32ui                                             # noqa: E402
 from PIL import Image, ImageGrab, ImageStat                # noqa: E402
 
-# ★ 默认写进 %LOCALAPPDATA%\AgentCtl\shots，不写死本机路径。
-#   平台进程会用 AGENTCTL_SHOTS_DIR（或直接注入 SHOTDIR）指过来，
-#   这里只是「独立跑这个脚本时」的兜底，指向同一个地方。
-_APP_DIR = os.environ.get("AGENTCTL_APP_DIR") or os.path.join(
-    os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "AgentCtl")
-SHOTDIR = os.environ.get("AGENTCTL_SHOTS_DIR") or os.path.join(_APP_DIR, "shots")
+_MON = (__import__("os").environ.get("AGENTCTL_MONITOR_DIR")
+        or __import__("os").path.join(__import__("os").path.expanduser("~"),
+                                     "Documents", "agent-manual", "_监控"))
+SHOTDIR = __import__("os").path.join(_MON, "shots")
 MAX_NODES = 400          # 控件树上限，防炸
 MAX_DEPTH = 6
 # 用户在这个标题的窗口里输密钥 —— 见到它就一律不看屏幕（比"记得别看"可靠）
@@ -58,7 +56,7 @@ BLOCKED_TITLES = ("DSH电脑控制授权",)
 
 # ── 2026-10-08 工单 T2-A：树差量 ────────────────────────────────────────────
 # 缓存目录：与截图同门（_监控\），只存**规范化后的控件树**，不存屏幕内容。
-DIFF_CACHE_DIR = os.environ.get("AGENTCTL_CACHE_DIR") or os.path.join(_APP_DIR, "perceive_cache")
+DIFF_CACHE_DIR = __import__("os").path.join(_MON, "perceive_cache")
 DIFF_CACHE_VER = 1       # 规范化口径一变就升版本，老缓存自动作废（按 full，不瞎比）
 DIFF_MAX_ITEMS = 200     # 差量明细条数上限，防炸
 

@@ -2,13 +2,13 @@
  "_note": "gen_legacy 双基线台账：dirs[产物目录(相对仓库根)].files[文件] = {A0: 上次写产物时的规范化md5(去BOM/换行统一), T0: 生成时真源的规范化md5}。★必须进 git（G3 边界③）；手改 A0 等于共谋 —— 防线会失效，改台账唯一合法途径是跑一次生成。键与 src 用相对路径：本文件进仓，不得携带本机绝对路径（R2 (c) 类）。",
  "dirs": {
   "legacy_tools": {
-   "updated": "2026-10-18 19:37:52",
-   "src": "../dsh-viewer-plugin/tools",
+   "updated": "2026-10-18 20:52:22",
+   "src": "legacy_tools/_src",
    "files": {
     "gate.py": {
-     "A0": "a07a91164835675bf5a3f58396e953f0",
-     "T0": "a07a91164835675bf5a3f58396e953f0",
-     "bytes_out": 25262
+     "A0": "637eb25ab740faa939e6032e6d0b6c9b",
+     "T0": "637eb25ab740faa939e6032e6d0b6c9b",
+     "bytes_out": 26641
     },
     "gate_lock.py": {
      "A0": "5b2c5ef3fa17e7ba505ed50705211385",
@@ -21,9 +21,9 @@
      "bytes_out": 168240
     },
     "perceive.py": {
-     "A0": "ac8309d0c28234ce74e685c25bc8afcc",
-     "T0": "ea08ff72e22ce1db97cfecebf17ee97a",
-     "bytes_out": 40351
+     "A0": "6b2651ce12c093b13a419e5dd27f379f",
+     "T0": "6b2651ce12c093b13a419e5dd27f379f",
+     "bytes_out": 40129
     },
     "auth_popup.py": {
      "A0": "fc5e13e12b070504a1f6df55bca7f033",
@@ -36,24 +36,24 @@
      "bytes_out": 7973
     },
     "cdp.py": {
-     "A0": "f576af3856361ced91a5da9cfd982a11",
-     "T0": "ef567b0e1adacd5d3e00982a40c493b6",
-     "bytes_out": 18518
+     "A0": "41e0e804497300417f944df123d8b507",
+     "T0": "41e0e804497300417f944df123d8b507",
+     "bytes_out": 18626
     },
     "coord.py": {
-     "A0": "6ad092da4f6012571b9df0c605a98eaf",
-     "T0": "72d921b3fd29dc9cc747153433b6b3cd",
-     "bytes_out": 5365
+     "A0": "7f92afe2e8b4f37da63a419b5d9da931",
+     "T0": "7f92afe2e8b4f37da63a419b5d9da931",
+     "bytes_out": 5381
     },
     "option_locator.py": {
-     "A0": "45836bc8ea66a337682a761b2cde1b3c",
-     "T0": "886a43f9aefefb8b52c45a1c791d3178",
-     "bytes_out": 9010
+     "A0": "0b8a51c6a80ed47c737c11fbf90f451b",
+     "T0": "0b8a51c6a80ed47c737c11fbf90f451b",
+     "bytes_out": 9123
     },
     "selftest.py": {
-     "A0": "08729a9d0e26311e511a43fa94057c84",
-     "T0": "011ed3684dce42932df1792500926efe",
-     "bytes_out": 15571
+     "A0": "1735278d9d3000ea095991b370f4698f",
+     "T0": "1735278d9d3000ea095991b370f4698f",
+     "bytes_out": 15266
     },
     "guardian.py": {
      "A0": "880e5442f6534f09d8d92699e3e37dcc",

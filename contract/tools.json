@@ -236,7 +236,7 @@
     {
       "name": "ctl_windows",
       "title": "窗口清单",
-      "description": "列窗口（hwnd/标题/类名/rect/前台/最小化/进程名）。坐标一律从这里实时取，不许缓存。",
+      "description": "列窗口（hwnd/标题/类名/rect/前台/最小化/进程名）。坐标一律从这里实时取，不许缓存。★ **同步原子快照 + 代际（2026-10-18 · P0 神经层）**：返回里带 `gen`（**服务端签发、append-only**）与 `windows[{hwnd,class,title,rect,z_index,is_foreground,minimized,cloaked}]` —— 一次 EnumWindows 走完的**同一瞬**，不是事件流（钩子只当唤醒提示；「无事件 = 没变」是禁止的推理）。窗口清单**一动**（移动 / 最小化 / 新建 / 销毁 / 飞出屏外）`gen` 就进位：坐标动作带上 `window_gen=<上次的 gen>`，对不上 ⇒ **code=12 且零像素**（旧坐标作废）。也可以直接 ctl_windows（gen=<上次的 gen>）做对账，对不上返回 code=12 + 本次的新快照。快照取不到时 `windows=null`、`gen=null` —— **不返回空列表冒充「桌面上没有窗口」**。",
       "annotations": {
         "readOnlyHint": true,
         "destructiveHint": false,
@@ -254,11 +254,15 @@
           "limit": {
             "type": "integer",
             "default": 40
+          },
+          "gen": {
+            "type": "integer",
+            "description": "★可选（P0 神经层）：把上次 ctl_windows 拿到的 gen 原样回传做**对账**。与当前代际不符 ⇒ code=12（窗口清单动过了）+ 本次新签发的 windows/gen。不给则不校验。⛔ gen 由服务端签发，**传不可能的值就会被拒**。"
           }
         },
         "additionalProperties": false
       },
-      "returns": "[{ hwnd, pid, class, title, process, rect, size, minimized, foreground, sensitive_blocked }]"
+      "returns": "{ gen, windows: [{ hwnd, pid, class, title, rect:[l,t,r,b], z_index, is_foreground, minimized, cloaked }], raw, [截断...] }★ `gen` = 窗口快照代际（服务端签发、只增不减）；`z_index` 0 = 最顶层；`cloaked` = 被 DWM 隐身（UWP/别的虚拟桌面——「存在但不在屏上」）。★ 与 `screen_version` 同一套纪律：**只能回传、不能指定**。★ 老字段（raw/截断/窗口数）原样保留。"
     },
     {
       "name": "ctl_shot",
@@ -627,6 +631,24 @@
               }
             },
             "description": "★（接线单 §二-4，2026-10-18）after.diff 的忽略口径，默认 {caret_px:8, min_area_px:24}，**部分支持**（只传一个键另一个用默认值补齐）。★ changed 是**必要非充分**：真变了必须 changed=true（光标闪烁不算「变了」），零变化必须 false；被忽略的会在 diff.说明 里写明实情。"
+          },
+          "window_gen": {
+            "type": "integer",
+            "description": "★可选（P0 神经层 2026-10-18）：ctl_windows 返回的 `gen` 原样回传。**发送之前**校验：与当前窗口快照代际不符 ⇒ code=12 + blocked_by=stale_window_gen + **零像素**（窗口动过，这份坐标作废）。与 from_capture/frame_id 并存不互斥 —— 凭据管「画面没变」，gen 管「窗口清单没动」。"
+          },
+          "expect_region": {
+            "type": "array",
+            "items": {
+              "type": "integer"
+            },
+            "minItems": 4,
+            "maxItems": 4,
+            "description": "★可选（P0 神经层 2026-10-18）：[x,y,w,h] —— **你预期会变的那一块**（与 xy/rect 同口径，屏幕物理像素）。两个用处：① **发送之前**校验它与目标窗矩形必须有交，为空 ⇒ code=12 + blocked_by=expect_region_outside_target + **零像素**（声明写到了别人窗里）；② 事后把 after.verdict 细化成「变化落不落在这块里」。⛔ 它**只细化判词，不是新凭据**：完全继承帧有效期（帧过期/内容变了照旧 code=12 先拒），**不延长 TTL、不设第二个计时器**；也**不许**让「别处的大变化」消失 —— 全帧 diff 照算、窗外变化照报（否则就变成「少声明混过验证」）。"
+          },
+          "expect_within_sec": {
+            "type": "number",
+            "default": 0,
+            "description": "★可选（P0 神经层 2026-10-18）：预期多久之内见效。0 = 只看本次动作后的那一次比对（默认）。**非 0 时本版不另造等待机制** —— 异步效果（2 秒后才弹窗）请挂既有 ctl_wait 语义轮询。"
           }
         },
         "required": [
@@ -634,7 +656,7 @@
         ],
         "additionalProperties": false
       },
-      "returns": "{ 点到: {eid,name,type,rect,uid,口径,expect_uid_校验}, changed: boolean, change_ratio, [expect_uid_校验{expect_uid,重算uid,判定:匹配|不匹配|无法判定,口径}], [frame_id_校验{frame_id,当前 screen_version,判定:匹配|不匹配}], [after{uid_state:OK|TEXT_CHANGED|STALE|unknown, screen_version, uid, eid, 动作后uid, 依据, 口径, [diff{changed:boolean|null, bbox:[x,y,w,h]|null, crop_path?, dir?, 说明}]]}] }★ after.diff（P0-A）：**动作前后各拍一张直接比对**，变了就给 changed=true 与变化区 bbox（**屏幕绝对坐标**，与 xy/rect 同口径），crop_path 指向「变了的那块」的截图。before/after/crop 落 work\\_actions\\<frame_id>\\，只留最近 20 组。⛔ changed 三态：true=真变了 / false=确认没变 / null=**没测出来**（取不到画面）——null 不等于 false，别把「我没看见」当成「我看见了没变」。"
+      "returns": "{ 点到: {eid,name,type,rect,uid,口径,expect_uid_校验}, changed: boolean, change_ratio, [expect_uid_校验{expect_uid,重算uid,判定:匹配|不匹配|无法判定,口径}], [frame_id_校验{frame_id,当前 screen_version,判定:匹配|不匹配}], [after{uid_state:OK|TEXT_CHANGED|STALE|unknown, screen_version, uid, eid, 动作后uid, 依据, 口径, [diff{changed:boolean|null, bbox:[x,y,w,h]|null, crop_path?, dir?, 说明}], verdict:met|no_effect_in_region|changed_outside_target|unknown, verdict_evidence{region,changed_bbox,changed_outside_pct,channel_diag}}], [blocked_by] }★ **归属前置闸（P0 神经层 2026-10-18）**：坐标动作在**发送瞬间**做 `WindowFromPoint(落点)` → `GetAncestor(GA_ROOT)` → 与目标 hwnd 比对；**不归目标 ⇒ 拒**（code=12 + `blocked_by=wrong_target` + data.归属.遮挡者{  hwnd, class, title, chain }）—— 让 agent 一眼知道「该关哪个窗」。提示层（边框/高亮）是 WS_EX_TRANSPARENT|HTTRANSPARENT，WindowFromPoint 天然跳过它。⛔ 这是**发送前的闸**，不是事后小票：点击的激活副作用在你看回执之前就已经发生。★ after.diff（P0-A）：**动作前后各拍一张直接比对**，变了就给 changed=true 与变化区 bbox（**屏幕绝对坐标**，与 xy/rect 同口径），crop_path 指向「变了的那块」的截图。before/after/crop 落 work\\_actions\\<frame_id>\\，只留最近 20 组。⛔ changed 三态：true=真变了 / false=确认没变 / null=**没测出来**（取不到画面）——null 不等于 false，别把「我没看见」当成「我看见了没变」。★ after.verdict（P0 神经层，**四态不许两态**）：`met` 变化落在判定区（expect_region ∩ 命中窗）；`no_effect_in_region` 确认没变；`changed_outside_target` 画面**真变了但变化区与判定区求交为空**（世界自己动的）⇒ **不报成功**（code=8 伞码）；`unknown` **观测失败 ≠ no_effect**。判定依据在 after.verdict_evidence{region, changed_bbox, changed_outside_pct, channel_diag}。"
     },
     {
       "name": "ctl_type",
