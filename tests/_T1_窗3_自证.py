@@ -78,7 +78,7 @@ _INJECT_FIXED_SLEEP = os.environ.get("T1_W3_INJECT_FIXED_SLEEP")
 #   · 注入（T1_W3_INJECT_FIXED_SLEEP + T1_W3_INJECT_CASES）：默认仍只给「12」，
 #     保持窗F 已验收的行为一字不变；要单独验 13/16 的注入就显式点名：
 #       $env:T1_W3_INJECT_CASES="13,16-第1轮,16-第2轮"
-_DELAY_CASES = ("12", "13", "16")
+_DELAY_CASES = ("12", "13", "14", "15", "16", "17")
 _INJECT_CASES = tuple(x.strip() for x in
                       (os.environ.get("T1_W3_INJECT_CASES") or "12").split(",")
                       if x.strip())
@@ -672,6 +672,128 @@ def _wait_case_ready(case, log, log_off, p):
     return ready, hs, secs, diag
 
 
+
+
+def _wait_gate(case, probe, descs,
+               timeout=READY_TIMEOUT_SEC, interval=READY_INTERVAL_SEC):
+    """通用有界就绪门（窗G 给 13/16 用的 _wait_case_ready 是它的一个特例，这里泛化给 14/15/17）。
+
+    probe() 必须返回一个 dict：{条件名: (满足?, 当时的值字符串)}，**顺序即展示顺序**。
+    descs 是给人看的一句话说明，会进诊断文案。
+
+    现役：有界轮询到三件全齐；超时 ⇒ 交回调用方判红。
+    注入：**固定 sleep 之后自己探一次**，不齐 ⇒ 直接红（并说明缺哪件）。
+    两个分支都**没有**「sleep 完把 ready 硬写成 True」——那正是窗F 修掉的原病。
+    """
+    keys = list(probe().keys())
+
+    def _fmt(st):
+        return "；".join("%s%s（%s）" % (k, "✔" if st[k][0] else "✘", descs.get(k, ""))
+                         for k in keys)
+
+    inject = case in _INJECT_CASES
+    t0 = time.monotonic()
+    if inject:
+        _inj = float(_INJECT_FIXED_SLEEP)
+        time.sleep(_inj)
+        st = probe()
+        secs = _inj
+        次数, 等待ms = 1, int(_inj * 1000)
+    else:
+        次数 = 0
+        while True:
+            次数 += 1
+            st = probe()
+            secs = time.monotonic() - t0
+            if all(v[0] for v in st.values()):
+                break
+            if secs >= timeout:
+                break
+            time.sleep(interval)
+        等待ms = int(secs * 1000)
+    ready = all(v[0] for v in st.values())
+    print("  [%s] %s可观测：探了 %d 次 / 累计等待 %d ms / 间隔 %d ms / 上限 %d ms；三件逐条 = %s"
+          % (case,
+             ("注入·固定 sleep(%.2f)·" % float(_INJECT_FIXED_SLEEP)) if inject else "",
+             次数, 等待ms, int(interval * 1000), int(timeout * 1000), _fmt(st)),
+          flush=True)
+    if inject:
+        check("%s-就绪 ★ 反向注入：固定 sleep(%.2f) 之后三件齐"
+              "（这一条绿 ⇒ 说明 sleep 已经够长，注入**证明不了**轮询在干活）"
+              % (case, float(_INJECT_FIXED_SLEEP)), ready,
+              "" if ready else
+              ("固定 sleep(%.2f) 之后三件不齐 ⇒ 这一版**没在等**：%s"
+               "（要确定性红请配 T1_W3_FORCE_START_DELAY=3：边框晚 3s 才起）"
+               % (float(_INJECT_FIXED_SLEEP), _fmt(st))))
+    return ready, secs, {"次数": 次数, "等待毫秒": 等待ms, "项": st}
+
+
+def _rlog_all(log):
+    try:
+        with open(log, "rb") as f:
+            return f.read().decode("utf-8", "replace")
+    except Exception:
+        return ""
+
+
+def _wait_wire_border_started(case, log, timeout=READY_TIMEOUT_SEC,
+                              interval=READY_INTERVAL_SEC):
+    """15b 的就绪门：**这一轮** server/mcp 把边框拉起来并写进日志。
+
+    三件（按 15b 自己断言的东西定）：
+      (1) 沙箱日志出现「边框已启动 pid=」—— 15b 断言的就是这行；
+      (2) 那个 pid 还活着 —— 免得读到一行「起来了但立刻退了」的历史；
+      (3) 按**属主 pid** 自数边框窗 = 8 —— 接线真的把窗画出来了，不是只打了行日志。
+    ★ 不用像素条件：15b 判的是「接线有没有接上」，不是「抓屏抓不抓得到边框色」。
+    """
+    def probe():
+        txt = _rlog_all(log)
+        m = re.search(r"边框已启动 pid=(\d+)", txt or "")
+        pid = int(m.group(1)) if m else 0
+        hs = _enum_border_hwnds_of(_descendant_pids(pid)) if pid else []
+        return {"(1)日志有「边框已启动 pid=」": (bool(m), (m.group(0) if m else "无")),
+                "(2)那个 pid 还活着": (bool(pid) and _proc_alive(pid),
+                                      "pid=%s" % (pid or "无")),
+                "(3)按属主 pid 自数窗=8": (len(hs) == READY_N_WINDOWS, "窗=%d" % len(hs))}
+    return _wait_gate(case, probe,
+                      {"(1)日志有「边框已启动 pid=」": "15b 断言的就是这行",
+                       "(2)那个 pid 还活着": "免得读到历史行",
+                       "(3)按属主 pid 自数窗=8": "接线真的画出窗了"},
+                      timeout=timeout, interval=interval)
+
+_ALLRUN_LOG = {"text": ""}
+
+
+def _mark_allrun_log(log):
+    """把 border() 段的沙箱日志快照进 _ALLRUN_LOG —— 供 17 的「本段确实跑过 spawn」那一条用。"""
+    try:
+        _ALLRUN_LOG["text"] = _rlog_all(log)
+    except Exception:
+        _ALLRUN_LOG["text"] = ""
+    return _ALLRUN_LOG["text"]
+
+
+def _wait_teardown_gone(case, timeout=READY_TIMEOUT_SEC, interval=READY_INTERVAL_SEC):
+    """**收干净**的有界等待 —— 用在 15f/15h/15l 与用例 17。
+
+    ★ 这几处断言的都是「**已经收干净了**」，不是「建出来了」：早等晚等的结果都是
+      「屏幕上 0 个边框窗」。所以这里等的是**收尾完成**，不是**建窗出现**。
+    ★ **绝不能**套 _wait_border_ready 那套「窗=8 + 已显示」：那会把「还没建出来」
+      误判成「没等够」——正是派单点名要防的「把『已收干净』当成『没建出来』」。
+    """
+
+    def probe():
+        left = _enum_border_hwnds()
+        owners = _border_owner_pids()
+        _ran = ("已建 8 个边框窗口" in _ALLRUN_LOG.get("text", ""))
+        return {"收尾·屏幕无残留边框窗": (len(left) == 0, "EnumWindows=%d" % len(left)),
+                "收尾·无边框属主进程": (len(owners) == 0, "属主=%s" % (sorted(owners) or "无")),
+                "收尾·本段确实跑过 spawn": (_ran, "日志里有本段建窗记录=%s" % _ran)}
+    return _wait_gate(case, probe,
+                      {"收尾·屏幕无残留边框窗": "已收干净（不是没建出来）",
+                       "收尾·无边框属主进程": "属主进程也退了",
+                       "收尾·本段确实跑过 spawn": "日志里要有本段建窗记录"},
+                      timeout=timeout, interval=interval)
 def _proc_alive(pid):
     import ctypes
     k = ctypes.windll.kernel32
@@ -1356,14 +1478,24 @@ def border(src_dir=None, keep_border=False):
               % (each, rlog().count(READY_LOG_MARK)))
 
         # 14) 不抢焦点：显示前后 GetForegroundWindow 不变
+        # ── ★ 窗H：14 的固定 sleep(2.5) 换成有界就绪轮询 ────────────────
+        #   14 断言的是「**边框窗在不在**」+「显示前后前台窗不变」，判据的前提就是
+        #   `len(hs14) > 0`（「前提：这轮确实建出了 N 个边框窗口」）。
+        #   ⇒ 就绪条件 = (1)本轮日志有「已建 8 个」 (2)按属主 pid 自数窗=8 (3)窗已真正显示。
+        #   不用像素条件：14 判的是「有没有抢前台」，与「抓屏抓不抓得到边框色」无关。
+        #   ★ hs14 从 _enum_border_hwnds()（全屏数、不分属主）改成按属主过滤 ——
+        #     「边框自己抢了前台」那条分支判的是 (fg1 in set(hs14)) 或 fg1 的 pid 属边框，
+        #     混进别人的窗会让它判错对象。
         fg0 = int(u.GetForegroundWindow() or 0)
-        p = spawn(["--follow"])
+        log_off14 = _logsize(log)
+        p = spawn(["--follow"],
+                  delay=(_FORCE_START_DELAY if "14" in _DELAY_CASES else 0.0),
+                  label="用例14")
         procs.append(p)
-        time.sleep(2.5)
+        ready14, hs14, _s14, _d14 = _wait_case_ready("14", log, log_off14, p)
         fg1 = int(u.GetForegroundWindow() or 0)
         # ★ 必须在 terminate **之前**数窗口：杀完之后当然是 0 个 ——
         #   （踩过：数在 terminate 之后，前提条件恒假，判据形同虚设。）
-        hs14 = _enum_border_hwnds()
         p.terminate()
         try:
             p.wait(timeout=10)
@@ -1441,6 +1573,14 @@ def border(src_dir=None, keep_border=False):
         #   机制：本函数 env 已设 AGENTCTL_BORDER_LOG=<tmp>\ctrl_border.log，
         #   ctrl_border 的 log_path() 优先读该覆盖口 ⇒ 产品日志应写在判据沙箱里。
         #   （须在 finally 的 rmtree(tmp) 之前断言——删了目录就没得验了。）
+        # * 窗H：17 原来只 os.path.getsize(log) 采样一次。
+        #   17 断言的是「边框日志落在沙箱」——它依赖的是**产物落位**，不是「窗还在」。
+        #   上面那句收尾 check 断言的恰恰是「已经收干净了」，所以这里等的是
+        #   **收尾完成 + 日志已落位**，不是建窗出现。
+        #   （拿「窗=8 + 已显示」那套来套 17，会把「已收干净」当成「没建出来」，
+        #     正是派单点名要防的那个坑。）
+        _mark_allrun_log(log)
+        _wait_teardown_gone("17")
         try:
             _sz17 = os.path.getsize(log)
         except OSError:
@@ -1498,6 +1638,25 @@ def wire(src_dir=None):
     })
     env.pop("AGENTCTL_BORDER", None)
 
+    def _wire_cmd(mod):
+        """wire() 段起 agentctl.<mod> 的命令行；带启动延迟时用 runpy 包一层。
+
+        * 窗H：让用例 15 也能被 T1_W3_FORCE_START_DELAY 延迟，否则 15 永远测不到慢路径。
+        * 产物零改动：runpy.run_module(..., run_name="__main__") 与 `python -m` 等价，
+          延迟发生在 import 之前，产品行为一字不变（与 border() 段同一套做法）。
+        """
+        argv = ["-X", "utf8", "-m", "agentctl." + mod]
+        dly = float(_FORCE_START_DELAY or 0.0) if "15" in _DELAY_CASES else 0.0
+        if dly > 0:
+            _wrap = ("import time,runpy,sys;time.sleep(%r);"
+                     "sys.argv=['agentctl.%s']+%r;"
+                     "runpy.run_module('agentctl.%s',run_name='__main__')"
+                     % (dly, mod, argv, mod))
+            print("  [用例15] ⚠ 强制启动延迟 %.1fs：agentctl.%s import 前先睡这么久"
+                  % (dly, mod), flush=True)
+            return [sys.executable, "-X", "utf8", "-c", _wrap]
+        return [sys.executable] + argv
+
     def rlog():
         try:
             return io.open(log, encoding="utf-8", errors="replace").read()
@@ -1513,7 +1672,7 @@ def wire(src_dir=None):
         port = _free_port()
         env["AGENTCTL_PORT"] = str(port)
         CREATE_NEW_PROCESS_GROUP = 0x00000200
-        sp = subprocess.Popen([sys.executable, "-X", "utf8", "-m", "agentctl.server"],
+        sp = subprocess.Popen(_wire_cmd("server"),
                               env=env, cwd=tmp, stdout=subprocess.PIPE,
                               stderr=subprocess.STDOUT, text=True,
                               encoding="utf-8", errors="replace",
@@ -1536,6 +1695,11 @@ def wire(src_dir=None):
         print("  [15a /v1/health] %s" % health, flush=True)
         check("15a server.py 起得来且 /v1/health 通", bool(health), health)
         lg = rlog()
+        # ★ 窗H：15b 原来紧跟 15a 的健康轮询就断言「边框已启动 pid=」—— health 通只说明
+        #   server 活着，**边框可能还没被拉起来**（尤其带启动延迟时）。这是同一族的偶发。
+        #   ⇒ 加有界就绪门：日志出现那行 ∧ 那个 pid 还活着 ∧ 按属主 pid 自数窗=8。
+        _rdy15b, _s15b, _dg15b = _wait_wire_border_started("15", log)
+        lg = _rlog_all(log)
         m = re.search(r"边框已启动 pid=(\d+)", lg)
         check("15b ★ 日志里有「边框已启动 pid=…」（接线真的接上了）", bool(m), lg[-400:])
         bpid = int(m.group(1)) if m else 0
@@ -1596,6 +1760,13 @@ def wire(src_dir=None):
         gone, secs = _wait_gone(bpid, timeout=15) if bpid else (True, 0)
         check("15e 退出后那个边框子进程确实不在了（%.1fs 内）" % secs, gone,
               "alive=%s" % (_proc_alive(bpid) if bpid else False))
+        # -- 15e/15f --
+        # * 窗H：15f/15h/15l 原来都是采样一次判「屏幕上没边框」，那是赌
+        #   「清理已经跑完了」——与 12/13/16 赌上屏时间是同一族病，只是方向相反。
+        #   换成有界等待「收干净」：残留窗=0 且 无属主进程 且 本段跑过 spawn。
+        #   这里等的是「收尾完成」而不是「建窗出现」：套 _wait_border_ready 那套
+        #     「窗=8 + 已显示」会把「还没建出来」误判成「没等够」。
+        _wait_teardown_gone("15")
         check("15f ★ 屏幕上没留下孤儿边框（EnumWindows=%d）" % len(_enum_border_hwnds()),
               len(_enum_border_hwnds()) == 0, _enum_border_hwnds())
 
@@ -1606,7 +1777,7 @@ def wire(src_dir=None):
             pass
         port = _free_port()
         env["AGENTCTL_PORT"] = str(port)
-        sp2 = subprocess.Popen([sys.executable, "-X", "utf8", "-m", "agentctl.server"],
+        sp2 = subprocess.Popen(_wire_cmd("server"),
                                env=env, cwd=tmp, stdout=subprocess.DEVNULL,
                                stderr=subprocess.DEVNULL)
         procs.append(sp2)
@@ -1631,6 +1802,8 @@ def wire(src_dir=None):
         check("15g ★ server 被硬杀（finally 跑不到）时，边框子进程靠 --parent-pid "
               "在 %.1fs 内自己退出，不留孤儿" % secs2, bpid2 and gone2,
               "bpid2=%s gone=%s" % (bpid2, gone2))
+        # * 窗H：同上，15h 之前等「收干净」而不是采样一次。
+        _wait_teardown_gone("15")
         check("15h 硬杀后屏幕上也没有孤儿边框（EnumWindows=%d）" % len(_enum_border_hwnds()),
               len(_enum_border_hwnds()) == 0, _enum_border_hwnds())
 
@@ -1645,7 +1818,7 @@ def wire(src_dir=None):
             json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}),
             json.dumps({"jsonrpc": "2.0", "id": 2, "method": "ping"}),
         ]) + "\n"
-        mp = subprocess.run([sys.executable, "-X", "utf8", "-m", "agentctl.mcp"],
+        mp = subprocess.run(_wire_cmd("mcp"),
                             env=env, cwd=tmp, input=stdin_data,
                             capture_output=True, text=True, encoding="utf-8",
                             errors="replace", timeout=60)
@@ -1667,6 +1840,9 @@ def wire(src_dir=None):
               parsed[:3])
         check("15k ★ mcp.py 日志里有「边框已启动」且退出时有「边框已收掉」",
               "边框已启动" in lg and "边框已收掉" in lg, lg[-400:])
+        # * 窗H：同上，15l 之前等「收干净」。
+
+        _wait_teardown_gone("15")
         check("15l mcp 退出后屏幕上没有边框（EnumWindows=%d）" % len(_enum_border_hwnds()),
               len(_enum_border_hwnds()) == 0, _enum_border_hwnds())
 
