@@ -32,6 +32,7 @@ u = ctypes.windll.user32
 u.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
 
 GREEN, RED, SKIP = [], [], []
+NOPASS = []      # 收集 code=9（未授权/额度用尽）
 
 
 def rec(name, ok, detail="", skip=False):
@@ -86,6 +87,8 @@ def click(h, xy, inject_after=False):
                                     "actor": "判据24"}, actor="判据24")
     d = c.get("data") or {}
     inner = d.get("结果") if isinstance(d.get("结果"), dict) else d
+    if c.get("code") == 9:
+        NOPASS.append(str(c.get("warning") or "")[:80])
     return c, inner
 
 
@@ -137,9 +140,19 @@ def main():
         time.sleep(0.4)
         force_fg(top)
 
+        if NOPASS:
+            rec("有可用动作额度", False,
+                "通行证额度用尽/未授权（code=9）：%s ⇒ 本轮验不了" % NOPASS[0], skip=True)
+            return finish()
+
         # ① 负例：点在盖住它的 top 上
         c, inner = click(bottom, (700, 600))
         warn = str(c.get("warning") or "")
+        if NOPASS:
+            # 没有可用额度 ⇒ 这一条**验不了**，不许当红（也不是绿）
+            rec("有可用动作额度", False,
+                "通行证额度用尽/未授权（code=9）：%s ⇒ 本轮验不了" % NOPASS[0], skip=True)
+            return finish()
         rec("① 点错窗 ⇒ 拒（code=12 / wrong_target）",
             (c.get("code") == 12 and (inner.get("blocked_by") == "wrong_target")),
             "code=%r blocked_by=%r" % (c.get("code"), inner.get("blocked_by")))

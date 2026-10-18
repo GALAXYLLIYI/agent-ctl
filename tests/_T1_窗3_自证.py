@@ -310,7 +310,7 @@ def _write_json(path, obj):
     io.open(path, "w", encoding="utf-8").write(json.dumps(obj, ensure_ascii=False))
 
 
-def _enum_border_hwnds():
+def _enum_border_hwnds_raw():
     """数当前有多少个边框窗（EnumWindows + GetClassNameW，和 WNDCLASS_NAME 对齐）。"""
     import ctypes
     import ctypes.wintypes as wt
@@ -435,6 +435,54 @@ def _descendant_pids(pid):
     except Exception:
         pass
     return got
+
+
+# ── 指示层基线（2026-10-18，用户拍板 core 默认常开 ctrl_border）────────────────
+# 屏幕上本来就有 8 个**产品级**边框窗。所以判据里的「边框窗数」一律指
+#   **本判据这几轮建的（含漏下的）** = 全屏数 − 基线。
+# 这样「等建出 8 个」和「收干净 0 个」两种断言都不用改，全部自动对齐。
+BASELINE_BORDER = set()
+
+
+def _enum_border_hwnds():
+    """**排除基线**之后的边框窗（= 本判据自己建的 / 漏下的）。"""
+    return [h for h in _enum_border_hwnds_raw() if int(h) not in BASELINE_BORDER]
+
+
+def _residual_border():
+    """兼容旧断言名：残差就是排除基线后的那批。"""
+    return _enum_border_hwnds()
+
+
+def _suppress_indicator():
+    """跑判据前把 core 默认常开的指示层（ctrl_border --follow）临时收掉，并把开关置 0。
+
+    为什么：本判据有一批断言是「屏幕上**没有**边框窗」（15f/15h/15l/15o-4/收尾）。
+    产品默认常开是对的（让用户看得见 AI 在动），但**判据要空屏，就得先让位**；
+    跑完由调用方决定要不要再起 —— 不为判据去改产品的默认值。
+    """
+    try:
+        import ctypes
+        import ctypes.wintypes as wt
+        u = ctypes.windll.user32
+        pids = []
+        ENUM = ctypes.WINFUNCTYPE(ctypes.c_int, wt.HWND, wt.LPARAM)
+
+        def cb(h, _l):
+            b = ctypes.create_unicode_buffer(256)
+            if u.GetClassNameW(h, b, 256) and b.value in BORDER_CLS_ALL:
+                pid = wt.DWORD(0)
+                u.GetWindowThreadProcessId(h, ctypes.byref(pid))
+                pids.append(int(pid.value))
+            return 1
+        u.EnumWindows(ENUM(cb), 0)
+        for pid in set(pids):
+            if pid and pid != os.getpid():
+                subprocess.run(["taskkill", "/F", "/PID", str(pid)], capture_output=True)
+        time.sleep(0.4)
+    except Exception:
+        pass
+    os.environ["AGENTCTL_BORDER"] = "0"
 
 
 def _enum_border_hwnds_of(pids):
@@ -1112,8 +1160,8 @@ def border(src_dir=None, keep_border=False):
         check("11c 日志里有「父进程已退出 ⇒ 自己收摊」这句如实记录",
               "父进程已退出" in lg, "日志尾 %s" % lg[-300:])
         check("11d 父进程收摊后屏幕上**一个边框窗都不剩**（EnumWindows=%d）"
-              % len(_enum_border_hwnds()), len(_enum_border_hwnds()) == 0,
-              _enum_border_hwnds())
+              % len(_enum_border_hwnds()), len(_residual_border()) == 0,
+              _residual_border())
 
 
         # 12) WDA 双向对照：带 / 不带 --no-wda 起边框，抓屏比边缘像素
@@ -1768,7 +1816,7 @@ def wire(src_dir=None):
         #     「窗=8 + 已显示」会把「还没建出来」误判成「没等够」。
         _wait_teardown_gone("15")
         check("15f ★ 屏幕上没留下孤儿边框（EnumWindows=%d）" % len(_enum_border_hwnds()),
-              len(_enum_border_hwnds()) == 0, _enum_border_hwnds())
+              len(_residual_border()) == 0, _residual_border())
 
         # ── 15b server.py：硬杀（TerminateProcess，finally 跑不到）⇒ 靠 --parent-pid 自救 ──
         try:
@@ -1805,7 +1853,7 @@ def wire(src_dir=None):
         # * 窗H：同上，15h 之前等「收干净」而不是采样一次。
         _wait_teardown_gone("15")
         check("15h 硬杀后屏幕上也没有孤儿边框（EnumWindows=%d）" % len(_enum_border_hwnds()),
-              len(_enum_border_hwnds()) == 0, _enum_border_hwnds())
+              len(_residual_border()) == 0, _residual_border())
 
         # ── 15c mcp.py：手喂 JSON-RPC，stdin 一关主循环就结束 → finally 收掉 ──
         try:
@@ -1844,7 +1892,7 @@ def wire(src_dir=None):
 
         _wait_teardown_gone("15")
         check("15l mcp 退出后屏幕上没有边框（EnumWindows=%d）" % len(_enum_border_hwnds()),
-              len(_enum_border_hwnds()) == 0, _enum_border_hwnds())
+              len(_residual_border()) == 0, _residual_border())
 
         # ── 15d 冻结态：不静默 ──
         # 15o start_follow → stop_follow 的单元级往返（补 15d 验不了的那一段逻辑）
@@ -1874,8 +1922,8 @@ def wire(src_dir=None):
         check("15o-3 stop_follow 之后那个子进程确实不在了", gone4,
               "alive=%s" % (_proc_alive(int(upid.group(1))) if upid else False))
         check("15o-4 stop_follow 之后屏幕上没有边框（EnumWindows=%d）"
-              % len(_enum_border_hwnds()), len(_enum_border_hwnds()) == 0,
-              _enum_border_hwnds())
+              % len(_enum_border_hwnds()), len(_residual_border()) == 0,
+              _residual_border())
 
         section("用例15 附加 · 冻结态与开关（如实报告，不静默）")
         env2 = dict(env)
@@ -2054,6 +2102,13 @@ def main(argv=None):
     拿不到锁 -> 打印点名文案并 return 2（既不是红也不是绿），一个窗都不建。
     正常/异常退出都经 finally 释放（进程死时内核也会兜底释放）。
     """
+    # ★ 2026-10-18：core 默认常开「指示层」（ctrl_border --follow）。
+    #   本判据有一批断言是「屏幕上**没有**边框窗」（15f/15h/15l/15o-4/收尾），
+    #   常驻指示器会让它们假红。处理原则：**判据要空屏，就临时把指示器关掉**，
+    #   跑完由调用方决定要不要再起（不为判据改产品默认值）。
+    _suppress_indicator()
+    BASELINE_BORDER.update(_enum_border_hwnds_raw())
+
     _h, _other, _info = w3_acquire_mutex()
     if not _h:
         if isinstance(_info, tuple):

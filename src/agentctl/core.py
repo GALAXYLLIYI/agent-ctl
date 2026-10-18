@@ -592,6 +592,54 @@ def _my_integrity() -> dict:
     return _INTEGRITY_CACHE
 
 
+# ── 指示层：默认常开（2026-10-18 用户拍板「没影响就默认开」）──────────────────
+# 设计本意：**边框/角标**，不是遮罩 —— 薄边、点击穿透（HTTRANSPARENT）、带 WDA 不进截图，
+#   所以它既不挡视野，也不污染像素判据。真正会"看不见"的场景，恰恰是它没被拉起。
+# 关闭方式：AGENTCTL_BORDER=0（单条开关；以后可再拆 border / marks / badge 三个）。
+def _border_running():
+    """屏上是否已有可见的边框/角标窗（幂等用，不靠 pid 文件 —— 强杀后 pid 文件会撒谎）。"""
+    try:
+        import ctypes                                      # noqa: PLC0415
+        from ctypes import wintypes                        # noqa: PLC0415
+        u32 = ctypes.WinDLL("user32", use_last_error=True)
+        found = []
+
+        @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+        def _cb(h, _l):
+            cls = ctypes.create_unicode_buffer(64)
+            u32.GetClassNameW(h, cls, 64)
+            if "AgentCtlCtrlBorder" in cls.value and u32.IsWindowVisible(h):
+                found.append(int(h))
+            return True
+        u32.EnumWindows(_cb, 0)
+        return found[0] if found else 0
+    except Exception:
+        return 0
+
+
+def _ensure_border():
+    """会话级常开指示层；返回 {spawned, pid/hwnd, 原因}。**失败不抛**（提示层坏了不该阻断动作）。"""
+    if str(os.environ.get("AGENTCTL_BORDER", "1")).strip().lower() in ("0", "off", "false", "no"):
+        return {"spawned": False, "原因": "AGENTCTL_BORDER=0（显式关闭）"}
+    ex = _border_running()
+    if ex:
+        return {"spawned": False, "已有边框窗": ex, "原因": "已在跑（幂等）"}
+    try:
+        import subprocess as _sp                             # noqa: PLC0415
+        src = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src")
+        if not os.path.isdir(src):
+            src = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        p = _sp.Popen([sys.executable, "-X", "utf8", "-m", "agentctl.ctrl_border",
+                       "--follow"],
+                      cwd=src,
+                      stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
+                      creationflags=getattr(_sp, "CREATE_NEW_PROCESS_GROUP", 0))
+        return {"spawned": True, "pid": p.pid, "形态": "边框/角标（穿透 + WDA，不挡视野）"}
+    except Exception as e:
+        return {"spawned": False, "原因": "起不来：%s: %s" % (type(e).__name__, e)}
+
+
+
 def t_status(args: dict) -> dict:
     st = gate.status()
     st["service"] = {"running": True, "schema_version": SCHEMA_VERSION,
@@ -1593,6 +1641,7 @@ def t_authorize(args: dict) -> dict:
 
     ⚠️ 这条会**阻塞等人**（弹窗不点就一直等）→ 调用方应给足够超时，或放后台跑。
     """
+    _border = _ensure_border()   # 指示层：默认开（AGENTCTL_BORDER=0 可关）
     raw = args.get("scopes") or ["A"]
     if isinstance(raw, list):
         raw = ",".join(str(x) for x in raw)
