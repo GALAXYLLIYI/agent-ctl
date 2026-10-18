@@ -417,6 +417,104 @@ class Fixture(object):
 ORIG = {}
 
 
+class FakeCdp(object):
+    '''**假 cdp**（窗G1）—— 只换两个接缝：`_cdp_http` 与 `_cdp_eval`。
+
+    ★ 为什么不用真浏览器：判据要能在**任何时候、任何机器**上跑，且不许碰用户正在用的
+      Edge 实例。接缝之下全是真代码（JSON 解析、裁剪、接线、判定式），之上
+      （screen_channels、盲点文案）也是真代码 —— 只有「网络 I/O」这一层是假的。
+    ★ `_cdp_spawn` 也被换掉：launch 一旦被放行就会真的起浏览器，判据里绝不能发生。
+      浏览器路径也换成 sys.executable —— 省得真去 Program Files 里找 Edge。
+    '''
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.up = False                 # 端口上有没有 CDP 实例
+        self.taken_by_other = False     # 端口被**别人**占着（不是我们起的）
+        self.dom_objects = []           # 页面里能取到的 DOM 元素
+        self.page_url = 'file:///靶场/lab_cdp.html'
+        self.page_title = 'CDP 靶页'
+        self.spawned = []               # 记下每一次「试图起浏览器」
+        self.killed = []                # 记下每一次 taskkill
+        self.http_hits = []             # 记下被问过的端点
+        self.alive = set()              # 假装活着的 pid
+        self.answer_after_spawn = True  # 起完之后端口是否应答
+
+    def make_dom(self, n, hit_text=''):
+        out = []
+        for i in range(n):
+            name = ('%s' % hit_text) if (i == 0 and hit_text) else ('DOM 元素 %03d' % (i + 1))
+            out.append({'role': 'button' if i % 3 == 0 else 'div',
+                        'name': name,
+                        'rect': [10 + i, 20, 120, 30],
+                        'selector': 'body > div:nth-of-type(%d)' % (i + 1)})
+        return out
+
+    def install(self, core):
+        '''把接缝换掉（真身存进 ORIG，--live 那半段要还原）。'''
+        if '_cdp_http' not in ORIG:
+            for k in ('_cdp_http', '_cdp_eval', '_cdp_spawn', '_cdp_kill_tree',
+                      '_pid_alive', 'CDP_BROWSER_CANDIDATES'):
+                ORIG[k] = core.__dict__.get(k)
+        me = self
+
+        def fake_http(path, port=9222, timeout=3.0):
+            me.http_hits.append((path, int(port)))
+            if path == '/json/version':
+                if me.up or me.taken_by_other:
+                    who = '别人家的' if me.taken_by_other else '我们起的'
+                    return 200, json.dumps({'Browser': 'FakeCDP/1.0（%s）' % who,
+                                            'webSocketDebuggerUrl':
+                                            'ws://127.0.0.1:%d/devtools/browser/fake' % int(port)})
+                return 0, 'ConnectionRefusedError: 端口 %s 上没有实例' % int(port)
+            if path == '/json/list':
+                if not (me.up or me.taken_by_other):
+                    return 0, 'ConnectionRefusedError'
+                return 200, json.dumps([
+                    {'id': 'T1', 'type': 'page', 'title': me.page_title, 'url': me.page_url},
+                    {'id': 'T2', 'type': 'service_worker', 'title': 'sw', 'url': 'about:blank'},
+                ])
+            return 0, '未知端点 %s' % path
+
+        def fake_eval(js, port=9222, timeout=25, url_contains=''):
+            if int(port) != 9222:
+                return 124, None, 'cdp.py 的调试端口写死 9222'
+            val = {'url': me.page_url, 'title': me.page_title,
+                   'scanned': len(me.dom_objects) + 7, 'objects': list(me.dom_objects)}
+            return 0, val, json.dumps(val, ensure_ascii=False)
+
+        def fake_spawn(argv):
+            me.spawned.append(list(argv))
+            me.alive.add(999999)
+            me.up = me.answer_after_spawn      # 起完之后端口才应答（真浏览器就是这样）
+            return 999999
+
+        def fake_kill(pid):
+            me.killed.append(int(pid))
+            me.alive.discard(int(pid))
+            me.up = False
+            return 0, '成功: 已终止 PID=%d' % int(pid)
+
+        def fake_alive(pid):
+            return int(pid) in me.alive
+
+        core._cdp_http = fake_http
+        core._cdp_eval = fake_eval
+        core._cdp_spawn = fake_spawn
+        core._cdp_kill_tree = fake_kill
+        core._pid_alive = fake_alive
+        core.CDP_BROWSER_CANDIDATES = (sys.executable,)   # 绝不去 Program Files 里找真 Edge
+        try:
+            core._CDP_PROC.clear()
+        except Exception:
+            pass
+
+
+CDP = FakeCdp()
+
+
 def install_stubs(core, fx):
     """只换 I/O 边界。**walk / _in_view / _scroll_info / 全部 _screen_* 都是真代码。**"""
     uia = core.uia_tree
@@ -429,6 +527,11 @@ def install_stubs(core, fx):
     uia._client_rect = lambda handle: list(CLIENT)
     core._screen_window_info = lambda h: {"hwnd": FAKE_HWND, "title": fx.title,
                                           "cls": fx.cls, "pid": fx.pid}
+    # ★ 窗G1：**默认把 CDP 通道钉成「不可达」** ——
+    #   判据全程不许碰 9222 端口（那儿可能是用户正在用的浏览器），更不许顺手起一个。
+    #   要测 CDP 就由 S8 显式摆假 cdp。
+    CDP.reset()
+    CDP.install(core)
 
 
 def call(core, **kw):
@@ -661,7 +764,6 @@ def _screen_build(hwnd, args):                            # noqa: F811  故意�
 # ===== 以下为 窗F2 注入段（跑红自证专用，勿入产品代码）=====================
 INJECT_WARMUP = """
 
-# ===== 以下为 窗F2 注入段（跑红自证专用，勿入产品代码）=====
 _real_ready_f2 = _screen_ready
 
 
@@ -717,6 +819,72 @@ def _screen_min_probes(*, warmup, is_web, first_scan):   # noqa: F811  故意覆
     return 2 if (warmup and first_scan) else 1
 """
 
+# ===== 以下为 窗G1 注入段（跑红自证专用，勿入产品代码）=====================
+INJECT_CDP_WIRED = '''
+
+# ===== 以下为 窗G1 注入段（跑红自证专用，勿入产品代码）=====
+_real_channels_g1 = screen_channels
+
+
+def screen_channels(*, interactive_count, target_hit, name_trust='high',   # noqa: F811
+                    cdp_wired=False, cdp_reachable=False, dom_hit=False, **kw):
+    # 注入的缺陷：**R1 根本没接线**（回到 G1 之前的样子）—— CDP 三要素一律不接，
+    # 于是 DOM 明明命中了，R1 也不成立，must_vlm 照样为 true（白白多叫一次 VLM）。
+    return _real_channels_g1(interactive_count=interactive_count,
+                             target_hit=target_hit, name_trust=name_trust)
+'''
+
+INJECT_CDP_CAP = '''
+
+# ===== 以下为 窗G1 注入段（跑红自证专用，勿入产品代码）=====
+def _screen_dom(*, url_contains='', port=CDP_DEFAULT_PORT,              # noqa: F811
+                timeout=CDP_EVAL_TIMEOUT_SEC):
+    # 注入的缺陷：**去掉 60 条上限** —— 一屏几百个 DOM 元素全塞回信封，
+    # token 被一条屏吃光，agent 反而更看不见目标。
+    js = SCREEN_DOM_JS.replace('__ASK__', str(int(SCREEN_DOM_ASK_OBJECTS)))
+    rc, val, raw = _cdp_eval(js, port, timeout, url_contains)
+    got = [o for o in ((val or {}).get('objects') or []) if isinstance(o, dict)]
+    return {'wired': rc == 0 and isinstance(val, dict), 'page_url': str((val or {}).get('url') or ''),
+            'page_title': str((val or {}).get('title') or ''),
+            'objects': [{'role': str(o.get('role') or ''), 'name': str(o.get('name') or ''),
+                         'rect': list(o.get('rect') or [0, 0, 0, 0]),
+                         'selector': str(o.get('selector') or ''), 'source': 'cdp',
+                         'source_confidence': dict(SCREEN_SOURCE_CONF['cdp'])} for o in got],
+            'omitted': {'total': len(got), 'returned': len(got), 'cap': None}}
+'''
+
+INJECT_CDP_STEAL = '''
+
+# ===== 以下为 窗G1 注入段（跑红自证专用，勿入产品代码）=====
+_real_version_g1 = _cdp_version
+_real_launch_g1 = _cdp_launch
+_in_launch_g1 = {'on': False, 'n': 0}
+
+
+def _cdp_launch(args):                            # noqa: F811  故意覆盖真版
+    _in_launch_g1['n'] = 0
+    _in_launch_g1['on'] = True
+    try:
+        return _real_launch_g1(args)
+    finally:
+        _in_launch_g1['on'] = False
+
+
+def _cdp_version(port=CDP_DEFAULT_PORT):              # noqa: F811  故意覆盖真版
+    # 注入的缺陷：**探测时假装端口是空的** —— 于是 launch 认定「没人占」，
+    # 直接另起一个实例占上去。真实后果：用户那个浏览器从此再也连不上调试端口。
+    # ★ 只在 **launch 自己的那一次占用探测** 里撒谎（第 1 次），第 2 次起交回真身，
+    #   好让 launch 起完之后那次「端口起来了吗」的收尾探测能过。
+    #   只骗 launch 内的探测 ⇒ S8 的 ①②③（R1 判定）不受影响，红线只落在 ④ 上。
+    if _in_launch_g1['on']:
+        _in_launch_g1['n'] += 1
+        if _in_launch_g1['n'] == 1:
+            return {}
+    return _real_version_g1(port)
+'''
+
+
+
 INJECT = {
     "guarantee": ("拿掉必进保证（纯按分取前 top）", "append", INJECT_GUARANTEE),
     "text_key": ("uid 里去掉 text_key（只剩结构路径）", "append", INJECT_TEXT_KEY),
@@ -739,6 +907,10 @@ INJECT = {
     # ★ 窗F2b 的两个新注入
     "warmup_first": ("网页类首扫不探第二次（冷扫当热屏交出去）", "append", INJECT_WARMUP_FIRST),
     "warmup_nb": ("首扫强制探测忘了判窗口类（非网页也白等 400ms）", "append", INJECT_WARMUP_NB),
+    # ★ 窗G1 的三个新注入
+    "cdp_wired": ("R1 没接线（CDP 三要素一律不接）", "append", INJECT_CDP_WIRED),
+    "cdp_cap": ("dom 段去掉 60 条上限", "append", INJECT_CDP_CAP),
+    "cdp_steal": ("端口被占也照样抢（另起实例顶上去）", "append", INJECT_CDP_STEAL),
 }
 
 
@@ -1803,6 +1975,128 @@ def check_watch_reject_ctx(core, fx):
     fx.quota = 3
     return "S6 拒绝信封带屏上下文", reds, ev
 
+DOM_ONLY_QUERY = '只在DOM里出现的那个词'
+
+
+def check_cdp_r1(core, fx):
+    '''S8 · CDP 通道**接线**：R1 要能用真事实成立，不可达时如实 false，dom 段有上限，独立实例不抢端口。
+
+    器材：**假 cdp**（CDP / FakeCdp）—— 只换 `_cdp_http` 与 `_cdp_eval` 两个接缝，
+    不开真浏览器、不碰 9222 端口、不起任何进程。
+    '''
+    reds = []
+    ev = {}
+
+    def 盲点(r):
+        return ' '.join(str(b) for b in (r.get('blind_spots') or []))
+
+    # ── ① CDP 可用 + DOM 命中 ⇒ R1 真、must_vlm 变 false
+    #   ★ 关键设计：query 用**只在 DOM 里出现**的词 —— UIA 那边必然不命中（R2 不成立），
+    #     于是 must_vlm 变 false 就**只可能**是 R1 干的，不是 R2 蹭的。
+    CDP.reset()
+    CDP.up = True
+    CDP.dom_objects = CDP.make_dom(12, hit_text=DOM_ONLY_QUERY)
+    fx.cls = 'Chrome_WidgetWin_1'
+    core._screen_forget(0)
+    r1, sc1 = call(core, query=DOM_ONLY_QUERY, top=500)
+    ch1 = sc1.get('channels') or {}
+    c1 = ch1.get('R1_cdp') or {}
+    dom1 = sc1.get('dom') or {}
+    ev['①CDP可用+DOM命中'] = {'R1_cdp': c1, 'R2_uia_hit': (ch1.get('R2_uia') or {}).get('hit'),
+                          'must_vlm': ch1.get('must_vlm'), 'dom条数': len(dom1.get('objects') or []),
+                          'blind_spots': 盲点(r1)[:200]}
+    need(c1.get('wired') is True and c1.get('reachable') is True,
+         '端口应答了却没报 wired/reachable：%r' % c1, reds)
+    need(c1.get('dom_hit') is True and c1.get('hit') is True,
+         'DOM 里明明有「%s」，R1 却不成立（R1=%r dom_hit=%r）—— 这就是没接线'
+         % (DOM_ONLY_QUERY, c1.get('hit'), c1.get('dom_hit')), reds)
+    need((ch1.get('R2_uia') or {}).get('hit') is False,
+         '本该 UIA 不命中（R2=%r），否则「must_vlm 变 false」就分不清是谁干的'
+         % (ch1.get('R2_uia') or {}).get('hit'), reds)
+    need(ch1.get('must_vlm') is False,
+         'R1 已成立，must_vlm 必须是 false（DOM 已经给出真相了，不必再上 VLM）', reds)
+    need((c1.get('source_confidence') or {}).get('existence') == 0.90,
+         'R1 命中时 source_confidence.cdp 该给 DOM 的真值（0.90 量级），实得 %r'
+         % (c1.get('source_confidence'),), reds)
+    need(int(c1.get('命中节点数') or 0) >= 1,
+         'R1 命中却没报命中节点数：%r' % c1.get('命中节点数'), reds)
+
+    # ── ② CDP 不可达 ⇒ R1 如实 false，**不假装**，并且 blind_spots 说清楚
+    CDP.reset()
+    CDP.up = False
+    core._screen_forget(0)
+    r2, sc2 = call(core, query=DOM_ONLY_QUERY, top=500)
+    ch2 = sc2.get('channels') or {}
+    c2 = ch2.get('R1_cdp') or {}
+    dom2 = sc2.get('dom') or {}
+    bs2 = 盲点(r2)
+    ev['②CDP不可达'] = {'R1_cdp': c2, 'must_vlm': ch2.get('must_vlm'),
+                     'dom.wired': dom2.get('wired'), 'blind_spots': bs2[:240]}
+    need(c2.get('wired') is False and c2.get('reachable') is False and c2.get('hit') is False,
+         '端口不通却报 R1 有线/可达：%r' % c2, reds)
+    need(dom2.get('wired') is False and not (dom2.get('objects') or []),
+         'CDP 不可达却回了一段 DOM 对象 —— 那就是编的：%r' % (dom2.get('objects') or [])[:2], reds)
+    need(r2.get('ok') is True,
+         'CDP 不可达把整次调用变成失败了（ok=%r）—— 通道不可用是**证据不足**，不是错误'
+         % r2.get('ok'), reds)
+    need('CDP' in bs2, 'CDP 没接上却没有 blind_spots 说明：%s' % bs2[:200], reds)
+    need('不等于' in bs2 or '不是「没有」' in bs2,
+         'blind_spots 没把「R1 不成立 ≠ 页面上没有」说透：%s' % bs2[:200], reds)
+    need('launch' in bs2,
+         'blind_spots 没给可执行的下一步（起个独立实例）：%s' % bs2[:200], reds)
+
+    # ── ③ dom 段：≤60 条、每条带 role/name/rect，且裁剪账对得上
+    CDP.reset()
+    CDP.up = True
+    CDP.dom_objects = CDP.make_dom(200, hit_text=DOM_ONLY_QUERY)
+    core._screen_forget(0)
+    r3, sc3 = call(core, query=DOM_ONLY_QUERY, top=500)
+    dom3 = sc3.get('dom') or {}
+    objs3 = dom3.get('objects') or []
+    om3 = dom3.get('omitted') or {}
+    ev['③dom段上限'] = {'页面给了': len(CDP.dom_objects), '返回': len(objs3),
+                     'omitted': om3, '样例': objs3[0] if objs3 else None}
+    need(len(objs3) <= 60, '页面给了 %d 条 DOM，ctl_screen 回了 %d 条 —— 上限 60 是硬要求'
+         % (len(CDP.dom_objects), len(objs3)), reds)
+    need(len(objs3) > 0, '一条 DOM 都没回（上限不该把内容清空）', reds)
+    need(int(om3.get('cap') or 0) == 60,
+         'omitted.cap 应写明 60，实得 %r' % om3.get('cap'), reds)
+    need(int(om3.get('total') or 0) == len(CDP.dom_objects) and int(om3.get('returned') or 0) == len(objs3),
+         'omitted 对不上账：页面 %d / returned %r / total %r'
+         % (len(CDP.dom_objects), om3.get('returned'), om3.get('total')), reds)
+    bad = [o for o in objs3 if not (o.get('role') and o.get('name')
+                                    and isinstance(o.get('rect'), list) and len(o['rect']) == 4
+                                    and o.get('selector') and o.get('source') == 'cdp')]
+    need(not bad, '有 %d 条 DOM 缺 role/name/rect/selector/source：%r' % (len(bad), bad[:1]), reds)
+
+    # ── ④ 端口被**别人**占着 ⇒ 明确拒绝、绝不抢（连起进程都不许起）
+    CDP.reset()
+    CDP.taken_by_other = True
+    r4 = core.dispatch('ctl_browser', {'action': 'launch', 'port': 9222}, actor='判据G1')
+    d4 = r4.get('data') or {}
+    ev['④端口被占'] = {'ok': r4.get('ok'), 'code': r4.get('code'),
+                     'warning': (r4.get('warning') or '')[:260],
+                     '我们起的': d4.get('我们起的'), '建议': d4.get('建议'),
+                     '起过进程': len(CDP.spawned)}
+    need(r4.get('ok') is False and r4.get('code') not in (0, None),
+         '端口已被别人的实例占着，launch 却返回成功（ok=%r）—— 那等于替用户抢浏览器'
+         % r4.get('ok'), reds)
+    need(not CDP.spawned,
+         '端口被占还**起了新进程**：%r —— 这不只是抢端口，是凭空多一个浏览器' % CDP.spawned, reds)
+    w4 = str(r4.get('warning') or '')
+    need('占用' in w4, '拒绝时没说明「端口已被占用」：%s' % w4[:200], reds)
+    need('port' in w4, '拒绝时没给下一步（换 port）：%s' % w4[:200], reds)
+    need(d4.get('我们起的') is False and bool(d4.get('建议')),
+         '拒绝信封没写清「那不是我们起的」+ 建议：%r' % d4, reds)
+
+    # 收尾：把假 cdp 收回「不可达」，别影响后面的组
+    CDP.reset()
+    CDP.install(core)
+    fx.cls = 'TkTopLevel'
+    core._screen_forget(0)
+    return 'S8 CDP 接线与 R1', reds, ev
+
+
 def check_screen_ready(core, fx):
     """S7 · 首扫不可信：暖机**有界**、screen_ready **如实**、**未热 ≠ 拒绝**。
 
@@ -2189,7 +2483,8 @@ def main():
                      ("S4 重叠声明全收", lambda: check_watch_shadow_allhit(core, fx)),
                      ("S5 声明宽度上限", lambda: check_watch_width(core, fx)),
                      ("S6 拒绝信封带屏上下文", lambda: check_watch_reject_ctx(core, fx)),
-                     ("S7 首扫就绪判定", lambda: check_screen_ready(core, fx))):
+                     ("S7 首扫就绪判定", lambda: check_screen_ready(core, fx)),
+                     ("S8 CDP 接线与 R1", lambda: check_cdp_r1(core, fx))):
         title, reds, ev = fn()
         res[title] = reds
         print("")
@@ -2279,7 +2574,10 @@ def main():
               "S7首扫就绪判定：暖机有界（最多2次）、screen_ready 如实、未热≠拒绝；"
               "⑥网页类首扫必探两次（重试≥1，取节点更多那趟）；"
               "⑦首扫两次都冷⇒screen_ready=false（按可报对象数判，不看耗时）；"
-              "⑧非网页类首扫不加延迟（重试=0）；⑨warmup=false 不探第二次但就绪仍如实。")
+              "⑧非网页类首扫不加延迟（重试=0）；⑨warmup=false 不探第二次但就绪仍如实；"
+              "S8CDP接线：DOM命中⇒R1真且must_vlm=false（R2不成立时单独扛）、"
+              "CDP不可达⇒如实false并写进blind_spots（不等于「页面没有」）、"
+              "dom段≤60条且逐条带role/name/rect/selector、端口被别人占⇒明确拒绝不抢。")
     print("退出前 AgentCtlCtrlBorder* 窗 = %s（%s）" % count_border_windows())
     print("=" * 100)
     shutil.rmtree(tmp, ignore_errors=True)

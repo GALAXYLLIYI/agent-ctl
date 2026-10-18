@@ -2490,12 +2490,21 @@ def t_browser(args: dict) -> dict:
        code=4（老脚本自己报错）而不是 code=9（未授权）—— 错误码会误导 agent。
        只读级（A）也要先验一遍通行证。
     """
+    action0 = (args.get("action") or "pages").lower()
+    # ★ 窗G1：launch/close 会**拉起/杀掉一个进程** ⇒ 归 B 级（点击滚动那一档），
+    #   别混在「只读感知」的 A 级里 —— 闸门分级失真比功能缺失更难查。
+    scope = "B" if action0 in ("launch", "close") else "A"
     try:
-        ok, why, code = gate.check("A")
+        ok, why, code = gate.check(scope)
         if not ok:
-            return env(code=code, warning=f"{why} —— 浏览器通道需要「A」级通行证，先 ctl_authorize")
+            return env(code=code, warning="%s —— 浏览器通道需要「%s」级%s通行证，先 ctl_authorize"
+                       % (why, scope, "（launch/close 会起/杀进程）" if scope == "B" else ""))
     except gate.GateDenied as e:
         return env(code=e.code, warning=e.why)
+    if action0 == "launch":
+        return _cdp_launch(args)
+    if action0 == "close":
+        return _cdp_close(args)
     action = (args.get("action") or "pages").lower()
     argv = [action]
     if action in ("text", "html", "find", "eval", "shot", "click", "fill", "goto", "open", "wait"):
@@ -2511,6 +2520,330 @@ def t_browser(args: dict) -> dict:
         argv += [str(args["value"])]
     rc, out, e = _legacy("cdp.py", argv, timeout=int(args.get("timeout_sec") or 90))
     return _map_rc(rc, out, e)
+
+
+# ==========================================================================
+# 窗G1 · CDP 通道**接线**（R1 真判定 + 不碰用户标签页的独立实例）
+# ==========================================================================
+# ★ 这段**不重写 CDP**：DOM 那一侧仍然走现役的 `legacy_tools\cdp.py`
+#   （它内部用 websocket-client；本机只有 websocket，没有 websockets/requests）。
+#   这里只补它没有的两件事：
+#     ① 一个**独立 profile + 自己的调试端口**的实例启动器
+#        （绝不去 attach 用户正在用的浏览器）；
+#     ② 把「端口可达 / 目标页在不在 / DOM 命中」变成**可判定的事实**，
+#        好让 R1 = wired ∧ reachable ∧ dom_hit 真能成立，而不是恒 false。
+# ★ 接缝只有下面两个（判据 monkeypatch 这两个，其余全是真代码）：
+#     _cdp_http(path, port, timeout)  —— /json/version、/json/list 两个 HTTP 端点
+#     _cdp_eval(js, port, timeout)    —— 经 cdp.py eval 在目标页里跑 JS 取 DOM
+CDP_DEFAULT_PORT = 9222
+CDP_HTTP_TIMEOUT_SEC = 3.0
+CDP_EVAL_TIMEOUT_SEC = 25
+SCREEN_DOM_MAX_OBJECTS = 60       # dom 段上限（派单：≤60 条）
+SCREEN_DOM_ASK_OBJECTS = 400      # 向页面要多少条（多要，再在本地裁 —— 裁剪口径得在我们这边）
+CDP_BROWSER_CANDIDATES = (
+    r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+    r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+    r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+    r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+)
+_CDP_PROC = {}                    # port -> {pid, profile, exe, ws}（**只记我们自己起的**）
+
+
+def _cdp_http(path: str, port: int = CDP_DEFAULT_PORT,
+              timeout: float = CDP_HTTP_TIMEOUT_SEC) -> tuple:
+    """GET ``http://127.0.0.1:<port><path>``。返回 (状态码, 正文)；连不上返回 (0, 原因)。
+
+    ★ 只用标准库 urllib —— 本机没有 requests（派单明说，别用）。
+    ★ 这两个端点（/json/version、/json/list）与 cdp.py 的 ``http_get`` 完全一致，
+      不是另起一套协议。
+    """
+    url = "http://127.0.0.1:%d%s" % (int(port), path)
+    try:
+        import urllib.request
+        with urllib.request.urlopen(url, timeout=float(timeout)) as r:
+            return (int(getattr(r, "status", 200) or 200),
+                    (r.read() or b"").decode("utf-8", "replace"))
+    except Exception as e:
+        return 0, "%s: %s" % (type(e).__name__, e)
+
+
+def _cdp_json(path: str, port: int = CDP_DEFAULT_PORT,
+              timeout: float = CDP_HTTP_TIMEOUT_SEC):
+    code, body = _cdp_http(path, port, timeout)
+    if code != 200:
+        return None
+    try:
+        return json.loads(body)
+    except Exception:
+        return None
+
+
+def _cdp_version(port: int = CDP_DEFAULT_PORT) -> dict:
+    """/json/version —— 端口上有没有 CDP 实例。取不到就是空 dict（**不假装有**）。"""
+    return _cdp_json("/json/version", port) or {}
+
+
+def _cdp_pages(port: int = CDP_DEFAULT_PORT, url_contains: str = "") -> list:
+    lst = _cdp_json("/json/list", port) or []
+    pages = [t for t in lst if isinstance(t, dict) and t.get("type") == "page"]
+    kw = str(url_contains or "").strip().lower()
+    if kw:
+        pages = [p for p in pages
+                 if kw in (str(p.get("url") or "") + str(p.get("title") or "")).lower()]
+    return pages
+
+
+def _cdp_eval(js: str, port: int = CDP_DEFAULT_PORT, timeout: int = CDP_EVAL_TIMEOUT_SEC,
+              url_contains: str = "") -> tuple:
+    """在目标页里跑一段 JS。返回 (rc, 解析后的值 or None, 原始输出)。
+
+    ★ 走 cdp.py 的 ``eval`` 子命令 —— WebSocket 那段是现役真代码，本单不重写。
+    ⚠️ cdp.py 的调试端口**写死 9222**（没有 --port，且本单不许改 legacy_tools）
+      ⇒ port≠9222 时 DOM 通道不可用，**如实报不可用**，不假装有。
+    """
+    if int(port) != CDP_DEFAULT_PORT:
+        return 124, None, ("cdp.py 的调试端口写死 %d，port=%s 走不了 DOM 通道"
+                          % (CDP_DEFAULT_PORT, port))
+    argv = ["eval", "--js", str(js)]
+    if url_contains:
+        argv += ["--url", str(url_contains)]
+    rc, out, e = _legacy("cdp.py", argv, timeout=int(timeout))
+    txt = (out or "").strip()
+    if rc != 0:
+        return int(rc), None, (e or out or "").strip()
+    try:
+        return 0, json.loads(txt), txt
+    except Exception:
+        return 0, None, txt
+
+
+# dom 段的取数脚本。刻意做得**笨**：不做可见性精算、不做语义融合、不排序 ——
+# 「先看得见，再谈合并」。要多少条由本地裁（__ASK__ → SCREEN_DOM_MAX_OBJECTS）。
+SCREEN_DOM_JS = r"""(function(){
+  var out = [], all = document.body ? document.body.querySelectorAll('*') : [];
+  for (var i = 0; i < all.length && out.length < __ASK__; i++) {
+    var el = all[i], r = el.getBoundingClientRect();
+    if (r.width < 1 || r.height < 1) continue;
+    var name = (el.getAttribute('aria-label') || el.getAttribute('title') ||
+                (el.tagName === 'INPUT' ? el.value : '') || (el.innerText || ''));
+    name = name.replace(/\s+/g, ' ').trim().slice(0, 120);
+    if (!name) continue;
+    var path = [], n = el;
+    for (var k = 0; n && n.nodeType === 1 && k < 6; k++, n = n.parentElement) {
+      var seg = n.tagName.toLowerCase();
+      if (n.id) { path.unshift(seg + '#' + n.id); break; }
+      var p = n.parentElement;
+      var sib = p ? Array.prototype.filter.call(p.children,
+              function(c){ return c.tagName === n.tagName; }) : [];
+      if (sib.length > 1) seg += ':nth-of-type(' + (sib.indexOf(n) + 1) + ')';
+      path.unshift(seg);
+    }
+    out.push({role: el.tagName.toLowerCase(), name: name,
+              rect: [Math.round(r.left), Math.round(r.top), Math.round(r.width), Math.round(r.height)],
+              selector: path.join(' > ')});
+  }
+  return {url: location.href, title: document.title, scanned: all.length, objects: out};
+})()"""
+
+
+def _screen_dom(*, url_contains: str = "", port: int = CDP_DEFAULT_PORT,
+                timeout: int = CDP_EVAL_TIMEOUT_SEC) -> dict:
+    """DOM 通道（缩水版）：body 下可见元素，**最多 SCREEN_DOM_MAX_OBJECTS 条**。
+
+    ★ 不做 UIA×DOM 的融合排序 —— 两边各自带 ``source``，谁也不冒充谁（派单原话）。
+    ★ 上限在**本地**裁：页面那边多给，裁剪口径留在我们这边，才说得清
+      「omitted.total 是多少、为什么被裁」。
+    """
+    js = SCREEN_DOM_JS.replace("__ASK__", str(int(SCREEN_DOM_ASK_OBJECTS)))
+    rc, val, raw = _cdp_eval(js, port, timeout, url_contains)
+    head = {"wired": False, "page_url": "", "page_title": "", "objects": [],
+            "omitted": {"total": 0, "returned": 0, "cap": SCREEN_DOM_MAX_OBJECTS,
+                        "scanned": 0},
+            "口径": "dom 段是**缩水版**：只取 body 下有名字的可见元素，最多 %d 条；"
+                    "与 UIA 各自带 source，不做融合排序。" % SCREEN_DOM_MAX_OBJECTS}
+    if rc != 0 or not isinstance(val, dict):
+        head["不可用原因"] = (str(raw or ""))[:200] or ("rc=%s" % rc)
+        return head
+    got = [o for o in (val.get("objects") or []) if isinstance(o, dict)]
+    keep = got[:SCREEN_DOM_MAX_OBJECTS]
+    head["wired"] = True
+    head["page_url"] = str(val.get("url") or "")
+    head["page_title"] = str(val.get("title") or "")
+    head["omitted"]["total"] = len(got)
+    head["omitted"]["scanned"] = int(val.get("scanned") or 0)
+    head["objects"] = [{
+        "role": str(o.get("role") or ""),
+        "name": str(o.get("name") or ""),
+        "rect": list(o.get("rect") or [0, 0, 0, 0]),
+        "selector": str(o.get("selector") or ""),
+        "source": "cdp",
+        "source_confidence": dict(SCREEN_SOURCE_CONF["cdp"]),
+    } for o in keep]
+    head["omitted"]["returned"] = len(head["objects"])
+    return head
+
+
+def _cdp_probe(*, port: int = CDP_DEFAULT_PORT, url_contains: str = "",
+               query: str = "", want_dom: bool = True) -> dict:
+    """R1 三要素的事实基础：wired（端口可达）/ reachable（有目标页）/ dom_hit（DOM 命中）。
+
+    ★ 拿不到就**如实拿不到**：不可达时 ``wired=False`` 且带一句原因，
+      绝不把「没查成」写成「查过了，没有」。
+    """
+    out = {"wired": False, "reachable": False, "dom_hit": False,
+           "page_url": "", "browser": "", "端口": int(port), "原因": "", "dom": None}
+    ver = _cdp_version(port)
+    if not ver:
+        out["原因"] = "调试端口 %s 上没有 CDP 实例（/json/version 连不通）" % port
+        return out
+    out["wired"] = True
+    out["browser"] = str(ver.get("Browser") or "")
+    pages = _cdp_pages(port, url_contains)
+    if not pages:
+        out["原因"] = ("端口可达，但没有匹配的页面标签页（url_contains=%r）—— R1 不成立"
+                       % (url_contains or ""))
+        return out
+    out["reachable"] = True
+    out["page_url"] = str(pages[0].get("url") or "")
+    if not want_dom:
+        return out
+    dom = _screen_dom(url_contains=url_contains, port=port)
+    out["dom"] = dom
+    if not dom.get("wired"):
+        out["原因"] = "页面在，但 DOM 取不到：%s" % str(dom.get("不可用原因") or "")[:160]
+        return out
+    q = str(query or "")
+    if q:
+        out["命中节点数"] = sum(1 for o in dom.get("objects") or []
+                                 if _screen_query_hit(q, str(o.get("name") or "")) > 0)
+    out["dom_hit"] = bool(out["命中节点数"])
+    return out
+
+
+# ── 独立实例：起 / 关（不碰用户现有的浏览器）──────────────────────────────
+def _cdp_browser_exe() -> str:
+    """找浏览器可执行文件。找不到就**说找不到**，不瞎编一个路径。"""
+    env_exe = str(os.environ.get("AGENTCTL_BROWSER_EXE") or "").strip()
+    cands = ([env_exe] if env_exe else []) + list(CDP_BROWSER_CANDIDATES)
+    for c in cands:
+        if c and os.path.exists(c):
+            return c
+    return ""
+
+
+def _cdp_spawn(argv: list) -> int:
+    """**接缝**：拉起浏览器进程。判据替换它，真跑时才会真起进程。"""
+    return int(subprocess.Popen([str(a) for a in argv], stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL).pid)
+
+
+def _cdp_kill_tree(pid: int) -> tuple:
+    """**接缝**：taskkill /T 连子进程一起收（浏览器是一棵进程树）。"""
+    r = subprocess.run(["taskkill", "/F", "/T", "/PID", str(int(pid))],
+                       capture_output=True, text=True, encoding="utf-8",
+                       errors="replace", timeout=30)
+    return int(r.returncode), ((r.stdout or "") + (r.stderr or "")).strip()
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        r = subprocess.run(["tasklist", "/FI", "PID eq %d" % int(pid), "/NH"],
+                           capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", timeout=15)
+        return str(int(pid)) in (r.stdout or "")
+    except Exception:
+        return False
+
+
+def _cdp_launch(args: dict) -> dict:
+    """起一个**我们自己的**浏览器实例：独立 profile + 自己的调试端口。
+
+    ⛔ **端口被别人占着就不抢**。理由不是礼貌：那个端口后面是**用户正在用的浏览器会话**，
+    我们抢了等于替用户关掉他所有标签页。抢不到就明说，并给下一步（换端口）。
+    """
+    port = int(args.get("port") or CDP_DEFAULT_PORT)
+    exe = str(args.get("exe") or _cdp_browser_exe())
+    if not exe or not os.path.exists(exe):
+        return env(code=4, warning=("找不到浏览器可执行文件（试过 %s）—— "
+                                    "用 exe= 明确指定，或设环境变量 AGENTCTL_BROWSER_EXE"
+                                    % ("、".join(CDP_BROWSER_CANDIDATES),)))
+    mine = _CDP_PROC.get(port) or {}
+    ver = _cdp_version(port)
+    if ver:
+        if mine.get("pid") and _pid_alive(int(mine["pid"])):
+            return env(ok=True, code=0, data={"pid": int(mine["pid"]), "port": port,
+                             "profile": mine.get("profile"),
+                             "ws": str(ver.get("webSocketDebuggerUrl") or ""),
+                             "复用": True,
+                             "说明": "这个端口上的实例就是本进程之前起的，直接复用"})
+        return env(code=4,
+                   warning=("端口 %d 已被**别的**实例占用（Browser=%s，/json/version 有应答）"
+                            "—— 本调用**拒绝接管**：它不是我们起的，动手脚等于毁掉别人的"
+                            "浏览器会话。下一步：换个 port=<别的端口>，或先请用户自己关掉那个实例。"
+                            % (port, str(ver.get("Browser") or "?"))),
+                   data={"端口": port, "占用者": str(ver.get("Browser") or ""),
+                         "ws": str(ver.get("webSocketDebuggerUrl") or ""),
+                         "我们起的": False, "建议": "ctl_browser launch port=9223"})
+    profile = str(args.get("profile") or os.path.join(
+        os.environ.get("TEMP") or os.environ.get("TMP") or ".",
+        "agentctl_cdp_%d_%d" % (os.getpid(), int(time.time()))))
+    os.makedirs(profile, exist_ok=True)
+    # ★ 2026-10-18（DSH 亲测修）：原来这里**写死 about:blank**，`url` 参数被忽略 ⇒
+    #   launch 之后 /json/list 里只有 about:blank，`url_contains` 永远 reachable=false。
+    #   真实验证据：同参数手工起 Edge 打开 file:///…lab_volatile.html 时 pages=7 里有 page，
+    #   而走本函数起的实例里一条 page 都没有。
+    argv = [exe, "--user-data-dir=%s" % profile,
+            "--remote-debugging-port=%d" % port,
+            # ★ 2026-10-18（DSH 亲测补）：Edge/Chrome 111+ 会**按 Origin 拒 WebSocket**，
+            #   不放这个旗标时客户端握手直接 403（实测报错：
+            #   "Rejected an incoming WebSocket connection from the http://127.0.0.1:9222 origin"）
+            #   ⇒ 本机起的实例连自己的 CDP 都连不上。只放行本机这个端口，不用 `*`。
+            "--remote-allow-origins=http://127.0.0.1:%d" % port,
+            "--no-first-run", "--no-default-browser-check", "--disable-sync",
+            str(args.get("url") or "about:blank")]
+    pid = _cdp_spawn(argv)
+    ws = ""
+    ver = {}
+    for _ in range(60):                       # 最多等 ~15s 让调试端口起来
+        time.sleep(0.25)
+        ver = _cdp_version(port)
+        if ver:
+            ws = str(ver.get("webSocketDebuggerUrl") or "")
+            break
+    if not ver:
+        return env(code=4, warning=("已拉起 pid=%s，但 15 秒内 /json/version 没应答 —— "
+                                    "这个浏览器可能不支持调试端口；profile=%s"
+                                    % (pid, profile)),
+                   data={"pid": pid, "port": port, "profile": profile})
+    _CDP_PROC[port] = {"pid": int(pid), "profile": profile, "exe": exe, "ws": ws}
+    return env(ok=True, code=0, data={"pid": int(pid), "port": port, "profile": profile,
+                     "ws": ws, "浏览器": str(ver.get("Browser") or ""),
+                     "启动参数": argv,
+                     "说明": "独立 profile，与用户日常浏览器互不相干；"
+                             "用 action=close 关掉（taskkill /T 并核对退出）"})
+
+
+def _cdp_close(args: dict) -> dict:
+    """关掉**我们起的**那个实例：taskkill /T，然后**核对它真的退了**。"""
+    port = int(args.get("port") or CDP_DEFAULT_PORT)
+    mine = _CDP_PROC.get(port) or {}
+    pid = int(args.get("pid") or mine.get("pid") or 0)
+    if not pid:
+        return env(code=4, warning=("不知道要关哪个实例：本进程没在 %d 端口起过浏览器，也没给 pid"
+                                    % port))
+    rc, out = _cdp_kill_tree(pid)
+    for _ in range(30):
+        if not _pid_alive(pid):
+            break
+        time.sleep(0.1)
+    alive = _pid_alive(pid)
+    port_free = not bool(_cdp_version(port))
+    _CDP_PROC.pop(port, None)
+    return env(ok=True, code=0,
+               data={"pid": pid, "taskkill_rc": rc, "taskkill": out,
+                     "进程已退出": not alive, "端口已释放": port_free},
+               warning=("pid=%s 还在，端口 %d 也没松 —— 关不掉，别当成已关" % (pid, port)
+                        if (alive or not port_free) else None))
 
 
 def t_focus(args: dict) -> dict:
@@ -2579,7 +2912,10 @@ SCREEN_CONF_ATTRS = ("bbox", "text", "existence")
 SCREEN_SOURCE_CONF = {
     #               bbox   text   existence
     "uia": {"bbox": 1.00, "text": 1.00, "existence": 1.00},  # 无障碍树：控件自己的自述，最强
-    "cdp": {"bbox": 0.90, "text": 0.90, "existence": 0.90},  # DOM 结构（本版未接线）
+    # ★ 窗G1：CDP 这档**已接线**（dom 段逐条带它，R1 命中时也报它）。
+    #   0.90 的口径：DOM 是浏览器的**自述**结构，比 UIA 的原生控件弱一档（可能含被 CSS 藏起来的），
+    #   但比 OCR 强得多（它是真结构，不是像素猜测）。
+    "cdp": {"bbox": 0.90, "text": 0.90, "existence": 0.90},  # DOM 结构
     # OCR：像素只证明「那儿有块墨」，**证明不了那是个可点的控件** ⇒ existence 单独压低；
     # 而它给的框是像素框（点下去大概率偏）⇒ bbox 也不高，但**与 text 分开记**。
     "ocr": {"bbox": 0.55, "text": 0.55, "existence": 0.40},
@@ -2638,13 +2974,16 @@ def screen_must_vlm(r1: bool, r2: bool, r3: bool) -> bool:
 def screen_channels(*, interactive_count: int, target_hit: bool,
                     name_trust: str = "high",
                     cdp_wired: bool = False, cdp_reachable: bool = False,
+                    dom_hit: bool = False,
                     ocr_wired: bool = False, ocr_hit: bool = False,
                     ocr_bbox_usable: bool = False) -> dict:
     """三条通道各自的命中情况 + must_vlm 判定（修正⑤ + **Z2 二次修正：R2 加门槛**）。
 
-    ★ 本单**只判定、不接线**：R1(CDP) 与 R3(OCR) 的 wired 恒为 false，
-      于是 reachable/hit 也恒为 false —— 没接线的通道**不许报命中**，
+    ★ 窗G1 起：**R1(CDP) 已接线** —— wired/reachable/dom_hit 都是真探测来的事实
+      （见 `_cdp_probe`：/json/version 有没有应答、有没有目标页、DOM 里命不命中）。
+      探测不到就**如实报 false**，绝不把「没查成」写成「查过了，没有」——
       否则 agent 会以为「DOM 已经查过了，没有」而漏掉真正存在的东西。
+    ★ R3(OCR) 仍是**只判定不接线**（wired 恒 false），理由同上。
 
     ★ **R2 = 可交互数 ≥ 阈值 ∧ 目标命中 ∧ name_trust ≠ "offset-suspect"**。
       最后那半截是 Z2 加的门槛：网页选项「疑似错位」（控件自称的字母与它在屏幕上的位置
@@ -2653,12 +2992,14 @@ def screen_channels(*, interactive_count: int, target_hit: bool,
     """
     trust = str(name_trust or "high")
     trust_ok = (trust != "offset-suspect")
-    r1 = bool(cdp_wired and cdp_reachable and target_hit)
+    # ★ 窗G1：R1 的命中必须是 **DOM 命中**，不是 UIA 的那个 ——
+    #   两者共用一个参数会让「UIA 命中」冒充「DOM 命中」，R1 就成了假绿。
+    r1 = bool(cdp_wired and cdp_reachable and dom_hit)
     r2 = bool(int(interactive_count) >= SCREEN_R2_MIN_INTERACTIVE
               and target_hit and trust_ok)
     r3 = bool(ocr_wired and ocr_hit and ocr_bbox_usable)
     why = ["R1(CDP+DOM)=%s%s" % ("命中" if r1 else "不成立",
-                                  "" if cdp_wired else "（本版未接线）"),
+                                  "" if cdp_wired else "（CDP 不可达，接不上一条事实）"),
           "R2(UIA)=%s（可交互 %d，阈值 %d，目标%s，name_trust=%s%s）"
           % ("命中" if r2 else "不成立", int(interactive_count),
              SCREEN_R2_MIN_INTERACTIVE, "命中" if target_hit else "未命中",
@@ -2668,7 +3009,7 @@ def screen_channels(*, interactive_count: int, target_hit: bool,
     return {
         "R1_cdp": {"wired": bool(cdp_wired),
                     "reachable": bool(cdp_reachable and cdp_wired),
-                    "dom_hit": bool(target_hit and cdp_wired and cdp_reachable),
+                    "dom_hit": bool(dom_hit and cdp_wired and cdp_reachable),
                     "hit": r1},
         "R2_uia": {"wired": True, "interactive_count": int(interactive_count),
                     "threshold": SCREEN_R2_MIN_INTERACTIVE,
@@ -3382,6 +3723,20 @@ def _screen_build(hwnd: int, args: dict) -> dict:
     first_scan = not prev
     min_probes = _screen_min_probes(warmup=warmup, is_web=is_web, first_scan=first_scan)
 
+    # ★ 窗G1：网页类窗口顺带把 **CDP 通道探一下**（R1 的三要素就在这儿落地）。
+    #   非网页类不探 —— UIA 已经够了，为一个原生窗口去连调试端口纯属浪费。
+    #   探不到就是探不到：下面 R1 会如实报 false，不假装「查过了，没有」。
+    cdp_port = int(args.get("cdp_port") or CDP_DEFAULT_PORT)
+    cdp = (_cdp_probe(port=cdp_port,
+                      url_contains=str(args.get("cdp_url_contains") or ""),
+                      query=str(args.get("query") or ""),
+                      want_dom=bool(args.get("cdp_dom") is not False))
+           if (is_web and args.get("cdp") is not False) else
+           {"wired": False, "reachable": False, "dom_hit": False, "dom": None,
+            "page_url": "", "browser": "", "端口": cdp_port,
+            "原因": ("这一屏不是网页类窗口（或显式关了 cdp 参数），没去连调试端口"
+                     if not is_web else "调用方显式关掉了 cdp 通道")})
+
     best = None
     attempts = 0
     waited_ms = 0.0
@@ -3531,7 +3886,16 @@ def _screen_build(hwnd: int, args: dict) -> dict:
     hit_labels = " ".join(o["label"] for o in cands if o["in_view"])
     channels = screen_channels(interactive_count=n_interactive,
                                target_hit=bool(_screen_query_hit(query, hit_labels)),
-                               name_trust=trust)      # ← ③ R2 的 name_trust 门槛
+                               name_trust=trust,      # ← ③ R2 的 name_trust 门槛
+                               # ← 窗G1：R1 用**真**的 CDP 三要素（DOM 命中，不是 UIA 的那个）
+                               cdp_wired=bool(cdp.get("wired")),
+                               cdp_reachable=bool(cdp.get("reachable")),
+                               dom_hit=bool(cdp.get("dom_hit")))
+    # R1 命中时把 DOM 侧的证据摆出来：命中几个节点、按什么置信度算的。
+    channels["R1_cdp"]["命中节点数"] = int(cdp.get("命中节点数") or 0)
+    channels["R1_cdp"]["page_url"] = str(cdp.get("page_url") or "")
+    channels["R1_cdp"]["端口"] = int(cdp.get("端口") or cdp_port)
+    channels["R1_cdp"]["source_confidence"] = dict(SCREEN_SOURCE_CONF["cdp"])
 
     out = {
         "screen_version": screen_version,                 # ← 修正②
@@ -3556,6 +3920,12 @@ def _screen_build(hwnd: int, args: dict) -> dict:
         "objects": objects,
         "texts": texts,
         "channels": channels,                              # ← 修正⑤
+        # ★ 窗G1：DOM 通道（**缩水版**，不做 UIA×DOM 融合 —— 先看得见，再谈合并）。
+        #   没连上时是 {wired:false, objects:[]} 并带一句原因，**不假装有通道**。
+        "dom": dict(cdp.get("dom") or {"wired": False, "page_url": "", "objects": [],
+                                        "omitted": {"total": 0, "returned": 0,
+                                                    "cap": SCREEN_DOM_MAX_OBJECTS},
+                                        "不可用原因": str(cdp.get("原因") or "")[:200]}),
         "omitted": {
             "total": total_cands,                          # 真实候选总数（含屏外；视口过滤/top-N 之前）
             "returned": len(objects),
@@ -3722,6 +4092,17 @@ def t_screen(args: dict) -> dict:
                 "不要当成页面上没有**。"
                 % ("；".join(ev.get("判定") or []) or "依据不足",
                    ev.get("节点数"), ev.get("重试"))]
+        # ★ 窗G1：网页类窗口但 **CDP 没接上** ⇒ R1 不成立，同样**只进 blind_spots、不动信封**
+        #   （和 F2 的「未热≠拒绝」同一条纪律：通道不可用是**证据不足**，不是「没有」）。
+        if isinstance(res, dict):
+            dom = res.get("dom") or {}
+            ch1 = ((res.get("channels") or {}).get("R1_cdp") or {})
+            if not dom.get("wired") and _screen_is_web_window(res.get("window") or {}):
+                r["blind_spots"] = list(r.get("blind_spots") or []) + [
+                    "CDP 通道没接上（R1 不成立）：%s —— **这不等于「页面上没有它」**，"
+                    "只是这一屏没有 DOM 这条证据。下一步：ctl_browser action=launch 起一个"
+                    "独立实例（或把 cdp_port 指到你已在调试的浏览器），再调一次。"
+                    % (str(dom.get("不可用原因") or "端口 %s 上没有 CDP 实例" % ch1.get("端口"))[:160],)]
         if isinstance(res, dict) and isinstance(res.get("watch_校验"), dict):
             # ★ 与拒绝路径对齐：成功时 watch_校验 也抬到 data 上（拒绝时那里没有「结果」段）。
             #   否则同一个字段两个位置，调用方得记住「成功去哪儿找、失败去哪儿找」。

@@ -442,6 +442,25 @@
             "default": false,
             "description": "允许 watch_text 里暂时匹配不到的声明挂起（返回里逐条标 pending，并进 blind_spots 提醒「还没盯上」）。默认 false＝匹配不到就拒绝整个调用，不许静默。宽度超限（单条命中 >8）的声明挂起救不了——它已命中，只是太宽，须把串改具体。"
           },
+          "cdp": {
+            "type": "boolean",
+            "default": true,
+            "description": "是否顺手探一下 CDP 通道（只对网页类窗口探；非网页窗口本来 UIA 就够）。传 false 跳过探测。"
+          },
+          "cdp_port": {
+            "type": "integer",
+            "default": 9222,
+            "description": "CDP 调试端口。⚠️ cdp.py 的端口写死 9222 —— 填别的端口时 DOM 段会**如实报不可用**（R1 走不通），不会假装有。"
+          },
+          "cdp_url_contains": {
+            "type": "string",
+            "description": "按 URL/标题关键字挑目标标签页；不填取第一个 page 类型标签页。"
+          },
+          "cdp_dom": {
+            "type": "boolean",
+            "default": true,
+            "description": "要不要取 dom 段（DOM 元素清单）。只要 R1 判定可以传 false 省一次页面内求值。"
+          },
           "warmup": {
             "type": "boolean",
             "default": true,
@@ -462,7 +481,7 @@
         ],
         "additionalProperties": false
       },
-      "returns": "{ screen_ready, ready_证据{节点数,与上次相比,等待毫秒,重试,各次节点数,采集毫秒,重试上限,间隔毫秒,窗口类别,首扫强制探测,判定,口径}, screen_version, window{hwnd,title,cls,pid}, viewport{client,scroll_y,doc_height,scroll_unknown}, objects[{id,uid,label,role,rect,in_view,interactive,actions,source,source_confidence,conf_bbox,conf_text,conf_existence,name_trust,volatile,exempted,watched,score,[uid_state]}], texts[{id,text,rect}], channels{R1_cdp,R2_uia,R3_ocr,must_vlm}, omitted{total,returned,reason,top,breakdown}, 打分口径, 必进保证, uid_口径, uid_state_口径, conf_口径, name_trust_口径, name_trust_依据, [watch_校验{matched,unmatched,pending,命中节点数}, watch_口径],[since_echo,version_match,screen_version_新值,版本口径], [delta{since_echo,version_match,screen_version_新值,新增,消失,uid_state_统计}], 窗口状态, capture_id, [声明校验拒绝信封: {watch_校验, screen_version, window, 对象总数, 拒因}, blind_spots 明写「校验失败≠屏幕空」，不含 objects] }"
+      "returns": "{ screen_ready, [dom{wired,page_url,page_title,objects[{role,name,rect,selector,source:cdp,source_confidence}],omitted{total,returned,cap},口径,[不可用原因]}], ready_证据{节点数,与上次相比,等待毫秒,重试,各次节点数,采集毫秒,重试上限,间隔毫秒,窗口类别,首扫强制探测,判定,口径}, screen_version, window{hwnd,title,cls,pid}, viewport{client,scroll_y,doc_height,scroll_unknown}, objects[{id,uid,label,role,rect,in_view,interactive,actions,source,source_confidence,conf_bbox,conf_text,conf_existence,name_trust,volatile,exempted,watched,score,[uid_state]}], texts[{id,text,rect}], channels{R1_cdp,R2_uia,R3_ocr,must_vlm}, omitted{total,returned,reason,top,breakdown}, 打分口径, 必进保证, uid_口径, uid_state_口径, conf_口径, name_trust_口径, name_trust_依据, [watch_校验{matched,unmatched,pending,命中节点数}, watch_口径],[since_echo,version_match,screen_version_新值,版本口径], [delta{since_echo,version_match,screen_version_新值,新增,消失,uid_state_统计}], 窗口状态, capture_id, [声明校验拒绝信封: {watch_校验, screen_version, window, 对象总数, 拒因}, blind_spots 明写「校验失败≠屏幕空」，不含 objects] }"
     },
     {
       "name": "ctl_find",
@@ -1191,14 +1210,14 @@
     {
       "name": "ctl_browser",
       "title": "浏览器 CDP",
-      "description": "包壳调用现有 cdp.py：列标签页 / 读可见文字 / 按选择器找元素 / 执行 JS。网页场景的最强通道。",
+      "description": "包壳调用现有 cdp.py：列标签页 / 读可见文字 / 按选择器找元素 / 执行 JS。网页场景的最强通道。\n\n★ **launch = 起一个我们自己的浏览器实例**（独立 profile，不碰你正在用的浏览器）：`--user-data-dir=<独立profile目录> --remote-debugging-port=<port> --no-first-run --no-default-browser-check --disable-sync`。★ **端口被别人占着就明确拒绝、绝不抢**（那个端口后面是用户正在用的会话，抢了等于替他关标签页）—— 报错里给出「换个 port=」的下一步。关用 `action=close`（taskkill /T 并核对进程真的退出）。launch/close 会起/杀进程，**要 B 级通行证**；其余子命令仍是 A 级只读。",
       "annotations": {
-        "readOnlyHint": true,
+        "readOnlyHint": false,
         "destructiveHint": false,
         "idempotentHint": true,
         "openWorldHint": true
       },
-      "gate": "A",
+      "gate": "A/B",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -1208,7 +1227,17 @@
               "pages",
               "text",
               "find",
-              "eval"
+              "eval",
+              "html",
+              "click",
+              "fill",
+              "shot",
+              "goto",
+              "cookies",
+              "open",
+              "wait",
+              "launch",
+              "close"
             ]
           },
           "url_contains": {
@@ -1219,6 +1248,23 @@
           },
           "js": {
             "type": "string"
+          },
+          "port": {
+            "type": "integer",
+            "default": 9222,
+            "description": "调试端口（launch/close 用；默认 9222）。★ 端口上已有**别人**的实例时明确拒绝接管。"
+          },
+          "exe": {
+            "type": "string",
+            "description": "launch：浏览器可执行文件路径；不填按 Edge/Chrome 常见路径找，找不到就明说。"
+          },
+          "profile": {
+            "type": "string",
+            "description": "launch：独立 profile 目录；不填用 %TEMP% 下的 agentctl_cdp_<pid>_<时间戳>。"
+          },
+          "pid": {
+            "type": "integer",
+            "description": "close：要关的进程号；不填则关本进程在 port 上起过的那个。"
           }
         },
         "required": [
@@ -1226,7 +1272,7 @@
         ],
         "additionalProperties": false
       },
-      "returns": "视 action 而定；eval 返回 JS 执行结果"
+      "returns": "视 action 而定；eval 返回 JS 执行结果；launch 返回 {pid, port, profile, ws, 浏览器, 启动参数, 复用?}；端口被别人占着时 ok=false/code=4 并带 {端口, 占用者, 我们起的:false, 建议}；close 返回 {pid, taskkill_rc, 进程已退出, 端口已释放}（没退干净会给 warning，不假装已关）"
     }
   ],
   "_本版未列入（v1.1 补，列在这里是为了不和设计文档的完整清单打架）": {
