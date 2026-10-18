@@ -3023,6 +3023,25 @@ def check_cdp_r1(core, fx):
     need((c1.get('source_confidence') or {}).get('existence') == 0.90,
          'R1 命中时 source_confidence.cdp 该给 DOM 的真值（0.90 量级），实得 %r'
          % (c1.get('source_confidence'),), reds)
+
+    # ── ①b2 **query 为空 + CDP 可用 ⇒ 不许崩**（2026-10-18 DSH 真浏览器实测抓到的 KeyError）
+    #   真事：`ctl_screen(cdp_port=9333)` 不带 query 时，`_cdp_probe` 里
+    #   `out["命中节点数"]` 只在 `if q:` 里赋值、下一行却直接下标读 ⇒ KeyError ⇒ 闸门报 code=15。
+    #   判据之前没抓到，是因为假的 CDP 每次都带了 query。这里补一条"空 query"的回归锁。
+    CDP.reset()
+    CDP.up = True
+    CDP.dom_objects = CDP.make_dom(12, hit_text=DOM_ONLY_QUERY)
+    core._screen_forget(0)
+    r0q, sc0q = call(core, top=200)          # ★ 不给 query
+    c0q = (sc0q.get('channels') or {}).get('R1_cdp') or {}
+    ev['①b2空query'] = {'ok': r0q.get('ok'), 'code': r0q.get('code'),
+                        'R1_cdp': c0q, 'warning': str(r0q.get('warning'))[:120]}
+    need(r0q.get('ok') is True and r0q.get('code') == 0,
+         'query 为空 + CDP 可用时整调用崩了（ok=%r code=%r warning=%r）—— '
+         '这是 `命中节点数` 只在 if q 里赋值、却直接下标读的 KeyError'
+         % (r0q.get('ok'), r0q.get('code'), str(r0q.get('warning'))[:120]), reds)
+    need(c0q.get('dom_hit') is False,
+         'query 为空时 dom_hit 应为 false（没给目标词，谈不上命中）；实得 %r' % c0q.get('dom_hit'), reds)
     need(int(c1.get('命中节点数') or 0) >= 1,
          'R1 命中却没报命中节点数：%r' % c1.get('命中节点数'), reds)
 

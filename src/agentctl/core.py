@@ -2955,6 +2955,11 @@ def _cdp_probe(*, port: int = CDP_DEFAULT_PORT, url_contains: str = "",
         out["原因"] = "页面在，但 DOM 取不到：%s" % str(dom.get("不可用原因") or "")[:160]
         return out
     q = str(query or "")
+    # ★ 2026-10-18（DSH 真浏览器实测抓到的崩溃）：原来只在 `if q:` 里写 `命中节点数`，
+    #   下一行却**直接下标**读它 ⇒ `query` 为空（正常调用形态！）时抛 KeyError('命中节点数')，
+    #   被闸门包成 code=15「读元素树失败」。判据没抓到是因为假的 cdp 每次都带了 query。
+    #   修法：先给 0，再按需覆盖。
+    out["命中节点数"] = 0
     if q:
         out["命中节点数"] = sum(1 for o in dom.get("objects") or []
                                  if _screen_query_hit(q, str(o.get("name") or "")) > 0)
