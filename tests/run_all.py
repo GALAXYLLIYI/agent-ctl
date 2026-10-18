@@ -160,6 +160,16 @@ CRITERIA = (
      "frame_id 版本匹配后还要判帧龄，超 TTL ⇒ code=12/判定=过期/零像素并给出帧龄与 TTL；"
      "新鲜帧正常放行；关掉 TTL 分支后不再判过期（证明拒绝确实来自 TTL）；"
      "--inject（把 _frame_ttl_ms 打成 0）必须变红"),
+    ("输入判词", "_输入判词_判据.py", (),
+     "第26条（2026-10-18 §㊾ A 项）：**点没点到 ≠ 点到了没生效** —— "
+     "回执必须带 input{fg_ok,hit_ok,cursor,verdict}；目标前台下 verdict=accepted；"
+     "code=8（画面没变）时仍判 accepted，而不是 unknown；"
+     "--inject（_input_snapshot 恒 unknown）必须变红"),
+    ("体检", "_体检_判据.py", (),
+     "第27条（2026-10-18 §㊾ B 项）：**开工前体检不说谎** —— "
+     "ctl_preflight 给 window/sensitive/channels/frame/auth + verdict/advice；"
+     "空 hwnd ⇒ no_window；敏感窗（自己起的控制台）⇒ blocked_sensitive；"
+     "--inject（_deny_sensitive_target 恒 None）必须变红"),
 
 )
 
@@ -182,6 +192,8 @@ INJECTABLE = {
     #     我亲跑 run_all --inject 又看到它被判"死"⇒ 同日摘出，只留 4 条。）
     "点错窗": ("--inject",),
     "帧过期": ("--inject",),
+    "输入判词": ("--inject",),
+    "体检": ("--inject",),
 }
 
 

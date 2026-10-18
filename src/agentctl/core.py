@@ -3078,6 +3078,45 @@ def _click_by_name(hwnd: int, name: str, args: dict):
 # 为什么需要：screen_version 只能抓住「画面变了」；抓不住「你拿着一张十分钟前的
 # 旧帧去点」——画面没变、版本没变，但**你的判词会挂在一张早就不代表现在的帧上**。
 # ZCode 原话：证据必须绑 frame_id + TTL，否则判词对不上账。
+
+# ── 输入/事件通道判词（2026-10-18 §㊾ 的 A 项）─────────────────────────────
+# 治的病：`code=8`（发出去了但画面没变）现在**分不清**是哪种原因——
+#   ① 根本没点到目标（被挡/前台被别人抢/坐标落在别的窗）  ← 输入通道的问题
+#   ② 点到了，但界面本来就不该有可见变化（焦点/光标/延迟渲染） ← 感知判词的问题
+# 所以发送前先把输入侧事实记下来，随回执一起返回 input{...} + input_verdict。
+def _input_snapshot(hwnd: int, xy=None):
+    """抓发送前的输入侧事实：前台、光标、落点归属。**失败一律 None**（不假装知道）。"""
+    snap = {"fg_ok": None, "hit_ok": None, "cursor": None,
+            "fg_hwnd": None, "hit_hwnd": None}
+    try:
+        import ctypes                                        # noqa: PLC0415
+        u32 = ctypes.windll.user32
+        fg = int(u32.GetForegroundWindow() or 0)
+        snap["fg_hwnd"] = fg
+        snap["fg_ok"] = (fg == int(hwnd))
+        pt = ctypes.wintypes.POINT()
+        if u32.GetCursorPos(ctypes.byref(pt)):
+            snap["cursor"] = [int(pt.x), int(pt.y)]
+    except Exception:
+        pass
+    try:
+        if xy:
+            hit = _win_at_point(float(xy[0]), float(xy[1]))
+            if hit is not None:
+                snap["hit_hwnd"] = int(hit)
+                snap["hit_ok"] = (int(hit) == int(hwnd))
+    except Exception:
+        pass
+    if snap["hit_ok"] is False or snap["fg_ok"] is False:
+        verdict = "not_target" if snap["hit_ok"] is False else "foreground_blocked"
+    elif snap["fg_ok"] is True:
+        verdict = "accepted"
+    else:
+        verdict = "unknown"
+    snap["verdict"] = verdict
+    return snap
+
+
 def _frame_ttl_ms(args: dict) -> int:
     """帧有效期（毫秒）：调用方 > 环境变量 > 默认 30000。≤0 表示不判过期。"""
     for raw in (args.get("frame_ttl_ms"), os.environ.get("AGENTCTL_FRAME_TTL_MS")):
@@ -3299,10 +3338,13 @@ def t_click(args: dict) -> dict:
     _derr = _deny_sensitive_target(hwnd, "ctl_click", "点击")
     if _derr:
         return _derr
+    # ★ A 项：发送**之前**抓输入侧事实（发送之后前台可能已经变了，抓了就没意义）
+    _inp = _input_snapshot(hwnd, _xy(args["xy"]) if args.get("xy") else None)
     r = _act("click", args, argv)
     # ★ P0-A：frame_id 校验结论在**动作之后立即**回显，不只在 ok 时。
     #   动作本身失败但**凭据是对的**（例如点击发出去了但画面没变 → code=8）时，
     #   这条信息正好最值钱 —— 只在成功时才看得见的设计，恰好在需要它的场合隐身。
+    r["data"] = {**(r.get("data") or {}), "input": _inp}
     if args.get("frame_id_校验"):
         r["data"] = {**(r.get("data") or {}), "frame_id_校验": args["frame_id_校验"]}
     if r.get("ok") and args.get("_eid_hit"):
@@ -5683,8 +5725,110 @@ def t_not_implemented(name: str):
     return f
 
 
+# ── preflight 体检（2026-10-18 §㊾ 的 B 项）──────────────────────────────
+# 目的：把"动手之后才发现"的坑（没通行证/敏感窗/UIA 读不到/DOM 连不上/帧太旧）
+# 全部**前移**成开干前 30 秒就能看到的一页结论。
+def t_preflight(args: dict) -> dict:
+    hwnd = int(args.get("hwnd") or 0)
+    out = {"window": None, "sensitive": None, "channels": {}, "frame": None,
+           "auth": {}, "verdict": None, "advice": None}
+    # ① 窗口身份
+    if hwnd:
+        try:
+            import ctypes                                      # noqa: PLC0415
+            import ctypes.wintypes as wt                       # noqa: PLC0415
+            u32 = ctypes.windll.user32
+            cls = ctypes.create_unicode_buffer(128)
+            u32.GetClassNameW(hwnd, cls, 128)
+            ttl = ctypes.create_unicode_buffer(300)
+            u32.GetWindowTextW(hwnd, ttl, 300)
+            rc = wt.RECT()
+            u32.GetWindowRect(hwnd, ctypes.byref(rc))
+            pid = wt.DWORD()
+            u32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            out["window"] = {"hwnd": hwnd, "pid": int(pid.value), "class": cls.value,
+                             "title": ttl.value, "visible": bool(u32.IsWindowVisible(hwnd)),
+                             "rect": [rc.left, rc.top, rc.right, rc.bottom],
+                             "foreground": int(u32.GetForegroundWindow() or 0) == hwnd}
+        except Exception as e:
+            out["window"] = {"hwnd": hwnd, "error": "%s: %s" % (type(e).__name__, e)}
+    # ② 敏感窗
+    try:
+        d = _deny_sensitive_target(hwnd, "ctl_preflight", "注入") if hwnd else None
+        out["sensitive"] = {"denied": bool(d), "why": (d or {}).get("warning") if d else None}
+    except Exception as e:
+        out["sensitive"] = {"denied": None, "why": "%s: %s" % (type(e).__name__, e)}
+    # ③ 通道
+    try:
+        nodes = 0
+        if hwnd:
+            _tr = uia_tree.tree(hwnd, max_nodes=400, detail=False)
+            _nodes = getattr(_tr, "nodes", None)
+            if _nodes is None:
+                _nodes = getattr(_tr, "count", None)
+            if _nodes is None:
+                try:
+                    _nodes = len(_tr)
+                except Exception:
+                    _nodes = 0
+            nodes = int(_nodes or 0)
+        out["channels"]["uia"] = {"nodes": nodes, "usable": nodes > 0}
+    except Exception as e:
+        out["channels"]["uia"] = {"nodes": None, "usable": None, "error": str(e)[:80]}
+    try:
+        import importlib                                       # noqa: PLC0415
+        importlib.import_module("agentctl.ocr")
+        out["channels"]["ocr"] = {"usable": True}
+    except Exception as e:
+        out["channels"]["ocr"] = {"usable": False, "error": str(e)[:80]}
+    port = args.get("cdp_port") or os.environ.get("AGENTCTL_CDP_PORT")
+    if port:
+        try:
+            import urllib.request                              # noqa: PLC0415
+            with urllib.request.urlopen("http://127.0.0.1:%s/json/version" % port, timeout=2) as f:
+                info = json.loads(f.read().decode("utf-8", "replace"))
+            out["channels"]["cdp"] = {"port": int(port), "usable": True,
+                                      "browser": str(info.get("Browser") or "")[:60]}
+        except Exception as e:
+            out["channels"]["cdp"] = {"port": int(port), "usable": False,
+                                      "error": str(e)[:80]}
+    # ④ 帧
+    _rec = _SCREEN_SEEN.get(hwnd) or {}
+    _t0 = float(_rec.get("t") or 0)
+    age = int(max(0.0, time.time() - _t0) * 1000) if _t0 else None
+    ttl = _frame_ttl_ms(args)
+    out["frame"] = {"screen_version": _rec.get("seen_version") or None,
+                    "age_ms": age, "ttl_ms": ttl,
+                    "fresh": (age is not None and (ttl <= 0 or age <= ttl))}
+    # ⑤ 通行证 / 租约 / 急停
+    try:
+        st = t_status({"actor": args.get("actor") or "preflight"})
+        d = st.get("data") or {}
+        d = d.get("结果") if isinstance(d.get("结果"), dict) else d
+        out["auth"] = {"pass": (d.get("pass") or {}), "lease": (d.get("lease") or {}),
+                       "brake": (d.get("brake") or {})}
+    except Exception as e:
+        out["auth"] = {"error": "%s: %s" % (type(e).__name__, e)}
+    # ⑥ 结论
+    if not hwnd:
+        out["verdict"], out["advice"] = "no_window", "先 ctl_windows 拿到 hwnd"
+    elif not (out["window"] or {}).get("visible"):
+        out["verdict"], out["advice"] = "no_window", "窗口不可见：先把它显示出来再动手"
+    elif (out.get("sensitive") or {}).get("denied"):
+        out["verdict"], out["advice"] = "blocked_sensitive", "敏感窗：注入永久拒绝，只读也受限"
+    elif not out["frame"]["fresh"]:
+        out["verdict"], out["advice"] = "stale_frame", "先 ctl_screen 拿新帧（frame_id 会过期）"
+    elif not (out["channels"].get("uia") or {}).get("usable") and not (
+            out["channels"].get("cdp") or {}).get("usable"):
+        out["verdict"], out["advice"] = "blind", "UIA 读不到且没有 CDP：只能像素+OCR，风险高"
+    else:
+        out["verdict"], out["advice"] = "ready", "可以开工"
+    return env(ok=True, code=0, data={"结果": out}, warning=None)
+
+
 TOOLS = {
     "ctl_status": t_status,
+    "ctl_preflight": t_preflight,
     "ctl_lease": t_lease,
     "ctl_brake": t_brake,
     "ctl_timeline": t_timeline,
@@ -5770,6 +5914,8 @@ def dispatch(tool: str, args: dict, *, actor: str = "") -> dict:
     except Exception:
         pass
     return r
+
+
 
 
 def tool_list() -> list[dict]:

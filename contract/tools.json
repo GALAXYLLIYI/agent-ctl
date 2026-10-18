@@ -437,7 +437,9 @@
           },
           "watch_text": {
             "type": "array",
-            "items": { "type": "string" },
+            "items": {
+              "type": "string"
+            },
             "maxItems": 32,
             "description": "★ 任务声明制：声明本任务要盯的文本。匹配口径：声明串与 label 各自经 NFKC→去零宽→空白折叠→casefold 归一后作**真子串**比对（方向=声明串 ⊆ label，不可逆；**不是正则**，元字符按字面量）。声明串必须选**跨本次任务改动仍稳定**的子串（盯「剩余可选 3 项 · 第 7/20 步」就声明「剩余可选」，别声明全文——全文会在目标改文的那一趟被拒）。★ 被命中的节点即使命中 volatile 规则也**不豁免**（watched=true ⇒ exempted=false）：text_key 照常实算、参与 screen_version 进位与 delta，变更必报 TEXT_CHANGED；且不受视口过滤（滚出屏幕也照比）、不受 top 预算裁剪。声明压过 role 名单与正则。★ 记账是**全收**的：一个节点命中几条声明就记几条；单条声明命中节点数上限 **8**（WATCH_TEXT_WIDTH_MAX），超宽 ⇒ **拒绝整调用**并点名串与命中数（watch_pending 救不了超宽——它现在就命中了）。★ 首扫校验：某条声明匹配不到任何节点 ⇒ 整个调用拒绝（rc≠0）并列出 watch_校验.unmatched（不静默）；拒绝信封带 screen_version / window / 对象总数，blind_spots 明写这是**校验失败**不是屏幕空。要等节点稍后出现须显式 watch_pending=true（挂起项会进 blind_spots）。★ 单次声明条数上限 32；watch_text 传**空串**按形态错误拒绝，空数组/缺省 = 不声明。★ 声明集不同 ⇒ screen_version 口径不同：同一任务每次扫描都带**同一份**声明；带声明的自走串会持续推高 version，别拿「version 没动」当「页面没动」。"
           },
@@ -1359,6 +1361,37 @@
         "additionalProperties": false
       },
       "returns": "视 action 而定；eval 返回 JS 执行结果；launch 返回 {pid, port, profile, ws, 浏览器, 启动参数, 复用?}；端口被别人占着时 ok=false/code=4 并带 {端口, 占用者, 我们起的:false, 建议}；close 返回 {pid, taskkill_rc, 进程已退出, 端口已释放}（没退干净会给 warning，不假装已关）"
+    },
+    {
+      "name": "ctl_preflight",
+      "title": "开工前体检",
+      "description": "★ 动手前 30 秒回答「这块地能不能干活」：窗口身份 / 敏感窗 / 三条通道（UIA 节点数、OCR、CDP 端口）/ 帧是否新鲜（含 TTL）/ 通行证+租约+急停，最后给 verdict（ready / stale_frame / blind / blocked_sensitive / no_window / needs_pass）与一句话建议。只读，A 级。",
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "gate": null,
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "hwnd": {
+            "type": "integer",
+            "description": "目标窗口句柄（ctl_windows 拿）"
+          },
+          "cdp_port": {
+            "type": "integer",
+            "description": "可选：探一下 CDP 端口通不通"
+          },
+          "frame_ttl_ms": {
+            "type": "integer",
+            "description": "可选：帧有效期(ms)，默认 30000"
+          }
+        },
+        "additionalProperties": true
+      },
+      "returns": "{ window, sensitive, channels{uia,ocr,cdp}, frame, auth, verdict, advice }"
     }
   ],
   "_本版未列入（v1.1 补，列在这里是为了不和设计文档的完整清单打架）": {
