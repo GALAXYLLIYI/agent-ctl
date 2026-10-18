@@ -13,8 +13,8 @@
     · **完全不动鼠标** → 用户可以同时在用电脑
   这是质的升级：从"看像素"变成"看结构"。
 
-用法（默认连 127.0.0.1:9222）：
-  python cdp.py pages                      # 列出标签页
+用法（默认连 127.0.0.1:9222；实例在别的端口就加 `--port <端口>`）：
+  python cdp.py pages [--port 9222]        # 列出标签页
   python cdp.py text  [--url 关键字]        # 页面可见文字
   python cdp.py html  [--url 关键字] [--sel CSS]   # 页面/元素 HTML
   python cdp.py find  <选择器>              # 列出匹配到的元素（文字+矩形+可点性）
@@ -67,8 +67,17 @@ def gate_check(cmd):
 
 
 
-def http_get(path, host="127.0.0.1", port=9222):
+# ★ 2026-10-18（窗B）：调试端口不再是常量 —— `--port` 落在下面这个 PORT 上（默认 9222，向后兼容）。
+#   为什么用模块级变量、而不给每个 cmd_* 加一个 port 参数：这条路径上 pick_page / open_target /
+#   cmd_* 有十来处都要透传端口，**漏一处就又是「非 9222 不可用」**（G1 如实报过的那句）。
+#   收在一个地方，main() 解析完 --port 写进来，其余全部自动跟着走。
+#   没经过 main()（比如别的脚本 import cdp 直接调）就还是 9222 —— 与改前行为一致。
+PORT = 9222
+
+
+def http_get(path, host="127.0.0.1", port=None):
     import urllib.request
+    port = int(port if port is not None else PORT)
     with urllib.request.urlopen("http://%s:%d%s" % (host, port, path), timeout=10) as r:
         return json.loads(r.read().decode("utf-8"))
 
@@ -315,8 +324,11 @@ def cmd_open(a):
         return 0
     except Exception as e:
         print("  （复用失败，退回拉新窗口）:", str(e)[:110])
+    # 端口跟着 --port 走：复用失败要拉新窗口时，新实例必须开在**同一个**端口上，
+    #   否则会出现「在 9333 上开的页、下一条命令却又去 9222 找」的错位。
     subprocess.Popen([a.exe or "msedge.exe",
-                      "--remote-debugging-port=9222", "--remote-allow-origins=*",
+                      "--remote-debugging-port=%d" % int(getattr(a, "port", None) or PORT),
+                      "--remote-allow-origins=*",
                       "--user-data-dir=" + os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "AgentCtl", "_edge_cdp"),
                       "--new-window", url])
     print("✅ 已拉起浏览器窗口:", url)
@@ -377,7 +389,14 @@ def main():
     ap.add_argument("--exe", help="open：浏览器可执行文件名")
     ap.add_argument("--timeout", type=float, default=30, help="wait：超时秒数")
     ap.add_argument("--gap", type=float, default=0.6, help="wait：轮询间隔")
+    ap.add_argument("--port", type=int, default=9222,
+                    help="CDP 调试端口（默认 9222；实例开在别的端口时用它指过去）")
     a = ap.parse_args()
+
+    # ★ 窗B：解析完就写进 PORT，**闸门检查之前** —— 这样连报错路径也指着同一个端口。
+    global PORT
+    PORT = int(a.port)
+    a.port = PORT
 
     # ★ 过闸门：所有命令都要先拿证（只读 A 级；点击/填表 B+C 级）
     err = gate_check(a.cmd)

@@ -31,6 +31,9 @@ r"""判据 · F4 语义屏 ctl_screen（窗B1 · 2026-10-17）
           STALE 风暴没回流）；
        S3 声明一个不存在的串 ⇒ rc≠0 且 watch_校验.unmatched 逐条列明（不许静默）；
           watch_pending=true 才允许挂起；条数上限 32。
+    S11 cdp.py 的 `--port`（窗B 2026-10-18）：`--port 9333` 真去连 :9333、不给参数仍连 :9222，
+       真源与产物都如此；＋ 契约写明「结果包在 `data.结果` 里（objects 在 `data.结果.objects`）」
+       与「ctl_browser 的 port 与 `cdp.py --port` 同步」。
 
 跑法：
     python -X utf8 tests\_语义屏判据.py                # 合成夹具（无桌面也能跑）
@@ -43,6 +46,8 @@ r"""判据 · F4 语义屏 ctl_screen（窗B1 · 2026-10-17）
     python -X utf8 tests\_语义屏判据.py --inject uid_state     # 必红⑧（三档塌两档：内容变了也报 STALE）
     python -X utf8 tests\_语义屏判据.py --inject r2          # 必红⑨（R2 不看 name_trust ⇒ 错位页面假通过）
     python -X utf8 tests\_语义屏判据.py --inject version_reply  # 必红⑩（since 的版本应答不回）
+    python -X utf8 tests\_语义屏判据.py --inject cdp_port      # 必红⑪（cdp.py 把 --port 丢掉）
+    python -X utf8 tests\_语义屏判据.py --inject contract_env  # 必红⑪（契约删掉「data.结果」那一句）
 ★ 名字说明：--inject version 是**修正②**那条（screen_version 钉死），它现在会同时红 (2) 与 (10) —— 两处盯的都是「版本必须是新签发的」，如实报。
 
 ★ 换掉的只有 I/O 边界：uia_tree._lib（怎么拿窗口根）、uia_tree._client_rect（怎么拿客户区）、
@@ -66,6 +71,22 @@ import time
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CORE = os.path.join(ROOT, "src", "agentctl", "core.py")
 CONTRACT = os.path.join(ROOT, "contract", "tools.json")
+
+# ★ 窗B：cdp.py 的真源与产物。判据要同时盯这两份 —— 只盯产物，产物漂了没人知道；
+#   只盯真源，装出去的那份（= 包里真正跑的那份）就没人管了。
+CDP_SRC = os.path.join(os.path.dirname(ROOT), "dsh-viewer-plugin", "tools", "cdp.py")
+CDP_PROD = os.path.join(ROOT, "legacy_tools", "cdp.py")
+
+# 契约句①的原文（窗B 加的）。--inject contract_env 就是把它从影子件里删掉 ⇒ 跑红。
+CONTRACT_ENV_SENTENCE = (
+    "★ **返回信封（2026-10-18 真跑踩过）**：经 MCP/CLI 拿到的不是裸结果 —— 工具结果被包在 "
+    "**`data.结果`** 里，`objects` 在 **`data.结果.objects`**（**不是** `data.objects`）。"
+    "**这是信封结构、不是空屏** —— 取错层读到 undefined，看起来像「这一屏什么都没有」，"
+    "其实只是少剥了一层信封；别据此判「界面上没有」。")
+
+# 注入时指向影子件；默认（未注入）就是现役路径。main() 按注入情况改写它们。
+CDP_UNDER_TEST = CDP_PROD
+CONTRACT_UNDER_TEST = CONTRACT
 
 CLIENT = [0, 0, 1280, 900]          # 夹具客户区
 FAKE_HWND = 424242                  # 合成句柄：界面上没有这个窗口，所以读不到也无所谓
@@ -1124,6 +1145,47 @@ def _eid_sessions_put(tok, hwnd, nodes, walk=None, 无明细=False):   # noqa: F
 '''
 
 
+INJECT_AFTER_BASELINE = '''
+
+# ===== 以下为 窗G3c 注入段（跑红自证专用，勿入产品代码）=====
+_real_snap_put_g3c = _screen_snap_put_ex
+
+
+def _screen_snap_put_ex(hwnd, version, uids, meta, uids_all=None,      # noqa: F811  故意覆盖真版
+                        nodes_n=0, caller_seen=True):
+    # 注入的缺陷：**动作后回读照旧推进调用方的基线**（无视 caller_seen=False）。
+    #   真实后果：点击内部自己扫过一屏，把「调用方上次看到的那一版」顶掉了。
+    #   于是调用方随后带 since 再比时，动作造成的变化已经被点击自己吃掉 ——
+    #   真窗口实测：version_match=false、changed_objects 为空、明明换了字的
+    #   控件还报 uid_state=OK。点击看上去成功了，而「发生了什么」没人说得清。
+    return _real_snap_put_g3c(hwnd, version, uids, meta, uids_all, nodes_n, True)
+'''
+
+# ★ 窗B 的两个注入。
+#   ⚠ 这两个**不是**接在 core.py 上（`build_injected` 的 append 方式），而是改影子件：
+#     一个改 cdp.py 的影子件，一个改契约的影子件。注入的东西一样是「跑红自证专用」。
+
+INJECT_CDP_PORT = '''
+
+# ===== 以下为 窗B 注入段（跑红自证专用，勿入产品代码）=====
+# 注入的缺陷：**把 --port 丢掉**，无论命令行给多少都硬连 9222
+#   —— 也就是把 cdp.py 改回 2026-10-18 之前的样子。
+# 真实后果：ctl_browser launch 起在 9333 的实例，ctl_screen 的 DOM 段连不上，
+#   R1 恒为 false，channels.must_vlm 只好退回 VLM —— 而屏幕明明看得见。
+_real_http_get_B = http_get
+
+
+def _inj_http_get_B(path, host="127.0.0.1", port=None):      # noqa: F811  故意覆盖真版
+    return _real_http_get_B(path, host, 9222)
+
+
+http_get = _inj_http_get_B
+'''
+
+INJECT_CONTRACT_ENV = '''
+★ 窗B：把契约里「data.结果」那一句**删掉**（不是改错、是真的没有）⇒ 判据必须跑红。
+'''
+
 INJECT = {
     # ★ 窗G2 的四个新注入（R3 那条通道的四根骨头各断一次）
     "ocr_wired": ("R3 根本没接线（OCR 三要素一律不接）", "append", INJECT_OCR_WIRED),
@@ -1161,10 +1223,17 @@ INJECT = {
     "after_state": ("after.uid_state 恒报 OK（点错对象也说达成）", "append", INJECT_AFTER_STATE),
     # ★ 窗G3b 的新注入：capture 不带元素明细（真门路上 eid 直接断）
     "cap_detail": ("capture 一律不写元素明细（eid 在真门路上点不了）", "append", INJECT_CAP_DETAIL),
+    # ★ 窗G3c 的新注入：动作后回读推进调用方的 since 基线
+    "after_baseline": ("after 回读照旧推进基线（调用方看不见自己动作的变化）",
+                    "append", INJECT_AFTER_BASELINE),
+    # ★ 窗B 的两个新注入（不是接 core.py，是改 cdp.py / 契约的影子件）
+    "cdp_port": ("cdp.py 把 --port 丢掉（非 9222 硬连 9222）", "cdp", INJECT_CDP_PORT),
+    "contract_env": ("契约删掉「data.结果」那一句", "contract", INJECT_CONTRACT_ENV),
 }
 
 
 def build_injected(tmp, kinds):
+    global CDP_UNDER_TEST, CONTRACT_UNDER_TEST
     with io.open(CORE, "r", encoding="utf-8") as f:
         src = f.read()
     notes = []
@@ -1172,6 +1241,17 @@ def build_injected(tmp, kinds):
         desc, mode, snippet = INJECT[k]
         if mode == "append":
             src = src + snippet
+        elif mode == "cdp":
+            # cdp.py 的影子件：现役产物 + 注入段。判据改盯它，就等于「装出去的那份被改坏了」。
+            d = os.path.join(tmp, "legacy_tools")
+            os.makedirs(d, exist_ok=True)
+            CDP_UNDER_TEST = os.path.join(d, "cdp.py")
+            with io.open(CDP_PROD, "r", encoding="utf-8", newline="") as f:
+                csrc = f.read()
+            with io.open(CDP_UNDER_TEST, "w", encoding="utf-8", newline="") as f:
+                f.write(csrc + snippet)
+        elif mode == "contract":
+            pass          # 下面统一处理：影子件先抄好，再按需把那句删掉
         else:
             raise SystemExit("未知注入方式：%s" % mode)
         notes.append("%s=%s" % (k, desc))
@@ -1183,7 +1263,18 @@ def build_injected(tmp, kinds):
     with io.open(dst, "w", encoding="utf-8", newline="") as f:
         f.write(src)
     # 契约也照抄一份：影子仓的 ROOT 要能找到它（tool_list 靠它）
-    shutil.copyfile(CONTRACT, os.path.join(tmp, "contract", "tools.json"))
+    cpath = os.path.join(tmp, "contract", "tools.json")
+    shutil.copyfile(CONTRACT, cpath)
+    CONTRACT_UNDER_TEST = cpath
+    for k in kinds:
+        if INJECT[k][1] != "contract":
+            continue
+        with io.open(cpath, "r", encoding="utf-8", newline="") as f:
+            cs = f.read()
+        if CONTRACT_ENV_SENTENCE not in cs:
+            raise SystemExit("契约注入锚点不在现役契约里（窗B 那句已被改动？）")
+        with io.open(cpath, "w", encoding="utf-8", newline="") as f:
+            f.write(cs.replace(CONTRACT_ENV_SENTENCE, "", 1))
     return dst, "；".join(notes)
 
 # ======================================================================
@@ -1514,6 +1605,122 @@ def check_contract(core):
     need(not listed.get("ctl_screen", {}).get("_status"), "ctl_screen 被标成未实现", reds)
     ev["契约gate"] = ent.get("gate")
     return "(6) 契约与接线", reds, ev
+
+def _load_cdp(path, name):
+    """把 cdp.py 当模块装进来（不执行 main）。"""
+    spec = importlib.util.spec_from_file_location(name, path)
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
+def _cdp_probe(path, name, extra_argv):
+    """跑一次 cdp.py 的 `pages` 子命令，把它**真正要连的 URL** 录下来。
+
+    ★ 假 cdp 的接缝在 urllib.request.urlopen 这一层 —— 端口到底有没有被转发，
+      看最终拼出来的 URL 里是 :9333 还是 :9222。这比「argparse 认不认识 --port」硬得多：
+      认了参数、底下还连 9222（正是改前 cdp.py 的样子）照样会红。
+    ★ 判据里**绝不起浏览器、不连网**：urlopen 换掉、gate_check 放行、标签页表给空表。
+    ★ 返回 (rc, 录到的 URL 列表)。
+    """
+    m = _load_cdp(path, name)
+    m.gate_check = lambda cmd: None                 # 判据不许碰真闸门 / 真通行证
+    seen = []
+
+    class _Resp(object):
+        status = 200
+
+        def read(self):
+            return json.dumps([]).encode("utf-8")    # 空标签页表：后面什么都不做
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def fake_urlopen(url, timeout=None):
+        seen.append(url if isinstance(url, str) else getattr(url, "full_url", str(url)))
+        return _Resp()
+
+    import urllib.request
+    real = urllib.request.urlopen
+    urllib.request.urlopen = fake_urlopen
+    old_argv = sys.argv
+    sys.argv = [name, "pages"] + list(extra_argv)
+    try:
+        rc = m.main()
+    finally:
+        sys.argv = old_argv
+        urllib.request.urlopen = real
+    return rc, seen
+
+
+def check_cdp_port_and_contract():
+    """(11) 窗B：cdp.py 的 --port 真被转发（起落都非 9222 也认），＋ 契约那两句在位。
+
+    判四件事：
+      a. `--port 9333` ⇒ cdp.py 真的去连 **:9333**（不是认了参数、底下还连 9222）；
+      b. **不给** --port ⇒ 仍然连 :9222（向后兼容，老调用方不许被打断）；
+      c. 真源与产物**都**如此（产物是包里真正跑的那份，两份都要盯）；
+      d. 契约那两句在位：ctl_screen 写明结果包在 `data.结果`（objects 在
+         `data.结果.objects`）、ctl_browser 的 port 写明与 `cdp.py --port` 同步。
+    """
+    reds = []
+    ev = {}
+
+    # ── a / b / c：cdp.py 的 --port ────────────────────────────────────────
+    pairs = [("产物", CDP_UNDER_TEST)]
+    if os.path.normcase(os.path.abspath(CDP_UNDER_TEST)) != \
+            os.path.normcase(os.path.abspath(CDP_SRC)):
+        pairs.append(("真源", CDP_SRC))       # 盯影子件时，真源一并对照
+    for tag, path in pairs:
+        if not os.path.exists(path):
+            reds.append("%s cdp.py 不在：%s" % (tag, path))
+            continue
+        try:
+            rc, seen = _cdp_probe(path, "_cdp_under_test_" + tag, ["--port", "9333"])
+        except SystemExit as e:
+            reds.append("%s cdp.py 的 --port 9333 被 argparse 拒了：%s" % (tag, e))
+            continue
+        ev["%s_9333" % tag] = seen
+        need(rc == 0, "%s cdp.py pages --port 9333 返回 rc=%s（期望 0）" % (tag, rc), reds)
+        need(bool(seen), "%s cdp.py pages --port 9333 一个 HTTP 请求都没发" % tag, reds)
+        bad = [u for u in seen if ":9333" not in u]
+        need(not bad, "%s cdp.py 收了 --port 9333 却仍去连这些地址（端口没转发）：%s"
+             % (tag, bad[:3]), reds)
+
+        rc0, seen0 = _cdp_probe(path, "_cdp_default_" + tag, [])
+        ev["%s_默认" % tag] = seen0
+        bad0 = [u for u in seen0 if ":9222" not in u]
+        need(not bad0, "%s cdp.py 不给 --port 时没连默认 9222（向后兼容破了）：%s"
+             % (tag, bad0[:3]), reds)
+
+    # ── d：契约那两句 ─────────────────────────────────────────────────────
+    try:
+        with io.open(CONTRACT_UNDER_TEST, encoding="utf-8") as f:
+            spec = json.load(f)
+    except Exception as e:
+        return "(11) cdp.py --port 与契约两句", ["契约不是合法 JSON：%s" % e], ev
+    ents = {t["name"]: t for t in spec.get("tools") or []}
+    scr = (ents.get("ctl_screen") or {}).get("description") or ""
+    # ★ 盯「信封结构」这四个字，而**不是**只盯「data.结果」这五个字 ——
+    #   description 里本来就还有一句「data.结果.capture_id 与它是同一张」（窗G3 加的），
+    #   只盯 token 的话，**把窗B 这整句删掉照样绿** —— 那这条判据就是死的。
+    need("信封结构" in scr,
+         "ctl_screen 的 description 里没有「结果包在 data.结果 里（信封结构）」那一句", reds)
+    need("data.结果.objects" in scr,
+         "ctl_screen 的 description 没有写明 objects 在 data.结果.objects", reds)
+    ev["ctl_screen含data.结果"] = {"信封结构": "信封结构" in scr,
+                                    "data.结果.objects": "data.结果.objects" in scr}
+    br = ents.get("ctl_browser") or {}
+    portd = (((br.get("input_schema") or {}).get("properties") or {})
+             .get("port", {}).get("description") or "")
+    need("cdp.py --port" in portd,
+         "ctl_browser 的 port 参数没写明与 cdp.py --port 同步", reds)
+    ev["ctl_browser_port说明"] = portd[-120:]
+    return "(11) cdp.py --port 与契约两句", reds, ev
+
 
 def check_conf_attrs(core, fx):
     """(7) 属性级置信度：三档都在、聚合=min(existence,text)、**bbox 不被 text 拖低**。"""
@@ -2459,6 +2666,80 @@ def check_action_side(core, fx):
          "ctl_find 老路的 eid 直点坏了（%s）—— 这一单不许动它的行为"
          % (r7.get("warning") or "")[:160], reds)
 
+    # ── ⑧ 动作后回读**不许吃掉调用方的 since 基线**（窗G3c）。
+    #   造法走**完整真链路**：ctl_screen → ctl_click（改字）→ ctl_screen(since=第一屏的版本)。
+    #   ★ 要点：after 回读自己也扫过一屏；以前那次扫把基线推进了，于是第三次调用
+    #     比的是「点完之后」那版 ⇒ 明明变了字的对象报 OK、delta 空、version_match 假。
+    fx.g3_click_effect = "none"
+    fx.n_extra_btn = 0
+    fx.timer_tick = 0
+    fx.tick = 0
+    core._screen_forget(0)
+    r8a = core.dispatch("ctl_screen", {"hwnd": FAKE_HWND, "top": 500,
+                                   "cdp": False, "ocr": False}, actor="判据G3c")
+    sc8a = (r8a.get("data") or {}).get("结果") or {}
+    v8 = sc8a.get("screen_version")
+    o8 = 找对象(sc8a, "当前状态")
+    tok8 = (r8a.get("data") or {}).get("capture_id")
+    need(bool(v8) and bool(o8.get("eid")),
+         "⑧ 前置：没拿到第一屏的版本/对象（%r / %r）" % (v8, o8.get("label")), reds)
+    fx.g3_click_effect = "advance"          # ★ 点一下就让状态行换字
+    core.dispatch("ctl_click", {"hwnd": FAKE_HWND, "eid": o8.get("eid"),
+                             "from_capture": tok8,
+                             "actor": "判据G3c"}, actor="判据G3c")
+    r8b = core.dispatch("ctl_screen", {"hwnd": FAKE_HWND, "top": 500, "since": v8,
+                                   "cdp": False, "ocr": False}, actor="判据G3c")
+    sc8 = (r8b.get("data") or {}).get("结果") or {}
+    st8 = 找对象(sc8, "当前状态")
+    ev["⑧since基线"] = {"第一屏version": v8,
+                     "version_match": sc8.get("version_match"),
+                     "被点对象label": st8.get("label"),
+                     "被点对象uid_state": st8.get("uid_state"),
+                     "delta新增数": (sc8.get("delta") or {}).get("新增数"),
+                     "delta消失数": (sc8.get("delta") or {}).get("消失数")}
+    need(sc8.get("version_match") is True,
+         "点击后再带 since 调 ctl_screen，version_match=%r —— 调用方回传的正是"
+         "它自己刚见过的版本，却说不认得：动作内部的回读把基线顶掉了"
+         % sc8.get("version_match"), reds)
+    need(st8.get("uid_state") == "TEXT_CHANGED",
+         "被点对象『%s』点完换了字，带 since 再看却报 uid_state=%r（应 TEXT_CHANGED）"
+         "—— after 回读把「点前那版」吃掉了，调用方再也看不见自己动作造成的变化"
+         % (st8.get("label"), st8.get("uid_state")), reds)
+    need((sc8.get("delta") or {}).get("新增数") or (sc8.get("delta") or {}).get("消失数"),
+         "delta 新增/消失全是 0（%r）—— 状态行换了字，uid 变了，本该在差分里露面"
+         % (sc8.get("delta") or {}), reds)
+
+    # ── ⑨ click.after.changed_objects：顺带省调用方一次 ctl_screen。
+    fx.g3_click_effect = "none"
+    fx.timer_tick = 0
+    fx.tick = 0
+    core._screen_forget(0)
+    r9a = core.dispatch("ctl_screen", {"hwnd": FAKE_HWND, "top": 500,
+                                   "cdp": False, "ocr": False}, actor="判据G3c")
+    sc9a = (r9a.get("data") or {}).get("结果") or {}
+    o9 = 找对象(sc9a, "当前状态")
+    fx.g3_click_effect = "advance"
+    r9 = core.dispatch("ctl_click", {"hwnd": FAKE_HWND, "eid": o9.get("eid"),
+                                 "from_capture": (r9a.get("data") or {}).get("capture_id"),
+                                 "actor": "判据G3c"}, actor="判据G3c")
+    af9 = (r9.get("data") or {}).get("after") or {}
+    ch9 = af9.get("changed_objects") or []
+    ev["⑨after变化清单"] = {"changed_objects": ch9,
+                       "口径": (af9.get("changed_objects_口径") or "")[:120]}
+    ev["⑨点击本体"] = {"ok": r9.get("ok"), "code": r9.get("code"),
+                     "warning": (r9.get("warning") or "")[:200],
+                     "有after": "after" in (r9.get("data") or {})}
+    need(len(ch9) > 0,
+         "after.changed_objects 是空的（%r）—— 点击明显改了字，变化清单却什么都不说"
+         % (af9.get("changed_objects_口径") or "")[:120], reds)
+    need(any(str(c.get("label") or "").startswith("当前状态") for c in ch9),
+         "after.changed_objects 里没有**被点的那个对象**（%r）—— 它才是这次动作的直接后果"
+         % ch9, reds)
+    need(all(c.get("uid_state") in ("TEXT_CHANGED", "STALE") for c in ch9),
+         "changed_objects 里混进了 uid_state=OK 的（%r）—— OK 是「没变」，不该报成变化"
+         % ch9, reds)
+
+    # 收尾：把 _act 等还原，别影响后面的组
     # 收尾：把 _act 等还原，别影响后面的组
     if ORIG.get("_act") is not None:
         core._act = ORIG["_act"]
@@ -3134,7 +3415,8 @@ def main():
                      ("S7 首扫就绪判定", lambda: check_screen_ready(core, fx)),
                      ("S8 CDP 接线与 R1", lambda: check_cdp_r1(core, fx)),
                      ("S9 OCR 接线与 R3", lambda: check_ocr_r3(core, fx)),
-                     ("S10 动作侧接线", lambda: check_action_side(core, fx))):
+                     ("S10 动作侧接线", lambda: check_action_side(core, fx)),
+                     ("S11 cdp.py --port 与契约两句", check_cdp_port_and_contract)):
         title, reds, ev = fn()
         res[title] = reds
         print("")

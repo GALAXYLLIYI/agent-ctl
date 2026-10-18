@@ -1992,11 +1992,52 @@ def _click_after_state(hwnd: int, hit: dict, pre_ctx=None) -> dict:
     pre = pre_ctx or {}
     pre_nodes = pre.get("nodes") or []
     pre_sk = pre.get("struct_keys") or []
+    # ── ★ 窗G3c · (b) 整屏变化清单。**先算它**，再算被点对象那一档 ——
+    #   顺序不能反：changed_objects 只靠「点前那屏基线 vs 动作后这屏」，
+    #   压根不需要知道被点对象的 uid。而 uid 只有**给了 expect_uid** 时才算得出来 ——
+    #   早先把归因放在前面、没 uid 就直接 return，顺手把整屏清单也带没了
+    #   （实测：不带 expect_uid 点一次，after 里 changed_objects 永远是空的）。
+    pre_seen = _screen_seen_view(_screen_snap_get(int(hwnd)))
+    try:
+        #   _不发capture：这次只借它签一个 screen_version，不该往旁表里塞一张没人用的凭据。
+        #   _不推进seen：动作内部的读不许改写「调用方上次看到的那一版」（见下面 _screen_snap_put_ex）。
+        fresh = _screen_build(int(hwnd), {"top": 200, "cdp": False, "ocr": False,
+                                          "_不发capture": True,
+                                          "_不推进seen": True})
+        out["screen_version"] = fresh.get("screen_version")
+        out["新屏对象数"] = len(fresh.get("objects") or [])
+        ch = []
+        for o in (fresh.get("objects") or []) if pre_seen else ():
+            stt = _screen_uid_state_against(
+                pre_seen, o.get("uid"),
+                {"label": o.get("label"), "role": o.get("role"),
+                 "rect": o.get("rect")})
+            if stt != "OK":
+                ch.append({"label": o.get("label"), "uid": o.get("uid"),
+                           "uid_state": stt})
+        out["changed_objects"] = ch[:SCREEN_AFTER_CHANGED_CAP]
+        out["changed_objects数"] = len(ch)
+        out["changed_objects_口径"] = (
+            ("拿**点击前**那一屏的基线（调用方上次 ctl_screen 看到的那版）"
+             "给动作后的屏逐对象打三档，只收非 OK 的（OK=没变）；最多 %d 条。"
+             "★ 这份回读**不推进**调用方的 since 基线 —— 随后再带 since 调 "
+             "ctl_screen，仍能看到同样的变化。" % SCREEN_AFTER_CHANGED_CAP)
+            if pre_seen else
+            ("没有可比的基线（本进程 %d 秒内没扫过这扇窗，或基线已过期）"
+             "⇒ 不给变化清单，**不是「这一屏没变化」。" % int(SCREEN_SNAP_TTL_SEC)))
+    except Exception as e:
+        #   ⚠ 不许静默：回读失败 = 「读不到」，调用方有权知道**为什么**读不到。
+        #   静默吞掉的话，after 会长得跟「一切正常」一模一样 —— 那是最坏的一种坏法。
+        out["screen_version"] = None
+        out["changed_objects"] = []
+        out["changed_objects_口径"] = ("动作后回读失败：%s: %s —— **读不到不等于没变化**"
+                                      % (type(e).__name__, e))
     if not uid0:
-        out["依据"] = "点之前没算出 uid（没给 expect_uid，或走的不是 eid 复核路径），没法归因"
+        out["依据"] = ("点之前没算出 uid（没给 expect_uid，或走的不是 eid 复核路径），"
+                       "没法给**被点对象**归那一档（整屏变化清单见 changed_objects）")
         return out
     if not pre_nodes:
-        out["依据"] = "没有点之前那一趟树做基线，没法归因"
+        out["依据"] = "没有点之前那一趟树做基线，没法给被点对象归那一档"
         return out
     # ── 点前那一趟：把被点对象自己的自述抠出来（名字 / 矩形 / 结构位置）。
     pre_label, pre_rect, pre_slot = "", [], ""
@@ -2027,15 +2068,6 @@ def _click_after_state(hwnd: int, hit: dict, pre_ctx=None) -> dict:
         u1 = _screen_uid_at({"struct_keys": post_sk, "index": i}, n)
         if u1:
             post.append((u1, n))
-    # ── screen_version 单独签一次（它要的是**服务端**口径的整屏事实）。
-    try:
-        #   _不发capture：这次只借它签一个 screen_version，不该往旁表里塞一张没人用的凭据。
-        fresh = _screen_build(int(hwnd), {"top": 200, "cdp": False, "ocr": False,
-                                          "_不发capture": True})
-        out["screen_version"] = fresh.get("screen_version")
-        out["新屏对象数"] = len(fresh.get("objects") or [])
-    except Exception:
-        out["screen_version"] = None
     # ── ① 同名字的后继：它还在那儿，只是字变了或没变。
     same_name = [(u, n) for u, n in post if str(n.get("name") or "") == pre_label]
     if same_name:
@@ -3753,6 +3785,8 @@ def _screen_select(cands: list, top: int, guarantee: bool = True) -> tuple:
 #   没有基线时 delta 一律记 0 —— 不假装「全都是新面孔」（那会让每帧凭空多 0.10）。
 SCREEN_SNAP_TTL_SEC = 30.0
 SCREEN_SNAP_MAX_HWNDS = 32
+# ★ 窗G3c：click.after 里 changed_objects 的条数上限（体验加成，给个硬顶防信封膨胀）
+SCREEN_AFTER_CHANGED_CAP = 8
 _SCREEN_SEEN = {}
 
 
@@ -3766,20 +3800,68 @@ def _screen_snap_get(hwnd: int):
 
 
 def _screen_snap_put(hwnd: int, version: str, uids, meta, uids_all=None, nodes_n=0):
+    return _screen_snap_put_ex(hwnd, version, uids, meta, uids_all, nodes_n, True)
+
+
+def _screen_snap_put_ex(hwnd: int, version: str, uids, meta, uids_all=None,
+                        nodes_n=0, caller_seen: bool = True):
+    """★ 窗G3c：快照拆成**两套字段**，各管各的。
+
+    - `uids` / `uids_all` / `meta` / `节点数`：**内部工作集**。
+      暖机就绪判定的「与上次相比」用 `节点数`，其余供同一次调用内部配对。
+    - `seen_version` / `seen_uids` / `seen_uids_all` / `seen_meta`：
+      **调用方可见的基线** —— since 对照、version_match、每对象 uid_state、
+      delta 新增/消失，**一律只读这一套**。
+
+    为什么要分：`ctl_click` 动作后要回读一次（判被点对象的 uid_state）。
+    那次回读以前会顺手把快照整份推进，于是调用方随后带 since 再比时，
+    「这一屏发生过什么」已经被**点击自己的回读**吃掉了 —— 真窗口实测表现为
+    `version_match=false` 却 `changed_objects=[]`、明明变了字的控件还报 OK。
+    `caller_seen=False`（只有 after 回读走这条）：只刷内部工作集，
+    `seen_*` **原样留着** —— 调用方看到的「上次那版」不被动作内部的读顶掉。
+
+    ⚠ **不是清空快照**：老记录一律留着，只是 after 那趟不许写 seen_*。
+    `t` 也原样保留 ⇒ 调用方基线的 30 秒寿命照旧从它自己那次 ctl_screen 起算。
+    """
     now = time.time()
     if len(_SCREEN_SEEN) >= SCREEN_SNAP_MAX_HWNDS:
         for k in sorted(_SCREEN_SEEN, key=lambda x: _SCREEN_SEEN[x].get("t") or 0)[:8]:
             _SCREEN_SEEN.pop(k, None)
-    _SCREEN_SEEN[int(hwnd)] = {"t": now, "screen_version": version,
-                               "uids": set(uids),
-                               # ★ uid_state 的基线用**全量**候选 uid（含视口外）：
-                               #   一个对象滑出视口再滑回来，不该被判成「不是上次那个」。
-                               #   delta 仍只用视口内的 uids —— 屏外的东西本来就不算「变了」。
-                               "uids_all": set(uids_all if uids_all is not None else uids),
-                               # ★ 这一趟**扫到多少节点** —— 就绪判定依据①的「上一次」基线
-                               "节点数": int(nodes_n or 0),
-                               # ★ 每个 uid 的自述（label/role/rect）：uid_state 配对要用
-                               "meta": dict(meta or {})}
+    allu = set(uids_all if uids_all is not None else uids)
+    rec = {"screen_version": version,
+           "uids": set(uids),
+           # ★ uid_state 的基线用**全量**候选 uid（含视口外）：
+           #   一个对象滑出视口再滑回来，不该被判成「不是上次那个」。
+           #   delta 仍只用视口内的 uids —— 屏外的东西本来就不算「变了」。
+           "uids_all": allu,
+           # ★ 这一趟**扫到多少节点** —— 就绪判定依据①的「上一次」基线
+           "节点数": int(nodes_n or 0),
+           # ★ 每个 uid 的自述（label/role/rect）：uid_state 配对要用
+           "meta": dict(meta or {})}
+    old = _SCREEN_SEEN.get(int(hwnd)) or {}
+    if caller_seen:
+        rec.update({"t": now,
+                    "seen_version": version,
+                    "seen_uids": set(uids),
+                    "seen_uids_all": set(allu),
+                    "seen_meta": dict(meta or {})})
+    else:
+        # after 回读：seen_* 与 t 一律**沿用老记录**（没有老记录就是「没有基线」）。
+        rec.update({"t": old.get("t", now),
+                    "seen_version": old.get("seen_version", ""),
+                    "seen_uids": set(old.get("seen_uids") or ()),
+                    "seen_uids_all": set(old.get("seen_uids_all") or ()),
+                    "seen_meta": dict(old.get("seen_meta") or {})})
+    _SCREEN_SEEN[int(hwnd)] = rec
+
+
+def _screen_seen_view(prev):
+    """把快照记录里**调用方可见**的那一套摘出来，喂给 uid_state 配对 / delta 对照。"""
+    if not prev:
+        return None
+    return {"uids_all": set(prev.get("seen_uids_all") or ()),
+            "meta": dict(prev.get("seen_meta") or {}),
+            "screen_version": str(prev.get("seen_version") or "")}
 
 
 def _screen_forget(hwnd: int = 0):
@@ -4029,7 +4111,11 @@ def _screen_build(hwnd: int, args: dict) -> dict:
     #
     # ★ 窗F2：**有界**暖机。prev 要在走之前读 —— 就绪判定依据①拿它当「上一次」的基线。
     prev = _screen_snap_get(hwnd)
-    prev_uids = (prev or {}).get("uids") or set()
+    # ★ 窗G3c：prev_uids / uid_state 配对 / delta 对照一律走**调用方可见**那套
+    #   （seen_*）。after 回读只刷内部工作集，不许顶掉调用方的基线。
+    #   prev_nodes 仍读内部工作集（暖机要的是「上一次扫了多少节点」这个事实）。
+    prev_seen = _screen_seen_view(prev)
+    prev_uids = set(((prev or {}).get("seen_uids")) or ())
     prev_nodes = int((prev or {}).get("节点数") or 0)
     first_scan = not prev
     min_probes = _screen_min_probes(warmup=warmup, is_web=is_web, first_scan=first_scan)
@@ -4161,7 +4247,7 @@ def _screen_build(hwnd: int, args: dict) -> dict:
         # ★ ② uid 三档：**只有给了 since 才产出** —— 没有可比基线就没有「变没变」可判。
         if since:
             obj["uid_state"] = _screen_uid_state_against(
-                prev, uid, {"label": label, "role": role, "rect": rect})
+                prev_seen, uid, {"label": label, "role": role, "rect": rect})
         cands.append(obj)
 
     # ★ 修正④第三档要**看着一屏的选项**才判得出来 ⇒ name_trust 在这里算，然后逐个盖上。
@@ -4190,10 +4276,14 @@ def _screen_build(hwnd: int, args: dict) -> dict:
 
     # 新鲜度只在**视口内**的对象之间比：屏外的东西本来就不算「变了」。
     in_view_now = set(o["uid"] for o in cands if o["in_view"])
-    _screen_snap_put(hwnd, screen_version, in_view_now,
-                     {o["uid"]: {"label": o["label"], "role": o["role"],
-                                  "rect": list(o["rect"])} for o in cands},
-                     uids_all=set(o["uid"] for o in cands), nodes_n=len(nodes))
+    _screen_snap_put_ex(
+        hwnd, screen_version, in_view_now,
+        {o["uid"]: {"label": o["label"], "role": o["role"],
+                    "rect": list(o["rect"])} for o in cands},
+        uids_all=set(o["uid"] for o in cands), nodes_n=len(nodes),
+        # ★ 窗G3c：`_不推进seen` 只有动作后回读那趟带 —— 它不该改写
+        #   「调用方上次看到的那一版」，否则动作内部的读会把对外的差分吃掉。
+        caller_seen=not args.get("_不推进seen"))
 
     texts = [{"id": "t%d" % k, "text": o["label"], "rect": o["rect"]}
              for k, o in enumerate(objects) if o["label"]]
@@ -4348,7 +4438,9 @@ def _screen_build(hwnd: int, args: dict) -> dict:
     }
 
     # since / watch：**只用于对照**。回显 + 差分，绝不回写进 screen_version。
-    prev_sv = str((prev or {}).get("screen_version") or "")
+    # ★ 窗G3c：版本应答也读**调用方可见**那套 —— after 回读不许把版本顶掉，
+    #   否则调用方回传自己真见过的 since 却拿到 version_match=false。
+    prev_sv = str((prev or {}).get("seen_version") or "")
     if since or bool(args.get("watch")):
         new = sorted(in_view_now - set(prev_uids)) if prev else []
         gone = sorted(set(prev_uids) - in_view_now) if prev else []
@@ -4360,7 +4452,7 @@ def _screen_build(hwnd: int, args: dict) -> dict:
             "since_回显": str(since) if since else "",
             "since_是本进程签发的": bool(since) and str(since) == prev_sv,
             "有基线": bool(prev),
-            "稳定": bool(prev and prev.get("screen_version") == screen_version),
+            "稳定": bool(prev and str(prev.get("seen_version") or "") == screen_version),
             "新增": new[:SCREEN_DELTA_LIST_CAP], "新增数": len(new),
             "消失": gone[:SCREEN_DELTA_LIST_CAP], "消失数": len(gone),
             "口径": "基线 = 本进程对该窗口的上一屏快照（%d 秒内）；换进程重新计基线"
