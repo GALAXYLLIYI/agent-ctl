@@ -206,6 +206,12 @@ def run_one(key, script, args, timeout):
     if rc == 0:
         out("[绿] %s %s（rc=0，%.1fs）" % (key, script, dt))
         note = "绿"
+    elif rc == 2:
+        # ★ 2026-10-18 裁定 A：rc=2 = **验不了**（环境不满足：没真通行证 / 夹具就位不了…）。
+        #   它是一等结果，**不算红**（否则"红"会贬值、无人值守永远跑不绿），**也不算绿**（单列并点名）。
+        out("[验不了] %s %s（rc=2，%.1fs）—— 环境不满足；看它自己打的『验不了』条目"
+            % (key, script, dt))
+        note = "验不了（rc=2）"
     else:
         out("[红] %s %s（rc=%s，%.1fs）—— 细节看它自己打的红条目"
             % (key, script, rc, dt))
@@ -253,16 +259,24 @@ def main(argv=None):
     out("=" * 78)
     for key, script, rc, dt, note in results:
         out("  [%s] %-4s %-24s rc=%-4s %6.1fs  %s"
-            % ("绿" if rc == 0 else "红", key, script, rc, dt, note))
-    reds = [r for r in results if r[2] != 0]
+            % ("绿" if rc == 0 else ("验不了" if rc == 2 else "红"),
+               key, script, rc, dt, note))
+    reds = [r for r in results if r[2] not in (0, 2)]
+    skips = [r for r in results if r[2] == 2]
+    greens = [r for r in results if r[2] == 0]
     out("-" * 78)
-    out("判据 %d 条：绿 %d，红 %d ；总用时 %.1fs"
-        % (len(results), len(results) - len(reds), len(reds),
+    out("判据 %d 条：绿 %d，验不了 %d，红 %d ；总用时 %.1fs"
+        % (len(results), len(greens), len(skips), len(reds),
            sum(r[3] for r in results)))
     if reds:
         out("结论：【红】—— %s" % "、".join(r[0] for r in reds))
         out("（退出码 1；每条判据的红条目细节都在它自己那段原始输出里）")
         return 1
+    if skips:
+        out("结论：【绿·有验不了】%s —— 这 %d 条是**环境不满足**（多为没真通行证 / 夹具就位不了），"
+            "不是红、也不是绿；要全绿请补环境后重跑。"
+            % ("、".join(r[0] for r in skips), len(skips)))
+        return 0
     out("结论：【绿】全部判据全绿。")
     return 0
 
