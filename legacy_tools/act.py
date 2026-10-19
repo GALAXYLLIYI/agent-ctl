@@ -2022,11 +2022,13 @@ def do_keys(hwnd, vk=0x41, ctrl=False, times=1, dry=False, wait=0.06, scan_code=
             _ka = evidence(hwnd, "post_keys_after")
             _k0, _k1 = _img_fp(_kb.get("文件") or ""), _img_fp(_ka.get("文件") or "")
             _kch = None if (_k0 is None or _k1 is None) else (_k1 != _k0)
-            if _kch:
-                log("   ✔ 后台按键生效（像素证据有变化）")
-                return 0
+            # ★ 2026-10-19（判据 32①）：**画面有变化 ≠ 按键生效**。
+            #   「多打出一个字面量字符」同样会让画面变化（病根见本函数
+            #   上方注释），而本文件自己也写着「投递成功 ≠ 生效…判不出来报未验」。
+            #   ⇒ 像素真值这一档**不许当成功**，一律落回前台兜底那条真正正确的路。
             log("   ⚠ 后台按键投递了但画面%s ⇒ 落回前台兜底"
-                % ("判不了（unknown）" if _kch is None else "没变"))
+                % ("变了也**不能证明生效**（字面量字符同样会让画面变）"
+                   if _kch else ("判不了（unknown）" if _kch is None else "没变")))
     # ★ ③ 动作前自动置前（不再因"不在前台"直接拒绝）
     _fg = ensure_foreground(hwnd, "按键", dry=dry)
     if _fg:
@@ -2550,8 +2552,10 @@ def do_scroll(hwnd, amount, dry=False, force_wheel=False):
             _f0, _f1 = _img_fp(_b.get("文件") or ""), _img_fp(_a.get("文件") or "")
             _ch = None if (_f0 is None or _f1 is None) else (_f1 != _f0)
             if _ch:
-                log("   ✔ 后台滚轮生效（像素证据有变化）")
-                return 0
+                # ★ 2026-10-19（判据 32①）：滚轮同病 —— 「页面动了」不能
+                #   证明「滚轮生效了」（页面可能自己在动）。
+                log("   ⚠ 后台滚轮投递了但画面变了 不证明**滚轮生效**"
+                    "（页面可能自己在动）")
             log("   ⚠ 后台滚轮投递了但画面%s ⇒ 落回前台兜底"
                 % ("判不了（unknown）" if _ch is None else "没变"))
     # ★ ③ 动作前自动置前：滚轮事件发给**光标下的窗口**，不在前台时不可控
