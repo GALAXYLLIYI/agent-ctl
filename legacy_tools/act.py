@@ -11,7 +11,8 @@
 #   ③ 探测 pywin32 与 tkinter 是否可导入。
 # 结果汇总进 _SELFTEST，**缺失项一次全列**，然后由 _selftest_or_die() 统一拦住。
 import os as _os
-import sys as _sys
+import sys
+import tempfile as _sys
 
 # 托管 Python 的路径特征（本机实测）：
 #   托管：%USERPROFILE%\.workbuddy\binaries\python\versions\<ver>\python.exe
@@ -1020,6 +1021,43 @@ def resolve_post(info, post_force=False):
     return False, f"兼容表未登记 {who}"
 
 
+# ── 阶段耗时插桩（2026-10-19 · 默认关闭，AGENTCTL_PROFILE=1 才打）──────────────
+_PF_ON = os.environ.get("AGENTCTL_PROFILE") == "1"
+_PF_LAST = [0.0]
+
+
+def _pf(tag):
+    """打一条阶段耗时（毫秒），并重置计时点。默认零开销、零输出。"""
+    if not _PF_ON:
+        return
+    now = time.perf_counter()
+    prev = _PF_LAST[0] or now
+    _PF_LAST[0] = now
+    _line = "[prof] %-14s %6.0f ms" % (tag, (now - prev) * 1000)
+    _path = (os.environ.get("AGENTCTL_PROFILE_FILE")
+             or os.path.join(tempfile.gettempdir(), "agentctl_prof.log"))
+    try:
+        with open(_path, "a", encoding="utf-8") as _f:
+            _f.write(_line + "\n")
+    except Exception:
+        print(_line, file=sys.stderr, flush=True)
+
+def _settle(default_ms):
+    """动作后的稳定等待（秒）。★ 2026-10-19：由固定值改成可调，默认不变。
+
+    为什么：实测一步打字 1150ms，其中固定 sleep 占 0.4~0.5s；
+    把等待做成旋钮后，低延迟场景（连点/批量）可以调到几十毫秒，
+    而**默认值保持原样**——不改变任何人已有的行为。
+    """
+    try:
+        v = os.environ.get("AGENTCTL_SETTLE_MS")
+        if v is not None and str(v).strip() != "":
+            return max(0.0, float(v) / 1000.0)
+    except Exception:
+        pass
+    return default_ms / 1000.0
+
+
 def log(msg):
     os.makedirs(os.path.dirname(ACTLOG), exist_ok=True)
     with open(ACTLOG, "a", encoding="utf-8") as f:
@@ -2022,7 +2060,7 @@ def do_keys(hwnd, vk=0x41, ctrl=False, times=1, dry=False, wait=0.06, scan_code=
     if not dry and not ctrl:
         _kb = evidence(hwnd, "post_keys_before")
         if _post_keys(hwnd, vk, ctrl, times, info=info):
-            time.sleep(0.4)
+            time.sleep(_settle(400))
             _ka = evidence(hwnd, "post_keys_after")
             _k0, _k1 = _img_fp(_kb.get("文件") or ""), _img_fp(_ka.get("文件") or "")
             _kch = None if (_k0 is None or _k1 is None) else (_k1 != _k0)
@@ -2057,7 +2095,7 @@ def do_keys(hwnd, vk=0x41, ctrl=False, times=1, dry=False, wait=0.06, scan_code=
     if ctrl:
         time.sleep(0.03)
         _send(0x11, False)                  # VK_CONTROL up
-    time.sleep(0.4)
+    time.sleep(_settle(400))
     after = evidence(hwnd, "after")
     fp0, fp1 = _img_fp(before.get("文件") or ""), _img_fp(after.get("文件") or "")
     changed = None if (fp0 is None or fp1 is None) else (fp1 != fp0)
@@ -2109,7 +2147,7 @@ def do_fill(hwnd, xy, text, dry=False, clear=True):
 
     b0 = evidence(hwnd, "fill0")
     click_at(x, y)
-    time.sleep(0.35)
+    time.sleep(_settle(350))
     if clear:
         # Ctrl+A 全选 → 随后打字即整体覆盖（比退格可靠：不依赖旧值长度）
         send_vk(0x11, True)
@@ -2119,12 +2157,12 @@ def do_fill(hwnd, xy, text, dry=False, clear=True):
         send_vk(0x41, False)
         time.sleep(0.06)
         send_vk(0x11, False)
-        time.sleep(0.2)
+        time.sleep(_settle(200))
     # 表单/聊天框语境：换行发 Shift+Enter。**绝不能发裸 Enter** ——
     # 2026-10-10 实测：往 WorkBuddy 聊天框发多行文本，裸 Enter 把 1127 字
     # 拆成多条消息自动提交，凭空造出两个垃圾任务（见 send_text 的坑二）。
     send_text(text, nl="shift_enter")
-    time.sleep(0.5)
+    time.sleep(_settle(500))
     b1 = evidence(hwnd, "fill1")
     f0, f1 = _img_fp(b0.get("文件") or ""), _img_fp(b1.get("文件") or "")
     changed = None if (f0 is None or f1 is None) else (f1 != f0)
@@ -2286,7 +2324,7 @@ def do_click(hwnd, name=None, xy=None, dry=False, force_coord=False, retry=1,
             # 要求隔 0.25 秒两次读数**完全一致**才动手，否则宁可不点。
             r1 = r
             if not dry:
-                time.sleep(0.25)
+                time.sleep(_settle(250))
                 c2 = find_control(hwnd, c.Name) or c
                 x, y, r2, ok2 = _center(c2)
                 if (not ok2) or r2 != r1:
@@ -2343,7 +2381,7 @@ def do_click(hwnd, name=None, xy=None, dry=False, force_coord=False, retry=1,
         # ⚠ 这个信号只是**提示**：WinUI3 这类界面刚还原时有渲染残留，前后图会差几个像素。
         #   判定"吃不吃投递"要以**功能性判据**（菜单有没有开、标签有没有切）为准。
         attempts = 1
-        time.sleep(0.45)
+        time.sleep(_settle(450))
         after = evidence(hwnd, "after")
         fp0 = _img_fp(before.get("文件") or "")
         fp1 = _img_fp(after.get("文件") or "")
@@ -2353,7 +2391,7 @@ def do_click(hwnd, name=None, xy=None, dry=False, force_coord=False, retry=1,
         while True:
             attempts += 1
             click_at(x, y)
-            time.sleep(0.45)
+            time.sleep(_settle(450))
             after = evidence(hwnd, "after")
             fp1 = _img_fp(after.get("文件") or "")
             if fp0 is None or fp1 is None:
@@ -2363,9 +2401,9 @@ def do_click(hwnd, name=None, xy=None, dry=False, force_coord=False, retry=1,
             if changed or attempts > retry:
                 break
             log(f"   ⚠ 第 {attempts} 次点击后页面〔无变化〕→ 自动重试")
-            time.sleep(0.35)
+            time.sleep(_settle(350))
     else:
-        time.sleep(0.45)
+        time.sleep(_settle(450))
         after = {} if dry else evidence(hwnd, "after")
     ev = "" if dry else ("　前图=%s 后图=%s" % (before.get("文件") or "无", after.get("文件") or "无"))
     if not dry and ("拒绝" in before or "拒绝" in after):
@@ -2471,7 +2509,7 @@ def _changed_by_evidence(hwnd, tag):
     """拍前后两张证据图，返回 True/False/None(判不了)。用于"投递成功≠生效"。"""
     try:
         b = evidence(hwnd, "post_" + tag + "_before")
-        time.sleep(0.35)
+        time.sleep(_settle(350))
         a = evidence(hwnd, "post_" + tag + "_after")
         f0 = _img_fp(b.get("文件") or "")
         f1 = _img_fp(a.get("文件") or "")
@@ -2551,7 +2589,7 @@ def do_scroll(hwnd, amount, dry=False, force_wheel=False):
     if not dry:
         _b = evidence(hwnd, "post_wheel_before")
         if _post_wheel(hwnd, info, amount):
-            time.sleep(0.4)
+            time.sleep(_settle(400))
             _a = evidence(hwnd, "post_wheel_after")
             _f0, _f1 = _img_fp(_b.get("文件") or ""), _img_fp(_a.get("文件") or "")
             _ch = None if (_f0 is None or _f1 is None) else (_f1 != _f0)
@@ -2732,7 +2770,7 @@ def do_focus(hwnd, dry=False):
             user32.SetForegroundWindow(hwnd)
         except Exception:
             pass
-        time.sleep(0.5)
+        time.sleep(_settle(500))
     now_fg = win_info(hwnd)["foreground"]
     log(f"{'（演练）' if dry else ''}🎯 切前台 [{info['title']}] → 现在前台={now_fg}")
     # ★ 2026-10-12 补（C6）：此处**不许返回 6** —— rc=6 是模态闸的**专用码**，
@@ -2803,6 +2841,7 @@ def do_type(hwnd, text, dry=False, allow_if_starts_with=None, force_send=False,
         return _fg
     # ── ③ 无元素直发（--focus）：**在 read_doc 之前**分叉，一个 UIA 元素都不找。
     if focus:
+        _PF_LAST[0] = time.perf_counter()
         nl_mode = nl or "shift_enter"
         if nl_mode not in ("enter", "shift_enter", "space"):
             return _tell_next(2, "换行口径只能是 enter / shift_enter / space，收到 %r"
@@ -2811,14 +2850,19 @@ def do_type(hwnd, text, dry=False, allow_if_starts_with=None, force_send=False,
             log("（演练）⌨ 打字 [无元素直发 %d 字，换行=%s] 窗口「%s」"
                 % (len(text), nl_mode, info["title"]))
             return 0
+        _pf("gate+fg")
         b0 = evidence(hwnd, "focussend0")
+        _pf("evidence.before")
         if scan_code:
             n_scan, fb_chars = send_text_scan(text)
         else:
             n_scan, fb_chars = 0, []
             send_text(text, nl=nl_mode)
-        time.sleep(0.45)
+        _pf("send_text")
+        time.sleep(_settle(450))
+        _pf("settle")
         b1 = evidence(hwnd, "focussend1")
+        _pf("evidence.after")
         f0, f1 = _img_fp(b0.get("文件") or ""), _img_fp(b1.get("文件") or "")
         changed = None if (f0 is None or f1 is None) else (f1 != f0)
         ev = ("" if changed is None
@@ -2851,7 +2895,7 @@ def do_type(hwnd, text, dry=False, allow_if_starts_with=None, force_send=False,
             n_scan, fb_chars = send_text_scan(text)
         else:
             send_text(text)
-        time.sleep(0.45)
+        time.sleep(_settle(450))
         b1 = {} if dry else evidence(hwnd, "typesend1")
         f0, f1 = _img_fp(b0.get("文件") or ""), _img_fp(b1.get("文件") or "")
         changed = None if (f0 is None or f1 is None) else (f1 != f0)
@@ -2886,7 +2930,7 @@ def do_type(hwnd, text, dry=False, allow_if_starts_with=None, force_send=False,
                    % (first, _cmd_read(hwnd), hwnd, hwnd, _cmd_read(hwnd))))
     if not dry:
         send_text(text)
-    time.sleep(0.45)
+    time.sleep(_settle(450))
     _, after, _ = read_doc(hwnd)
     want = before + text
     ok = (after == want) or (_norm_nl(after) == _norm_nl(want))
@@ -2940,7 +2984,7 @@ def do_drag(hwnd, frm, to, dry=False):
                 "拖窗口边框请参考 targets 输出的「可拖带」。")
     if not dry:
         drag(frm, to)
-    time.sleep(0.4)
+    time.sleep(_settle(400))
     sel = read_selection(hwnd) if not dry else None
     log(f"{'（演练）' if dry else ''}✋ 拖拽 [{frm} → {to}] 窗口「{info['title']}」"
         + ("" if dry else f"　选中了 {len(sel) if sel is not None else '?'} 字："
