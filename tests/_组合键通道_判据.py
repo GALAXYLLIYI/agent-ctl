@@ -83,6 +83,16 @@ def main():
     if not home:
         rec("前置·找到真源 act.py", False, "三处候选都没找到 act.py", skip=True)
         return 2
+    # ★ 2026-10-19 修「AUTHDIR 两本账」：本判据**直连** legacy act.py（不经 core），
+    #   拿不到 core 注入的 AGENTCTL_AUTHDIR ⇒ 会去读 legacy_tools\_auth（空的）报"没有通行证"。
+    #   这里显式补上：优先用 core 认定的那本账。
+    try:
+        sys.path.insert(0, os.path.join(ROOT, "src"))
+        from agentctl import gate as _coregate
+        if getattr(_coregate, "PASSFILE", None):
+            os.environ.setdefault("AGENTCTL_AUTHDIR", os.path.dirname(_coregate.PASSFILE))
+    except Exception:
+        pass
     sys.path.insert(0, home)
     import act
 
