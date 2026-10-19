@@ -2556,8 +2556,9 @@ def do_scroll(hwnd, amount, dry=False, force_wheel=False):
                 #   证明「滚轮生效了」（页面可能自己在动）。
                 log("   ⚠ 后台滚轮投递了但画面变了 不证明**滚轮生效**"
                     "（页面可能自己在动）")
-            log("   ⚠ 后台滚轮投递了但画面%s ⇒ 落回前台兜底"
-                % ("判不了（unknown）" if _ch is None else "没变"))
+            else:
+                log("   ⚠ 后台滚轮投递了但画面%s ⇒ 落回前台兜底"
+                    % ("判不了（unknown）" if _ch is None else "没变"))
     # ★ ③ 动作前自动置前：滚轮事件发给**光标下的窗口**，不在前台时不可控
     _fg = ensure_foreground(hwnd, "滚动(滚轮)", dry=dry)
     if _fg:
