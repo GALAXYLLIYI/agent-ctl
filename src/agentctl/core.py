@@ -1042,7 +1042,13 @@ def _perceive(args: dict, extra: list[str]) -> dict:
         return env(code=gate.CODE_NO_CTRL, data={"rc": rc}, warning="老脚本超时")
     if rc != 0:
         return env(code=gate.CODE_NO_CTRL, data={"rc": rc, "raw": (out + err).strip()[:400]},
-                   warning=f"老脚本返回码 {rc}")
+                   # ★ 2026-10-19（判据31⑤）：原来这里也是裸复读 f"老脚本返回码 {rc}"。
+                   #   2026-10-13 的 S3-B2「未知 rc 不许静默兜底」**只修了 _map_rc 那条路**，
+                   #   这条路被漏掉了 —— 同一刀砍了一半。
+                   # ⚠️ 诚实边界：本条只把「复读」改掉，**没有动「所有未知 rc 都落 code=4」
+                   #   这个落码口径**（超出判据范围，语义归属另议）。
+                   warning="没找到目标控件（老脚本 rc=%d）—— 先 ctl_windows / ctl_tree 看现状；"
+                           "若 rc 属于 act.py 没约定的码，先看 data.raw 原文再判断" % rc)
     _o = out.strip()
     data = {"rc": rc, "raw": _o[:4000]}
     # ★ T12：同上，回退分支也必须让截断可见。
@@ -2071,7 +2077,16 @@ def _map_rc(rc: int, out: str, err: str) -> dict:
             9: "未获授权 —— 先 ctl_authorize 拿通行证",
             3: "白名单/敏感窗口拒绝",
             7: "这个窗口用户还没点头 —— 需要先在弹窗里确认",
-            5: "坐标/前台/窗口稳定性拒绝"}.get(code, f"老脚本返回码 {rc}")
+            5: "坐标/前台/窗口稳定性拒绝",
+            # ★ 2026-10-19（判据31①）：code=4 原来**没在这张表里**，于是落到下面那个
+            #   「老脚本返回码 {rc}」的复读默认值 —— agent 拿到的回执等于没有回执，
+            #   跟 D1「恒定报没带 actor」是同一病根（失败态长得跟「什么都没拿到」一样）。
+            #   语义有既有出处：m 表 4→CODE_NO_CTRL，且本函数 docstring 里就写着
+            #   「rc=6 … 掉进兜底变成 code=4『找不到控件』」+ 契约 §2.1 给 code=4 的处方。
+            4: "没找到目标控件（老脚本 rc=4）—— 重新 ctl_windows + ctl_tree 看现状再点"
+            # ★ 默认值也不再复读：未知 rc 在上面已早退，走到这里必是**有 code 但漏了表**；
+            #   那属于「映射表与 warn 表不同步」，必须显形，不许悄悄复读。
+            }.get(code, "返回码已映射但缺专属文案（映射表与文案表不同步，请补）")
     if rc == 127:
         warn = f"找不到老脚本（LEGACY={LEGACY}）"
     if rc == 6:
