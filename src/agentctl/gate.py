@@ -836,7 +836,13 @@ def _check_locked(p: dict, sc: str, *, skip_count: bool = False) -> tuple[bool, 
     #   而发证侧（core.py:1186）走 `gate.effective_act_limit(scopes, 20)` ⇒ 按「**全证**里最紧的
     #   有副作用档位」取。两者只在本证**没写** acts_limit 时才可能落到这里（正常发证都带值）。
     #   ⇒ **改任何一边都要同时看一眼另一边**（core.py:1178-1190 的注释与本处互指）。
-    limit = int(p.get("acts_limit") or ACT_LIMIT.get(sc, 10))
+    # ★ 2026-10-19 用户定：**一个任务一次签，取消动作次数上限**（急停兜底）。
+    #   acts_limit ≤ 0（或没写）= 不封顶；有效期与急停照旧，安全边界没变。
+    _raw_limit = p.get("acts_limit")
+    limit = int(_raw_limit) if _raw_limit is not None else int(ACT_LIMIT.get(sc, 10))
+    if limit <= 0:
+        return (True, "范围「%s」有效至 %s，次数不封顶（急停兜底）"
+                % (SCOPES.get(sc, sc), p.get("expires")), CODE_OK)
     if n >= limit:
         return False, f"本张通行证动作次数已用尽（{n}/{limit}）", CODE_UNAUTH
     return True, f"范围「{SCOPES.get(sc, sc)}」有效至 {p.get('expires')}，已用 {n}/{limit} 次", CODE_OK

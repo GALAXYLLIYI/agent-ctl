@@ -1687,7 +1687,16 @@ def t_authorize(args: dict) -> dict:
     #   ⚠️ 发证能拿到的只有「申请到的 scopes」—— auth_popup.py 不做减法，用户点同意就是
     #      全给（legacy_tools\auth_popup.py:248-252 原样落盘），所以「申请到的」==「授予的」，
     #      这里不存在「按申请算、实际授得更多」的缺口。
-    acts = int(args.get("acts") or gate.effective_act_limit(scopes, 20))
+    # ★ 2026-10-19 用户定：**一个任务一次签、取消动作次数上限**。
+    #   约定：acts 显式传 0（或负数）= 不封顶；不传 = 用档位默认（旧语义保留）。
+    #   安全边界没变：有效期照旧 + 急停一票否决 + 敏感窗永久拒 —— 用户原话「我看到有问题我会急停」。
+    _acts_raw = args.get("acts")
+    if _acts_raw is None:
+        acts = int(gate.effective_act_limit(scopes, 20))
+    else:
+        acts = int(_acts_raw)
+    if acts < 0:
+        acts = 0
     # ⚠️ 上下界钳制（2026-10-15 GLM/ZCode 复检点出"无钳制"；与 acquire_lease 的 ttl `max(1,min(,600))` 同思路）。
     #   下界 1、上界 **10000**。两点如实说明：
     #   ① **显式 acts=0 会被上面的 `or` 吞掉**、回退成默认值 —— 这是**改前既有语义，本次不改**：
