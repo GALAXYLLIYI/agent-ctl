@@ -211,6 +211,10 @@ CRITERIA = (
      "第35条（2026-10-19 工单001）：**工作站体检不说谎** —— tools\\station_check.py 的"
      "字段齐全（10 组）/ consistent 与两 md5 自洽 / verdict 与数据自洽 / 退出码与结论一致 /"
      "真漂移⇒runtime_drift；--inject（把负例改成两边同文件）必须变红"),
+    ("文案一致", "_文案与数据一致_判据.py", (),
+     "第36条（2026-10-19 用户拍板成立，Codex 自曝的第 4 类病）：**日志说的话必须与回执数据一致** —— "
+     "变了（code=0/verdict=met）不许说「没变」；没变（code=8/no_effect）必须说「没变/unknown」；"
+     "内置已知坏样本自证；--inject（检查函数恒 True）必须变红"),
 
 )
 
@@ -243,6 +247,24 @@ INJECTABLE = {
     "靶标隔离": ("--inject",),
     "unknown不当成功": ("--inject",),
 }
+
+
+
+
+def _load_no_inject():
+    """读 tests\_无注入口_声明.txt：返回 {判据键: 原因}。缺失就是空表（不豁免任何人）。"""
+    d = {}
+    try:
+        with open(os.path.join(HERE, "_无注入口_声明.txt"), encoding="utf-8") as f:
+            for ln in f:
+                ln = ln.strip()
+                if not ln or ln.startswith("#") or "|" not in ln:
+                    continue
+                k, why = ln.split("|", 1)
+                d[k.strip()] = why.strip()
+    except Exception:
+        pass
+    return d
 
 
 def out(msg=""):
@@ -348,45 +370,82 @@ def main(argv=None):
 
 
 def run_inject(timeout):
-    """--inject：把「注入了缺陷的副本」喂给判据，**期望它们变红**。
+    """--inject：**自动探测**每条判据是否自带注入口（2026-10-19 用户拍板：废除白名单）。
 
-    这条模式的语义与常规模式**相反**：常规模式里 rc=0 是好成绩；
-    这里 rc=0（对每条可注入判据而言）恰恰说明「注入真把它打红了」＝ 判据是活的。
-    所以本模式自己的 rc=0 ＝ 每条可注入判据都如期变红。
-    没登记 --inject 的判据如实列成「无注入口（未参与）」，**不计入通过**。
+    为什么废白名单：白名单要人维护 —— 漏登记就会被读成"没有注入口"，
+    而多登记又会把"死判据"洗成"有注入口"。用户原话：白名单影响效率。
+    现在改成**探测**：每条都喂 `--inject` 跑一遍，
+      · rc ≠ 0  ⇒ 如期变红（判据是活的）
+      · rc ＝ 0 且输出里声明了 `NO_INJECT:` ⇒ 如实记"无注入口（已自证声明）"
+      · rc ＝ 0 且没声明 ⇒ **红**（注入缺陷后仍全绿且不说清原因 = 判据是死的）
+    代价：多跑 N-8 条（约 +2 分钟），换掉一个会烂的白名单 —— 值。
     """
     out("=" * 78)
-    out("跑红自证模式 · 注入的是**临时副本**，产品代码一个字节不动")
+    out("跑红自证模式（自动探测，无白名单） · 注入的是**临时副本**，产品代码一个字节不动")
     out("=" * 78)
-    results = []
-    skipped = []
-    for key, script, args, desc in CRITERIA:
-
-        inj = INJECTABLE.get(key)
-        if inj is None:
-            skipped.append(key)
+    results, declared = [], []
+    for key, script, args, _desc in CRITERIA:
+        path = os.path.join(HERE, script)
+        if not os.path.isfile(path):
+            results.append((key, script, 1, 0.0, "判据文件不在"))
             continue
-        rc, dt, _note = run_one(key, script, args + inj, timeout)
-        # 注入后必须是红的：rc != 0 才算「判据被注入打红」（= 它是活的）
-        results.append((key, script, rc, dt, "如期变红" if rc != 0 else "★注入后仍全绿（判据是死的）"))
+        cmd = [sys.executable, "-X", "utf8", path] + list(args) + ["--inject"]
+        t0 = time.monotonic()
+        try:
+            p = subprocess.run(cmd, cwd=ROOT, timeout=timeout,
+                               capture_output=True, text=True,
+                               encoding="utf-8", errors="replace")
+        except subprocess.TimeoutExpired:
+            results.append((key, script, 1, time.monotonic() - t0, "超时"))
+            continue
+        dt = time.monotonic() - t0
+        blob = (p.stdout or "") + (p.stderr or "")
+        if p.returncode != 0:
+            # ★ rc=2 = **验不了**（无通行证 / 无窗 / 夹具不满足）。
+            #   它既不是「如期变红」（那会让"没证"冒充"判据是活的"），也不是「死的」。
+            #   ★ 2026-10-19 实测教训：文案一致条在无证时 rc=2，被旧逻辑记成"如期变红"——假绿。
+            if p.returncode == 2 and "unrecognized arguments" not in (p.stderr or ""):
+                results.append((key, script, 2, dt, "验不了（rc=2，无证/无窗，注入结果待定）"))
+                continue
+            # ★ 判据用 argparse 且没定义 --inject 时，会以 rc=2 + "unrecognized arguments" 退出。
+            #   那是"没有注入口"，不是"如期变红"——否则一条死判据会靠 argparse 洗成活的。
+            if "unrecognized arguments" in (p.stderr or ""):
+                declared.append("%s（argparse 不认 --inject）" % key)
+                results.append((key, script, p.returncode, dt, "无注入口（已自证声明）"))
+            else:
+                results.append((key, script, p.returncode, dt, "如期变红"))
+            continue
+        elif "NO_INJECT:" in blob:
+            line = [ln for ln in blob.splitlines() if "NO_INJECT:" in ln][0]
+            declared.append("%s（%s）" % (key, line.split("NO_INJECT:")[-1].strip()[:40]))
+            results.append((key, script, 0, dt, "无注入口（已自证声明）"))
+        else:
+            _decl = _load_no_inject()
+            if key in _decl:
+                declared.append("%s（%s）" % (key, _decl[key][:40]))
+                results.append((key, script, 0, dt, "无注入口（已声明）"))
+            else:
+                results.append((key, script, 0, dt, "★注入后仍全绿且未声明 ⇒ 判据是死的"))
     out("")
     out("=" * 78)
     out("注入自证汇总")
     out("=" * 78)
     for key, script, rc, dt, note in results:
-        out("  [%s] %-4s %-24s %6.1fs  %s"
-            % ("红" if rc != 0 else "绿", key, script, dt, note))
+        out("  [%s] %-6s %-24s %6.1fs  %s"
+            % ("红" if rc != 0 else ("无口" if "无注入口" in note else "绿"),
+               key, script, dt, note))
     out("-" * 78)
-    out("可注入判据 %d 条：如期变红 %d，注入后仍绿 %d"
-        % (len(results), len([r for r in results if r[2] != 0]),
-           len([r for r in results if r[2] == 0])))
-    out("无注入口（未参与跑红自证，不计入通过）：%s" % "、".join(skipped))
-    still_green = [r[0] for r in results if r[2] == 0]
-    if still_green:
-        out("结论：【红】—— %s 注入缺陷后仍全绿 ⇒ 这些判据是死的，不能拿来发成绩"
-            % "、".join(still_green))
+    red = [r for r in results if r[2] != 0 and "无注入口" not in r[4]]
+    dead = [r[0] for r in results if "判据是死的" in r[4]]
+    out("探测 %d 条：如期变红 %d ｜ 无注入口（已声明）%d ｜ 注入后仍绿且未声明 %d"
+        % (len(results), len([r for r in results if "如期变红" in r[4]]),
+           len(declared), len(dead)))
+    if declared:
+        out("无注入口清单（如实列，不计入通过）：%s" % "、".join(declared))
+    if dead:
+        out("结论：【红】—— %s 注入后仍全绿且没声明 ⇒ 这些判据是死的" % "、".join(dead))
         return 1
-    out("结论：【绿】每条可注入判据都被注入打红 ⇒ 判据是活的（本次总用时 %.1fs）"
+    out("结论：【绿】没有「死的」判据（变红的如期变红，无注入口的都如实声明）｜总用时 %.1fs"
         % sum(r[3] for r in results))
     return 0
 
