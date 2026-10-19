@@ -469,6 +469,10 @@ def _legacy_env() -> dict:
     """
     env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
     env["AGENTCTL_BRAKE_FLAG"] = gate.BRAKE_FLAG
+    # ★ 2026-10-19 修「两本账」：把 core 认定的那本账**塞进子进程**，
+    #   这样老线 gate（不管解析到哪份）读的都是同一个 auth_pass.json。
+    if getattr(gate, "PASSFILE", None):
+        env["AGENTCTL_AUTHDIR"] = os.path.dirname(gate.PASSFILE)
     env.setdefault("AGENTCTL_LEGACY_HOME", LEGACY) if LEGACY else None
     return env
 

@@ -45,7 +45,9 @@ except Exception:
     pass
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-AUTHDIR = os.path.join(HERE, "_auth")
+# ★ 2026-10-19 修「两本账」：允许由环境变量指定同一本账（core 派 act.py 时会注入）。
+#   不指定时保持老行为（HERE/_auth），所以单独跑 legacy 脚本的语义没变。
+AUTHDIR = os.environ.get("AGENTCTL_AUTHDIR") or os.path.join(HERE, "_auth")
 PASSFILE = os.path.join(AUTHDIR, "auth_pass.json")
 GATELOG = os.path.join(AUTHDIR, "gate.log")
 # ★ 跨进程锁文件：路径由共享模块 gate_lock 统一给出（`<AUTHDIR>/gate.lock`）。
