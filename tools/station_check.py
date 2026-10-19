@@ -76,14 +76,12 @@ def channels():
         fg = int(u.GetForegroundWindow() or 0)
         nodes = 0
         if fg:
-            tr = uia_tree.tree(fg, max_nodes=200, detail=False)
-            n = getattr(tr, "nodes", None)
-            if n is None:
-                try:
-                    n = len(tr)
-                except Exception:
-                    n = 0
-            nodes = int(n or 0)
+            # ★ 必须用 walk()：tree(detail=False) 的「节点」恒为 []（uia_tree.py:715），
+            #   拿它数节点永远是 0；上一版数到的其实是 dict 键数，是个假数字。
+            got = uia_tree.walk(fg, max_nodes=200, detail=False)
+            if isinstance(got, tuple):
+                got = got[0]
+            nodes = len(got or [])
         out["uia"] = {"nodes": nodes, "usable": nodes > 0, "probe_hwnd": fg}
     except Exception as e:
         out["uia"] = {"nodes": None, "usable": False, "error": str(e)[:80]}
@@ -130,10 +128,11 @@ def envinfo():
 
 
 def auth():
-    from agentctl import core
+    # ★ 走 gate.status()（纯读）：core.dispatch 的动作出口会调 action_guard.observe() 落盘，
+    #   「只读体检」不该顺手写文件。
+    from agentctl import gate
     try:
-        d = core.dispatch("ctl_status", {"actor": "station"}, actor="station").get("data") or {}
-        d = d.get("结果") if isinstance(d.get("结果"), dict) else d
+        d = gate.status() or {}
     except Exception as e:
         return {"error": str(e)[:80], "pass_present": None, "brake": None,
                 "pass_expires": None, "lease_holder": None}
@@ -161,6 +160,10 @@ def auth():
 def verdict_of(rep):
     if rep["auth"].get("brake"):
         return "brake_on", "急停已拉下：先松开 _急停.flag 再谈干活"
+    if rep["runtime"].get("blocked"):
+        return ("runtime_drift",
+                "运行时/真源 act.py 读不到（%s）：**验不了，不是漂移**"
+                % rep["runtime"]["blocked"][0][:40])
     if not rep["runtime"]["consistent"]:
         return ("runtime_drift",
                 "运行时 act.py 与真源不一致（%s vs %s）：先刷新并留 md5"
@@ -195,7 +198,14 @@ def main():
         "act_py_md5": md5_8(RUNTIME_ACT),
         "repo_act_md5": md5_8(REPO_ACT),
     }
-    rep["runtime"]["consistent"] = bool(rep["runtime"]["act_py_md5"]) and \
+    blocked = []
+    if not rep["runtime"]["act_py_md5"]:
+        blocked.append("runtime_act.py 读不到（权限/路径），无法核对")
+    if not rep["runtime"]["repo_act_md5"]:
+        blocked.append("repo act.py 读不到，无法核对")
+    rep["runtime"]["blocked"] = blocked
+    rep["runtime"]["verdict_status"] = "ok" if not blocked else "cannot_verify"
+    rep["runtime"]["consistent"] = (not blocked) and \
         rep["runtime"]["act_py_md5"] == rep["runtime"]["repo_act_md5"]
 
     v, advice = verdict_of(rep)
