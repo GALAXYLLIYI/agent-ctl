@@ -1993,7 +1993,29 @@ def do_keys(hwnd, vk=0x41, ctrl=False, times=1, dry=False, wait=0.06, scan_code=
     except gate.GateDenied as e:
         return _gate_denied(e, hwnd, gate.C, "按键")
     # ★ 路线 P（2026-10-17 F2）：先不碰前台，PostMessage 按键试一次
-    if not dry:
+    #
+    # ★★ 2026-10-19 修（Codex 实跑「把分镜脚本发到微信群」踩出）：
+    #   **ctrl 组合不走这条路**（组合即 Ctrl+V/Ctrl+A/…，vk 本身是被修饰的那个键）。
+    #
+    #   病根不是「PostMessage 不可靠」，是**不可靠得没法判**：
+    #     _post_keys 把「Ctrl down」和「V down」分成两条 WM_KEYDOWN 投过去，
+    #     目标若按 wParam 直接合成字符（**Qt / Electron / 自绘控件都是这一类**），
+    #     Ctrl 那个修饰位压根没参与 ⇒ 结果是打出一个**字面量 v**。
+    #     而「打出一个字面量 v」**同样会让画面变化** ⇒ 下面那段像素判据把它读成
+    #     「后台按键生效」并**直接 return 0** ——
+    #     ★ **失败与成功在证据上不可区分**，前台兜底那条真正正确的路压根走不到。
+    #     真跑记录（2026-10-19 微信 Qt 窗口）：输入框里出现 `vvaaav`，
+    #     日志逐行写着「✔ 后台按键生效（像素证据有变化）」—— 字面量 v 本身
+    #     就是它引以为傲的那份「证据」。
+    #
+    #   为什么只砍组合键、不砍普通键：
+    #     路线 P 的收益是「不抢前台」，而这个收益**只在没有修饰语义的输入上成立**
+    #     （滚轮、普通功能键）。组合键一旦走错，错法是「静默地做错事」而不是
+    #     「什么都没做」—— 后者至少还能被像素判据逮住。
+    #     按项目自己的口径（§㊾ ZCode：「输入/事件通道层是独立失败源」）：
+    #     **点没点中属输入通道，不属感知通道**；同理，「组合键有没有带上修饰位」
+    #     也归输入通道，而输入通道的失败**不能交给像素去裁**。
+    if not dry and not ctrl:
         _kb = evidence(hwnd, "post_keys_before")
         if _post_keys(hwnd, vk, ctrl, times, info=info):
             time.sleep(0.4)
@@ -2014,6 +2036,10 @@ def do_keys(hwnd, vk=0x41, ctrl=False, times=1, dry=False, wait=0.06, scan_code=
         return 0
     before = evidence(hwnd, "before")
     _send = send_vk_scan if scan_code else send_vk
+    if ctrl:
+        log("   ⓘ 组合键**不走后台 PostMessage**（2026-10-19 起）："
+            "自绘控件会把 Ctrl 丢掉并按 wParam 直接打字母，"
+            "而那种乱字符**和成功在像素上长得一样**，判不出来 ⇒ 直接走前台真按键。")
     if ctrl:
         _send(0x11, True)                   # VK_CONTROL down
         time.sleep(0.03)

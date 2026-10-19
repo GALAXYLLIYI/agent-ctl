@@ -170,6 +170,22 @@ CRITERIA = (
      "ctl_preflight 给 window/sensitive/channels/frame/auth + verdict/advice；"
      "空 hwnd ⇒ no_window；敏感窗（自己起的控制台）⇒ blocked_sensitive；"
      "--inject（_deny_sensitive_target 恒 None）必须变红"),
+    ("MCPactor", "_MCPactor_判据.py", (),
+     "第28条（2026-10-19 Codex 实跑发微信踩出）：**MCP 传输必须带得上 actor** —— "
+     "actor 只交给 dispatch 的关键字参数（= mcp.py 从 AGENTCTL_ACTOR 取值的那条路）时，"
+     "闸门必须认得，写动作不得再报 code=10「没带 actor」；"
+     "★ 守门反向：actor 真没给时闸门仍必须拒（不许靠取消检查蒙混过关）；"
+     "--inject（逐字复现修前 dispatch 形状）必须变红"),
+    ("组合键", "_组合键通道_判据.py", (),
+     "第29条（2026-10-19 Codex 实跑发微信踩出）：**组合键不许走后台 PostMessage** —— "
+     "ctrl=True 时不得调 _post_keys（自绘控件丢掉 Ctrl 修饰位、按 wParam 直接打字母，"
+     "而那种乱字符**和成功在像素上长得一样**判不出来）；"
+     "普通键仍走路线 P（不许误伤）；--inject 必须变红"),
+    ("计数", "_通行证计数_判据.py", (),
+     "第30条（2026-10-19 Codex 实跑发微信踩出）：**新签的证从 0 起算** —— "
+     "merge_pass 新签发时 acts 归零（旧计数留档 acts_carried，不丢审计）；"
+     "弹窗批的次数照旧生效；窗口追加模式仍一分额度都不给。"
+     "★ 本条不碰闸门，用户不在场也能复跑"),
 
 )
 
@@ -194,6 +210,8 @@ INJECTABLE = {
     "帧过期": ("--inject",),
     "输入判词": ("--inject",),
     "体检": ("--inject",),
+    "MCPactor": ("--inject",),
+    "组合键": ("--inject",),
 }
 
 

@@ -5867,6 +5867,20 @@ def dispatch(tool: str, args: dict, *, actor: str = "") -> dict:
     """**唯一的入口。** 三种传输都调它。"""
     t0 = time.perf_counter()
     args = args or {}
+    # ★ D1 修复（2026-10-19，Codex 实跑发微信时踩出）
+    #   症状：MCP 传输（agentctl.mcp）下**所有写动作**一律 code=10，
+    #         报「本次调用**没带 actor**，请加 --actor」—— 而包装器
+    #         .codex\mcp\run_agentctl.cmd 里明写 `set "AGENTCTL_ACTOR=codex"`。
+    #   真因：actor 由 mcp.py 从**环境变量**取出来交给 dispatch 的**关键字参数**，
+    #         但 dispatch 只把 args 往下传（TOOLS[tool](args)）；
+    #         闸门读的是 args.get("actor")（见 _act_precheck），
+    #         ⇒ **actor 在 dispatch 里被算出来然后丢掉**，写动作永远拿不到身份。
+    #         CLI 传输不受影响，因为 act.py 走 --actor 会把 actor 放进 args。
+    #   修法：在唯一出口把 actor **补进 args**。不改任何判定语义，只补一条本该有的传递。
+    #   ⚠ 只在 args 里没有 actor 时才补 ⇒ 调用方显式传的一直优先，
+    #     不会出现「环境变量覆盖显式指定」这种反直觉行为。
+    if actor and not args.get("actor"):
+        args = dict(args, actor=actor)
     if tool not in TOOLS:
         r = env(code=gate.CODE_NO_CTRL, warning=f"未知工具：{tool}")
     else:

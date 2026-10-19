@@ -15,21 +15,6 @@
 用法（命令行）：
     python gate.py --check "A级 只读感知"
     python gate.py --end                    # 主动结束会话（消费掉通行证）
-
-★ 本文件是**随包执行层**，不是编排层（窗 X · 2026-10-18 写定）
-   —— 仓里另有一份 `src\agentctl\gate.py`，名字一样、职责不同，**不是第二真源**：
-     · 闸门原子性 / 租约 / 急停 set-clear / 观测-动作绑定 / 敏感窗终判
-       ⇒ 唯一真相在 `src\agentctl\gate.py`，**别在这里加**。
-     · 本文件只负责 act.py、perceive.py 直接 `import gate` 后的那几件事：
-       读闸、放行、刹车、--status 命令行。**它随包发到别人机器上，
-       装出去的环境里没有 src\agentctl，所以它不能反过来 import 编排层。**
-     · 跨进程锁与存储（`_auth\auth_pass.json`）两份共用，不是两本账。
-   ⚠ **已知分歧（未修，待 DSH 裁）**：本文件 L43 用 `AUTHDIR = HERE/_auth`（gate.py 所在目录），
-     而 `src\agentctl\gate.py` L379 用 `HOME/_auth`（HOME 走四层查找，可能解析到别处）。
-     两者同目录时相等；一旦解析分叉，就会读**两份不同的通行证** ⇒ 判档口径分裂。
-   ⚠ **死代码**：`check_targets` / `_check_targets_inner` / `_pids_of` / `_target_from_argv`
-     全文件无调用方（act.py 的敏感窗终判走新线的 gate.deny_target）。留着是为了兼容外部调用者，
-     不是逻辑入口；要清先确认没人从仓外 import 它。
 """
 import contextlib
 import datetime
@@ -373,7 +358,18 @@ def check(scope, target=None):
         # ★ D18·R2：读失败**不能**伪装成「没有通行证」—— 那会误导人以为没授权、跑去重新签发。
         return False, f"闸门状态读不了（{err}）—— 本次拒绝（不写回）"
     if not p:
-        return False, "没有通行证（需先由用户在弹窗里授权）"
+        # ★ D3 修复（2026-10-19，Codex 实跑时踩出）：**报错必须报出查的是哪个目录**。
+        #   本机实测：同一个 `act.py`，在 agent-ctl\legacy_tools 下跑报「没有通行证」，
+        #   在 dsh-viewer-plugin\tools 下跑**通过** —— 因为这层 gate.py 用
+        #   `AUTHDIR = HERE/_auth`（HERE = gate.py 所在目录），而 src\agentctl\gate.py
+        #   用四层查找解析出的 HOME（= dsh-viewer-plugin/tools）——
+        #   两者一旦分叉就是**两本账**（gate.py 顶部注释里早标了「已知分歧，未修」）。
+        #   改前这句只说「没有通行证」，**不说自己查了哪儿** ⇒ 排查成本全推给人：
+        #   人只能一个目录一个目录试。
+        return False, ("没有通行证（需先由用户在弹窗里授权）—— 本次查的是 %s"
+                       "；若你明明刚授权却报这句，多半是**跑错了这份 act.py 的目录**"
+                       "（同机可能存在两本账），请对照上面这个路径看 _auth\auth_pass.json"
+                       % AUTHDIR)
     if p.get("consumed"):
         return False, "通行证已被使用（一次性，重新授权）"
     if time.time() > p.get("expires_at", 0):

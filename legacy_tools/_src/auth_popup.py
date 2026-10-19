@@ -466,8 +466,28 @@ def merge_pass(existing, new, *, window_ack):
     base["scopes"] = new_scopes
     base["scope"] = "、".join(new_scopes)
     base["acts_limit"] = int(new["acts_limit"])
-    if "acts" in base:                      # gate 的动作计数器：只保留，不重置、不新建
-        base["acts"] = int(base.get("acts") or 0)
+    # ★★ D4 修复（2026-10-19，Codex 实跑时踩出）：**新签发 ⇒ acts 从 0 起算**。
+    #   改前是「只保留，不重置、不新建」，实跑后果是**新证一出生就作废**：
+    #     用户批「200 次」，回执却是「动作次数已用尽（104/200）」——
+    #     而且只有把上限签到**比历史累计还大**才放行（实测 20 不行 → 60 不行 → 200 才过）。
+    #     也就是说：用户每批一次，弹窗上写的那个次数**说了不算**。
+    #
+    #   为什么不改坏「防续额度」：
+    #     原来那行的意图是防**模型自己给自己续额度**（铁律 11④：明文密钥永不接触模型，
+    #     模型够不到弹窗）。但**这一行只有人在弹窗里亲手输了密钥才走得到** ——
+    #     模型够不着，防的是一个够不着的威胁；代价是**人的决定被静默丢弃**。
+    #     而 nonce/expiry 在同一段里**本来就换新**了 ⇒ 这里本来就是「这是一张新证」的位置。
+    #   ⇒ 计数器跟着新证一起归零，语义回到弹窗上写的那句话：
+    #     「**本次授权**的动作次数上限」。
+    #
+    #   ★ 审计不丢：旧计数原样留在 `acts_carried`。
+    #     ⇒「这一轮之前已经花掉多少」查得到，只是不再**拿它去卡新证**。
+    #   ★ window_ack（窗口追加）模式在更上面就 return 了，走不到这里 ——
+    #     追加模式仍然**一分额度都不给**，口径没被这次修复碰到。
+    _old_acts = int(base.get("acts") or 0)
+    if _old_acts:
+        base["acts_carried"] = _old_acts
+    base["acts"] = 0
     base["issued"] = new["issued"]
     base["expires_at"] = new["expires_at"]
     base["expires"] = new["expires"]
