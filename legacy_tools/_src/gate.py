@@ -384,7 +384,11 @@ def check(scope, target=None):
     if scope not in allowed:
         return False, f"范围不符：本次持 {'、'.join(allowed)}，本动作要「{scope}」"
     n = p.get("acts", 0)
-    limit = p.get("acts_limit") or ACT_LIMIT.get(scope, 10)
+    # ★ 2026-10-19 用户定：**一个任务一次签、取消动作次数上限**（急停兜底）。
+    _lim = p.get("acts_limit")
+    limit = int(_lim) if _lim is not None else int(ACT_LIMIT.get(scope, 10))
+    if limit <= 0:
+        return True, "次数不封顶（急停兜底）"
     if n >= limit:
         return False, f"本张通行证动作次数已用尽（{n}/{limit}）"
     # T5：可选的目标三元组。用 `in` 判存在（空 dict 是假值，用 get 会 fail-open）。

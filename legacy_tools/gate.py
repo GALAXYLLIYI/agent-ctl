@@ -12,6 +12,11 @@
 用法（脚本里）：
     import gate
     gate.require(gate.A, "读控件树")      # 不过就抛 GateDenied，脚本不许继续
+★ 已知分歧（待 DSH 裁）——**两本账**：本模块按 `HERE/_auth` 找通行证，而随包运行时（dsh-viewer-plugin\tools）实际落在 `%LOCALAPPDATA%\AgentCtl\_auth`。
+  两边各读各的 ⇒ 可能出现「签了证但这边说没有」。DSH 建议：以**运行时目录**为准，
+  源码侧改成读环境变量 `AGENTCTL_AUTHDIR`（默认回落 HERE/_auth），修完这条注释即可删。
+★ 本文件在发布包里是**随包执行层**（被 MCP 调用），仓库里是**真源**；改真源后必须刷新运行时并留 md5。
+
 用法（命令行）：
     python gate.py --check "A级 只读感知"
     python gate.py --end                    # 主动结束会话（消费掉通行证）
@@ -379,8 +384,7 @@ def check(scope, target=None):
     if scope not in allowed:
         return False, f"范围不符：本次持 {'、'.join(allowed)}，本动作要「{scope}」"
     n = p.get("acts", 0)
-    # ★ 2026-10-19 用户定：**一个任务一次签，取消动作次数上限**（急停兜底）。
-    #   acts_limit ≤ 0 或未写 = 不封顶；有效期与急停照旧。
+    # ★ 2026-10-19 用户定：**一个任务一次签、取消动作次数上限**（急停兜底）。
     _lim = p.get("acts_limit")
     limit = int(_lim) if _lim is not None else int(ACT_LIMIT.get(scope, 10))
     if limit <= 0:

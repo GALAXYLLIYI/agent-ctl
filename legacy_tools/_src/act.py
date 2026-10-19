@@ -419,7 +419,11 @@ def _quota_line(scope=None):
     if not p:
         return "账本里没有通行证（未签发或读不到）"
     n = p.get("acts", 0)
-    limit = p.get("acts_limit") or gate.ACT_LIMIT.get(scope, 20)
+    # ★ 2026-10-19 用户定：acts_limit ≤ 0（或未写）= 不封顶（执行点改在 gate.require 里）
+    _lim = p.get("acts_limit")
+    limit = int(_lim) if _lim is not None else int(gate.ACT_LIMIT.get(scope, 20))
+    if limit <= 0:
+        return "额度：**不封顶**（用户 2026-10-19 定，靠急停兜底）；已用 %d 次" % n
     left = max(0, limit - n)
     return ("额度：已用 %d / 上限 %d / **剩余 %d**"
             "（范围「%s」，有效至 %s）"

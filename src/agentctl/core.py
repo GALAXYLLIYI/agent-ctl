@@ -1705,7 +1705,10 @@ def t_authorize(args: dict) -> dict:
     #      （例如误传 1e9），不打算限制正常工作流；
     #   ③ 这不构成放宽：闸门仍按**证上写的** acts_limit 卡（gate.py:794-796 + 同处双轨注释），
     #      本处只把要写进证里的数字收进合理区间。
-    acts = max(1, min(acts, 10000))
+    # ★ 2026-10-19 用户定「一个任务一次签、取消次数上限」：
+    #   实测踩到——上面解析出 0 之后，**原来这行 `max(1, ...)` 又把 0 抬成 1**
+    #   （证上真写着 acts_limit=1，作者亲签验证抓到的）。现在 0 原样保留，只钳上界。
+    acts = 0 if acts <= 0 else min(acts, 10000)
     reason = args.get("reason") or ""
     timeout = int(args.get("timeout_sec") or 180)
 

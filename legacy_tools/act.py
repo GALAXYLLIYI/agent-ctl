@@ -419,7 +419,7 @@ def _quota_line(scope=None):
     if not p:
         return "账本里没有通行证（未签发或读不到）"
     n = p.get("acts", 0)
-    # ★ 2026-10-19 用户定：acts_limit ≤ 0（或没写）= 不封顶（执行点改在 gate.require 里）
+    # ★ 2026-10-19 用户定：acts_limit ≤ 0（或未写）= 不封顶（执行点改在 gate.require 里）
     _lim = p.get("acts_limit")
     limit = int(_lim) if _lim is not None else int(gate.ACT_LIMIT.get(scope, 20))
     if limit <= 0:

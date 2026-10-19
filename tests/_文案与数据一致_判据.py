@@ -36,7 +36,7 @@ u = ctypes.windll.user32
 u.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
 GREEN, RED, SKIP = [], [], []
 INJECT = False
-ACT_LOG = os.path.join(r"<工作区>\Documents\dsh-viewer-plugin\tools\_auth", "act.log")
+ACT_LOG = ""      # ★ 不写死：main() 里从 ctl_status 的 auth_dir 推导
 
 
 def rec(name, ok, detail="", skip=False):
@@ -57,19 +57,42 @@ def finish():
     return 0
 
 
-def log_tail(n=6):
-    """取 act.log 最后 n 行（读不到返回 None，**不假装空**）。"""
+def log_mark():
+    """记录 act.log 当前字节偏移（动作前调用）。读不到返回 None。"""
     try:
+        return os.path.getsize(ACT_LOG)
+    except Exception:
+        return None
+
+
+def log_since(offset, n_lines=8):
+    """只读**本次动作之后新增**的日志（读不到返回 None，**不假装空**）。
+
+    ★ 教训：动作后读"最后 8 行"会把上一个动作的「没变」也读进来 ⇒ 假红。
+    """
+    try:
+        if offset is None:
+            return None
         with open(ACT_LOG, "r", encoding="utf-8", errors="replace") as f:
-            lines = f.readlines()
-        return lines[-n:]
+            f.seek(offset)
+            text = f.read()
+        lines = [ln for ln in text.splitlines() if ln.strip()]
+        return lines[-n_lines:]
     except Exception:
         return None
 
 
 def says_unchanged(text):
+    """act.py 的"没变"用词（★ 实测口径 2026-10-19 现场取词）：
+       成功：「✔ 页面已变化」｜失败：「⚠⚠ 页面无变化」「〔无变化〕」
+    ⇒ 认「无变化 / 未变化 / 没变 / unknown / 判不了」；**不认「已变化」**。
+    （判据过严也会假红：原本只认"没变"，于是把"无变化"当没写判词 → 误报。）
+    """
     t = text or ""
-    return ("没变" in t) or ("unknown" in t) or ("判不了" in t)
+    if "已变化" in t:
+        return False
+    return ("无变化" in t) or ("未变化" in t) or ("没变" in t) or \
+           ("unknown" in t) or ("判不了" in t)
 
 
 def check_consistency(code, verdict, logtext):
@@ -138,7 +161,9 @@ def main():
     if left <= 0:
         rec("有有效通行证", False, "无有效通行证（剩 %ds）" % left, skip=True)
         return finish()
-    if log_tail(1) is None:
+    global ACT_LOG
+    ACT_LOG = os.path.join((st or {}).get("auth_dir") or "", "act.log")
+    if log_mark() is None:
         rec("能读到 act.log", False, "读不到 %s ⇒ 验不了" % ACT_LOG, skip=True)
         return finish()
 
@@ -162,13 +187,14 @@ def main():
         time.sleep(0.3)
 
         # 动作一：打字（必然"变了"）
+        mark = log_mark()
         t1 = core.dispatch("ctl_type", {"hwnd": h, "text": "一致性探针", "mode": "focus",
                                        "allow_foreground": True, "actor": "判据36"}, actor="判据36")
         if t1.get("code") == 9:
             rec("有可用动作额度", False, "code=9 额度用尽", skip=True)
             return finish()
         time.sleep(0.6)
-        tail1 = "".join(log_tail(8) or [])
+        tail1 = "".join(log_since(mark, 8) or [])
         rec("① 打字（变）⇒ code=%r 且日志不说『没变』" % (t1.get("code"),),
             t1.get("code") in (0, 8),
             "code=%r" % (t1.get("code"),))
@@ -180,11 +206,12 @@ def main():
         # 动作二：同一位置连点两次（第二次多半"没变"）
         for i in (1, 2):
             fg(h)
+            mark = log_mark()
             c = core.dispatch("ctl_click", {"hwnd": h, "xy": [400, 300], "frame_id": ver(h),
                                            "allow_foreground": True, "actor": "判据36"},
                               actor="判据36")
             time.sleep(0.6)
-            tail = "".join(log_tail(8) or [])
+            tail = "".join(log_since(mark, 8) or [])
             v2 = None
             try:
                 v2 = ((c.get("data") or {}).get("结果") or {}).get("after", {}).get("verdict")
