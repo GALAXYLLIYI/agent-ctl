@@ -2128,7 +2128,7 @@ def do_fill(hwnd, xy, text, dry=False, clear=True):
     log(f"⌨ 填字段 [{len(text)}字{'，含中文' if any(ord(c) > 127 for c in text) else ''}"
         f"{'，已先清空' if clear else ''}] 坐标({x},{y}) 窗口「{info['title']}」"
         f"　前图={b0.get('文件') or '无'} 后图={b1.get('文件') or '无'}" + ev)
-    return 0 if changed is not False else 8
+    return 0 if changed is True else 8
 
 
 # ─────────────────── 证据 ───────────────────
@@ -2375,7 +2375,7 @@ def do_click(hwnd, name=None, xy=None, dry=False, force_coord=False, retry=1,
     if attempts > 1:
         detail["重试次数"] = attempts - 1
     log(f"{'（演练）' if dry else ''}🖱 点击 [{method}] 窗口「{info['title']}」 {json.dumps(detail, ensure_ascii=False)}" + ev)
-    return 0 if (dry or changed is not False) else 8
+    return 0 if (dry or changed is True) else 8
 
 
 def scroll_pct(hwnd):
@@ -2829,7 +2829,7 @@ def do_type(hwnd, text, dry=False, allow_if_starts_with=None, force_send=False,
         # ★ 核验降级说明必须留痕：无元素直发**没有 UIA 回读**可比，
         #   「画面没变」判 8 而不是默默当成功。
         log("   核验：前后截图比对（无 UIA 回读可比）；判不了=unknown 不算失败")
-        return 0 if (changed is not False) else 8
+        return 0 if (changed is True) else 8
     c, before, how = read_doc(hwnd)
     if before is None and not force_send:
         return _tell_next(4, f"打不了字：{how}", hwnd,
@@ -2858,7 +2858,7 @@ def do_type(hwnd, text, dry=False, allow_if_starts_with=None, force_send=False,
         if scan_code:
             log(f"   扫描码注入：{n_scan}/{len(text)} 字符走了扫描码；"
                 f"回退 UNICODE 的字符：{''.join(fb_chars) or '无'}")
-        return 0 if (dry or changed is not False) else 8
+        return 0 if (dry or changed is True) else 8
     # ★ 最关键的一道保险：只往空文档（或带训练标记的靶文档）里打字，绝不可能污染用户的真实文件
     if before.strip() != "" and not (allow_if_starts_with and before.startswith(allow_if_starts_with)):
         # ① rc=7 必须**自带下一步**：报出当前字符数 + 清空命令原文。
