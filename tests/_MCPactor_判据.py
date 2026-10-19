@@ -56,6 +56,23 @@ def notepad():
     return hits[0] if hits else 0
 
 
+def _ensure_notepad():
+    """没有记事本就自己拉一个（返回 hwnd, pid；拿不到返回 (0, 0)）。判据结束时负责收掉。"""
+    import subprocess
+    import time as _t
+    h = notepad()
+    if h:
+        return h, 0
+    before = set()
+    p = subprocess.Popen(["notepad.exe"])
+    for _ in range(12):
+        _t.sleep(0.4)
+        cur = notepad()
+        if cur:
+            return cur, p.pid
+    return 0, p.pid
+
+
 def missing_actor(r):
     """是不是那条「没带 actor」的拒。**只认这一条**，别把别的拒绝算进来。
 
@@ -87,7 +104,7 @@ def main():
         rec("前置·通行证", False, why, skip=True)
         return 2
 
-    hwnd = notepad()
+    hwnd, _np_pid = _ensure_notepad()
     if not hwnd:
         rec("前置·真记事本窗口", False, "起不来记事本", skip=True)
         return 2
