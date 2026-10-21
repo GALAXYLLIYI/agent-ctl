@@ -239,25 +239,69 @@ def _split_scope(req):
     return [s.strip() for s in str(req or "").split(",") if s.strip()]
 
 
-def _initial_scope_states(items, no_d):
+def _initial_scope_states(items, no_d, existing_scopes=None):
     """(每字母的初始状态, 非标准项列表)。
     默认规则：--request 给的算；没给（空）⇒ ABCD 全给（分工书 ①）；
     --no-d ⇒ D 不计入（接线单 §二 7）。
     第三轮 C：返回值仍叫 states（＝本次范围内含哪些字母），只是弹窗不再用勾选框承载它 ——
-    它直接由参数算出，展示与落盘用同一份。"""
+    它直接由参数算出，展示与落盘用同一份。
+
+    ★★ 单 B（2026-10-21 用户拍板：**方案 A「并集，一个概念」**）★★
+      本次范围 = **现有证的范围 ∪ 本次要的**。
+      病根：改前 `merge_pass` 是 `base["scopes"] = new["scopes"]`（**覆盖**，见本文件 :465-467）
+            ⇒ 一张「只要 A」的小请求会把你**已经批过的 B、C 抹掉**。
+      为什么并集不是「放宽」：并集里的每一项，要么你**早已批过**（existing_scopes），
+            要么你**此刻正在批**（本次要的）⇒ 它是「**不撤销你已有的授权**」，
+            不是「凭空多给一项」。
+      ★ existing_scopes 只能由**有效**旧证提供（未消费、未过期）——
+        过期的证什么都没给，拿它并集等于凭一张废证把权限恢复回来。
+      ★ --no-d **优先**：既有 D 也不并进来（否则并集把 --no-d 这个产品开关破掉）。
+      ★ 窗口追加模式（window_ack）**不并集**：那条路只动窗口，范围/时限/次数一律不碰。
+    """
     std = [it for it in items if _letter_of(it)]
+    have = set()
+    for it in (existing_scopes or []):
+        L = _letter_of(it)
+        if L:
+            have.add(L)
     if items and not std:
-        # 全是非常规项：一个字母都不认识 ⇒ 不预设任何勾选（用户自己看着办）
-        states = {L: False for L in SCOPE_LETTERS}
+        # 全是非常规项：一个字母都不认识 ⇒ 不预设任何**请求来的**范围；
+        # 但你**早已批过**的那些仍然算数（并集口径），没有旧证时就是全不勾。
+        states = {L: (L in have) for L in SCOPE_LETTERS}
     elif not items:
+        # 空请求 ⇒ ABCD 全给（默认口径不变；并集是 ABCD 的子集，不影响这一档）
         states = {L: True for L in SCOPE_LETTERS}
     else:
-        want = {_letter_of(it) for it in std}
+        want = {_letter_of(it) for it in std} | have
         states = {L: (L in want) for L in SCOPE_LETTERS}
     if no_d:
         states["D"] = False
     extra = [it for it in items if not _letter_of(it)]
     return states, extra
+
+
+def _existing_valid_scopes():
+    """现有证里**还有效**的范围（未消费、未过期）。读不到/坏文件 ⇒ 空表。
+
+    ★ 单 B：并集的来源。**只有有效证才配进并集** ——
+      过期的证什么都没给，拿它并集等于凭一张废证把权限恢复回来。
+    ★ 窗口追加模式不用它（那条路只动窗口，范围一律不碰）。
+    """
+    try:
+        with _lock_exclusive(AUTHDIR):
+            p = _load(PASSFILE, {})
+    except Exception:
+        return []
+    if not isinstance(p, dict) or not p:
+        return []
+    try:
+        if p.get("consumed"):
+            return []
+        if time.time() > float(p.get("expires_at") or 0):
+            return []
+    except Exception:
+        return []
+    return list(p.get("scopes") or [])
 
 
 # ────────────────────── P1-A ②：候选窗口枚举（只读，ctypes） ──────────────────────
@@ -538,6 +582,121 @@ def _sum_window_lines(rows):
 
 
 # ────────────────────────── 弹窗 ──────────────────────────
+def issue_pass(scope_states, scope_extra, minutes, acts, targets=None,
+               win_rows=None, window_ack=False):
+    r"""**签发通行证**（算范围 → 合并 → 落盘）。返回 (merged, why)。
+
+    ★ 为什么抽出来（单 B，2026-10-21）：改前这段逻辑**长在 tkinter 的闭包 `submit` 里**，
+      于是「批准之后证里到底装什么」**没法在用户不在场时验证** ——
+      弹窗要真桌面、还要真密钥（PBKDF2）才能走到这一步。
+      抽成模块级函数后，判据可以直接打这条**真签发路径**（tests\_P1_通行证并集_判据.py），
+      单 B 的行为才**可无人值守地验证**。
+    ★ **密钥校验不在这里**：它留在 `submit` 里（本函数是「用户已按了授权」之后的那一段）。
+      判据调本函数等于跳过密钥那一步 —— 判的是**范围与合并语义**，不是密钥闸。
+    ★ fail-closed 不变：一个范围都拿不到 ⇒ **不签发**（返回 (None, 原因)）。
+    """
+    checked = [L for L in SCOPE_LETTERS if scope_states and scope_states.get(L)]
+    # ★ 空白的范围项**不算一个范围**（不许签出 scopes=[""] 这种废证）。
+    #   正常流程里 `_split_scope` 已经滤掉了空串；这里再挡一道 ⇒ 纵深防御。
+    extra = [s for s in (scope_extra or []) if str(s or "").strip()]
+    if not checked and not extra:
+        return None, "本次没有可授权的范围（参数为空）—— 拒绝签发"
+    granted = [SCOPE_FULL[L] for L in checked] + list(extra)
+    expires = time.time() + minutes * 60
+    rows = win_rows or []
+    windows = _windows_from_selection(rows, range(len(rows)), expires)
+    new = {"scopes": granted, "acts_limit": acts, "issued": _now(),
+           "expires_at": expires,
+           "expires": datetime.datetime.fromtimestamp(expires).strftime("%Y-%m-%d %H:%M:%S"),
+           "nonce": secrets.token_hex(8), "windows": windows}
+    if targets is not None:
+        # ★ 只有用户真填了目标才写这个键。绝不能写成 targets=None ——
+        #   gate.py 用 `"targets" in p` 判存在，写了键就等于「声明了目标」，
+        #   会把一张不设限的老证变成受限证。
+        new["targets"] = targets
+    # ── P1-A ③：读-改-写在**同一把锁**里完成（禁整文件替换）──
+    try:
+        with _lock_exclusive(AUTHDIR):
+            existing = _load(PASSFILE, {})
+            merged = merge_pass(existing, new, window_ack=window_ack)
+            if merged is None:
+                return None, (new.get("_why") or "拒绝签发")
+            _save(PASSFILE, merged)
+    except LockTimeout as e:
+        return None, "%s，本次拒绝（不越权）" % e
+    return merged, ""
+
+
+def _carried_letters(existing_scopes, items):
+    """并集里**从旧证带进来**的字母（= 本次没要、但旧证里有、于是被并进来的那些）。
+
+    ★ 为什么单列出来（单 B，2026-10-21）：
+      调用方算 `acts`（动作次数上限）时，看的是**它申请的那几个范围**；
+      并集带进来的范围**不在那个计算里** ⇒ 若不夹紧，
+      一张含 D（上限 10）的并集证可能带着 20 的额度 ⇒ 比 D 自己的上限宽松。
+      ⇒ 带进来的范围必须按**它自己的上限**夹一次（见 main()）。
+      ★ A 不参与：A 级零副作用、不计数（与新线 gate.effective_act_limit 同一口径）。
+    """
+    want = set()
+    for it in (items or []):
+        L = _letter_of(it)
+        if L:
+            want.add(L)
+    carried = set()
+    for it in (existing_scopes or []):
+        L = _letter_of(it)
+        if L and L not in want:
+            carried.add(L)
+    return carried
+
+
+#: 额度表**读不出来**时的兜底上限（保守）：取各档里最紧的那一档（D=10）的口径。
+#: ★ 只在「表认不出」时用；正常路径一律走 gate.ACT_LIMIT（单一真相源）。
+_FALLBACK_ACT_LIMIT = 10
+
+
+def _clamp_acts(acts, carried):
+    """把动作次数上限按「带进来的范围」夹紧。返回夹紧后的数字。
+
+    ★ 口径与新线 `gate.effective_act_limit` 一致：**已授予档位里最紧的一档**，
+      且 A 不参与取最小（A 本就不计数）。
+    ★ acts ≤ 0 = **不封顶**（用户 2026-10-19 定：取消动作次数上限，急停兜底）
+      ⇒ 不夹（0 保持 0）。
+    ★ 没有带进来任何范围 ⇒ 原样返回（默认行为不变）。
+    ★ ★ 额度表的键**是全名**（旧线 gate.ACT_LIMIT = {"A级 只读感知":200,…}），
+      不是字母 ⇒ 必须经 SCOPE_FULL 翻译。
+      ★★ 认不出（表口径变了/键对不上）⇒ **不许悄悄不夹**：按固定兜底上限夹。
+        「静默不夹」= 并集顺带放宽额度 = 事故。
+    """
+    try:
+        acts = int(acts)
+    except Exception:
+        return acts
+    if acts <= 0:
+        return acts
+    limits = []
+    unknown = []
+    for L in (carried or ()):
+        if L == "A":
+            continue                  # A 零副作用、不计数（与新线 effective_act_limit 同口径）
+        full = SCOPE_FULL.get(L)
+        v = gate.ACT_LIMIT.get(full) if full else None
+        if v is None:
+            unknown.append(L)
+        else:
+            try:
+                limits.append(int(v))
+            except Exception:
+                unknown.append(L)
+    if unknown:
+        # 额度表认不出 ⇒ 保守：按**固定兜底上限**夹（各档里最紧的那一档，D=10 的口径）。
+        # ★ 不用「当前表里的最小值」当兜底 —— 表都认不出了，它里面的数未必还是上限。
+        limits.append(_FALLBACK_ACT_LIMIT)
+    if not limits:
+        return acts
+    return min(acts, min(limits))
+
+
 def _popup(kind, scope="", minutes=10, acts=20, note="", targets=None,
            scope_states=None, scope_extra=None, no_d=False,
            candidates=None, window_ack=False):
@@ -651,40 +810,15 @@ def _popup(kind, scope="", minutes=10, acts=20, note="", targets=None,
         if hmac.compare_digest(verifier(key, rec["salt"]), rec["verifier"]):
             # ── 第三轮 C：范围/窗口**全从参数取**（弹窗上已无可点的档位/窗口控件）；
             #    fail-closed 不变：一个范围都拿不到 ⇒ 拒绝签发 ──
-            checked = [L for L in SCOPE_LETTERS
-                       if scope_states and scope_states.get(L)]
-            if not checked and not scope_extra:
-                tip.config(text="本次没有可授权的范围（参数为空）—— 拒绝签发")
+            # ★ 单 B：算范围 → 合并 → 落盘抽到模块级 `issue_pass`（可被判据无人值守地打）
+            #   —— 密钥校验仍在本函数里（这一行之前），密钥没过就根本走不到这里。
+            merged, why = issue_pass(scope_states, scope_extra, minutes, acts,
+                                     targets, win_rows, window_ack)
+            if merged is None:
+                tip.config(text=why or "拒绝签发")
                 return
-            granted = [SCOPE_FULL[L] for L in checked] + list(scope_extra or [])
-            # ── 第三轮 C：窗口条目 = 上面展示的 win_rows（参数决定，用户不选）──
-            #    win_rows 为空（默认任务授权、且调用方没声明窗口）⇒ windows=[]，
-            #    与改前的证一致（不写窗口限制）。
-            expires = time.time() + minutes * 60
-            windows = _windows_from_selection(win_rows, range(len(win_rows)), expires)
-            new = {"scopes": granted, "acts_limit": acts, "issued": _now(),
-                   "expires_at": expires,
-                   "expires": datetime.datetime.fromtimestamp(expires).strftime("%Y-%m-%d %H:%M:%S"),
-                   "nonce": secrets.token_hex(8), "windows": windows}
-            if targets is not None:
-                # ★ 只有用户真填了目标才写这个键。绝不能写成 targets=None ——
-                #   gate.py 用 `"targets" in p` 判存在，写了键就等于「声明了目标」，
-                #   会把一张不设限的老证变成受限证。
-                new["targets"] = targets
-            # ── P1-A ③：读-改-写在**同一把锁**里完成（禁整文件替换）──
-            try:
-                with _lock_exclusive(AUTHDIR):
-                    existing = _load(PASSFILE, {})
-                    merged = merge_pass(existing, new, window_ack=window_ack)
-                    if merged is None:
-                        tip.config(text=new.get("_why") or "拒绝签发")
-                        return
-                    _save(PASSFILE, merged)
-                    rec["fail_count"] = 0
-                    _save(KEYFILE, rec)
-            except LockTimeout as e:
-                tip.config(text=f"{e}，本次拒绝（不越权）")
-                return
+            rec["fail_count"] = 0
+            _save(KEYFILE, rec)
             scope_txt = merged.get("scope", "")
             state["result"] = "granted"
             log(f"✅ 授权通过：范围「{scope_txt}」 {minutes} 分钟，动作上限 {acts} 次"
@@ -803,12 +937,19 @@ def main():
             return 4
         req = a.request or ""
         items = _split_scope(req)
-        # ① 缺省/空 request ⇒ ABCD 一次给齐（分工书 ①）
-        states, extra = _initial_scope_states(items, a.no_d)
         cands = _merge_candidates(_enum_candidate_windows(), declared)
         # ③ 窗口追加模式：显式开关，或 note 命中 rc=7 话术（过渡兜底，core 接开关后可退场）
+        #    ★ 顺序要紧：**先判 window_ack** —— 那条路只动窗口、范围一律不碰 ⇒ 不并集。
         window_ack = bool(a.window_ack) or bool(_WINDOW_ACK_HINT.search(a.note or ""))
-        r = _popup("request", req, a.minutes, a.acts, a.note, targets=tg,
+        # ★ 单 B（方案 A「并集」）：本次范围 = 现有证的有效范围 ∪ 本次要的。
+        #   现有范围只从**有效**旧证取（未消费、未过期）——过期的证什么都没给。
+        existing_scopes = [] if window_ack else _existing_valid_scopes()
+        # ① 缺省/空 request ⇒ ABCD 一次给齐（分工书 ①）
+        states, extra = _initial_scope_states(items, a.no_d, existing_scopes)
+        # ★ 单 B：并集**带进来**的范围要按它自己的上限夹一次动作次数
+        #   （调用方算 acts 时看的是它申请的范围，不含这些带进来的）。
+        acts = _clamp_acts(a.acts, _carried_letters(existing_scopes, items))
+        r = _popup("request", req, a.minutes, acts, a.note, targets=tg,
                    scope_states=states, scope_extra=extra, no_d=a.no_d,
                    candidates=cands, window_ack=window_ack)
         if r == "granted":
