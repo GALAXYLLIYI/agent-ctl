@@ -50,6 +50,10 @@ from agentctl import uia_tree                           # noqa: E402（不截图
 #   core 只在**动作出口**调一次 observe() —— 不在这里写任何阈值、不在这里判该不该停。
 from agentctl import action_guard                        # noqa: E402
 from agentctl import popup_slot                          # noqa: E402（单例弹窗仲裁器）
+# ★ 单 A（2026-10-21）：窗口画面摘要的**唯一来源**。签发与校验都调它 ——
+#   改前一个是「legacy 帧文件的字节」、一个是「mss 实时抓屏的 RGB」，
+#   两个来源必然不等 ⇒ 内容寻址事实上不存在。口径与实测见 digest.py 开头。
+from agentctl import digest                               # noqa: E402
 
 # ★ 老脚本目录**只从 gate 拿**（A 项，2026-10-04）★
 # 原来这里自己写死 <项目目录>
@@ -861,38 +865,31 @@ def _issue_capture_from_tree(hwnd: int, raw_out: str,
 
 
 def _issue_capture_from_shot(hwnd: int, raw_out: str) -> str | None:
-    """从 perceive/act 的输出里尽力取出帧文件路径，算 sha256，签发 capture_id。
+    """签发一次**观测**的凭据；画面摘要走**规范来源**（digest.window_digest）。
 
-    取不到就把图像哈希留空（闸门那边会跳过图像比对，只校验 rect／前台／TTL）—— **不许假装有**。
+    ★ 单 A（2026-10-21）：改前这里取的是「legacy 帧文件的**字节**」的 sha256
+      （旧 888 行），而校验侧取的是「mss 实时抓屏的 RGB」的 sha256（旧 2190 行）
+      —— 两个来源**必然不等** ⇒ 闸门 gate.py:1179 必然判「画面哈希变了」⇒ 假拦。
+      现在**两边都调 digest.window_digest**（客户区、像素级），同口径才谈得上比。
+
+    ★ raw_out 参数保留但**不再用于取摘要**：帧文件是「给人看的证据图」，
+      它的编码（PNG）与摘要口径（像素）本就不是一回事 —— 拿它当摘要就是老病根。
+      参数留着是为了不改调用点（core.py:1029 / core.py:1104）。
+
+    拿不到摘要就留空（闸门那边会跳过图像比对，只校验 rect／前台／TTL）—— **不许假装有**。
+
+    ★ 顺序要紧：**先 _win_rect 再取摘要**。
+      _win_rect 会 import 老 coord.py（它导入即把进程设成 DPI 感知）；
+      若先取摘要，新进程里 GetClientRect 给的是**虚拟化坐标**（150% 屏上只有 1706×1066），
+      PrintWindow 渲出来的窗口却是物理尺寸（2560×1600）⇒ 画面被**裁掉一半**，
+      之后拿物理尺寸再比一次必然不等 ⇒ 误判「画面哈希变了」。
+      顺序反过来就一致了（实测：先 _win_rect 后取摘要，客户区 1706×1066 ↔ 物理 2560×1600 一致）。
     """
-    import hashlib as _hl
-    img_sha = ""
-    try:
-        j = json.loads(raw_out)
-        cand = []
-
-        def walk(o):
-            if isinstance(o, dict):
-                for k, v in o.items():
-                    if isinstance(v, str) and v.lower().endswith((".png", ".jpg", ".jpeg")):
-                        cand.append(v)
-                    walk(v)
-            elif isinstance(o, list):
-                for v in o:
-                    walk(v)
-        walk(j)
-        for c in cand:
-            p = c if os.path.isabs(c) else (os.path.join(LEGACY, c) if LEGACY else "")
-            if os.path.exists(p):
-                with open(p, "rb") as f:
-                    img_sha = _hl.sha256(f.read()).hexdigest()
-                break
-    except Exception:
-        pass
     rect = _win_rect(hwnd)
-    fg = _is_foreground(hwnd)
     if rect is None:
         return None
+    img_sha = digest.window_digest(hwnd)
+    fg = _is_foreground(hwnd)
     try:
         return gate.issue_capture(hwnd, rect, img_sha, bool(fg))
     except Exception:
@@ -2181,15 +2178,12 @@ def _bind_capture(args: dict, hwnd: int) -> dict | None:
     fg = _is_foreground(hwnd)
     img = None
     if args.get("verify_image"):
-        try:
-            import mss                                       # noqa: PLC0415
-            import hashlib                                   # noqa: PLC0415
-            r = rect
-            with mss.mss() as sct:
-                shot = sct.grab({"left": r[0], "top": r[1], "width": r[2] - r[0], "height": r[3] - r[1]})
-                img = hashlib.sha256(shot.rgb).hexdigest()
-        except Exception:
-            img = None
+        # ★ 单 A（2026-10-21）：改前这里是 **mss 实时抓屏**（旧 2190 行），
+        #   而签发侧取的是 legacy 帧文件字节 ⇒ 两个来源必然不等 ⇒ 一比就判
+        #   「画面哈希变了」(code=12)，是**假拦**。现在与签发侧**同一个函数**。
+        # ★ 拿不到摘要就是空串 ⇒ gate.check_capture 会跳过图像比对
+        #   （gate.py:1179：签发时没摘要就只比 rect/前台/TTL），行为与改前一致。
+        img = digest.window_digest(hwnd)
     # ★ 只有带了 from_capture 才走这道四重校验；
     #   只带 frame_id 的路径由 t_click 拿它去对 screen_version（那是 frame_id 的本义）。
     if tok:
