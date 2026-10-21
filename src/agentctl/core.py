@@ -49,6 +49,7 @@ from agentctl import uia_tree                           # noqa: E402（不截图
 # ★ P2（2026-10-16）：动作面异常刹车。判据逻辑全在 action_guard 里，
 #   core 只在**动作出口**调一次 observe() —— 不在这里写任何阈值、不在这里判该不该停。
 from agentctl import action_guard                        # noqa: E402
+from agentctl import popup_slot                          # noqa: E402（单例弹窗仲裁器）
 
 # ★ 老脚本目录**只从 gate 拿**（A 项，2026-10-04）★
 # 原来这里自己写死 <项目目录>
@@ -1908,8 +1909,29 @@ def t_authorize(args: dict) -> dict:
     #   面板的「最近动作」只读闸门日志（gate_agentctl.log）。两边都不写 = 用户在面板上点了授权，
     #   面板却像没发生过任何事——这就是 B2 那类「两个真相源没串起来」。
     gate.log("授权请求：%s（%d 分钟 / %d 次）" % (",".join(scopes), minutes, acts))
-    rc, out, err = _legacy_cmd(cmd, timeout=timeout)
-    granted = (rc == 0)
+    # ★ 2026-10-21（Codex）：**单例弹窗仲裁** —— 同一时刻屏幕上只允许一个授权弹窗。
+    #   病根：并发 ctl_authorize 各自拉一个弹窗进程（现场证据：闸门日志里
+    #   2026-10-21 00:25:27 / 00:26:25 / 00:28:10 三笔请求重叠，第一笔 00:29:10 才被点掉
+    #   ⇒ 那一刻屏幕上最多同时有 3 个弹窗；用户原话「为什么会有四个闸口弹窗访问我」）。
+    #   语义不变：还是要人亲自在弹窗里输密钥；只是**后到的请求排队**，
+    #   等前一个弹窗的结果 —— 证已经覆盖本次范围就直接放行，**不再弹第二个**。
+    #   等不到 ⇒ fail-closed（拒绝），绝不 fail-open。
+    _res = popup_slot.authorize(
+        gate.AUTHDIR, gate.PASSFILE, full,
+        popup_fn=lambda: _legacy_cmd(cmd, timeout=timeout),
+        wait=float(timeout) + 30.0,
+        log=gate.log)
+    rc, out, err = int(_res["rc"]), _res["out"], _res["err"]
+    granted = _res["outcome"] in ("granted_pass", "granted_popup")
+    if _res["outcome"] == "busy":
+        # ★ fail-closed：等不到槽就明确拒绝，不绕过去硬弹（否则又变成满屏弹窗）。
+        _ev("authorize_denied", actor=args.get("actor", ""), tool="ctl_authorize",
+            payload={"scopes": scopes}, ok=False, code=gate.CODE_UNAUTH)
+        gate.log("授权未通过：排队等不到弹窗槽（fail-closed）")
+        return env(code=gate.CODE_UNAUTH,
+                   data={"granted": False, "scopes": full, "rc": rc,
+                         "reason": "popup_slot_busy", "detail": _res["detail"]},
+                   warning=_res["detail"])
     if granted:
         _ev("authorize_granted", actor=args.get("actor", ""), tool="ctl_authorize",
             payload={"scopes": scopes}, ok=True, code=0)
@@ -1917,6 +1939,7 @@ def t_authorize(args: dict) -> dict:
                  % (scope_str, args.get("_expires") or "见面板", minutes, acts))
         return env(ok=True, code=0, data={"granted": True, "scopes": full,
                                           "minutes": minutes, "acts_limit": acts,
+                                          "via": _res["outcome"],
                                           "raw": out.strip()[:300]})
     _ev("authorize_denied", actor=args.get("actor", ""), tool="ctl_authorize",
         payload={"scopes": scopes}, ok=False, code=gate.CODE_UNAUTH)

@@ -128,7 +128,7 @@
     {
       "name": "ctl_task",
       "title": "任务登记与进度",
-      "description": "登记任务、汇报进度、交付、以及**由用户确认完成**。事件只追加不修改（timeline.db 带哈希链），所以进度靠追加 task_progress 事件表达，不存在『更新进度』。★ 三态不是两态：进行中=有 task_created 无 task_delivered；待确认=有 task_delivered 无 task_verified（这一步只能由用户触发，agent 自己无权宣布完成）；已完成=有 task_verified。★ 只有 action=verify 过闸门（B 级，由用户在弹窗确认），其余不消耗动作次数。",
+      "description": "登记任务、汇报进度、交付、以及**由用户确认完成**。事件只追加不修改（timeline.db 带哈希链）⇒ 进度靠追加 task_progress 事件表达，没有『更新进度』。★ 三态不是两态：进行中=有 task_created 无 task_delivered；待确认=有 task_delivered 无 task_verified（**只能由用户触发，agent 无权宣布完成**）；已完成=有 task_verified。★ 只有 action=verify 过闸门（B 级，用户在弹窗确认），其余不消耗动作次数。",
       "annotations": {
         "readOnlyHint": false,
         "destructiveHint": false,
@@ -182,7 +182,7 @@
     {
       "name": "ctl_focus",
       "title": "切前台",
-      "description": "把窗口切到前台（必要时从最小化恢复）。**点击/打字的前置条件**，属动作 → B 级。2026-10-02 补：服务里原本缺这个能力，而『目标窗口最小化着』恰是最常见的真实起点（此时 ctl_shot 会明确拒绝）。⚠️ 已知缺陷：底层 act.py 的 do_focus 判成功只看 foreground、不验 IsIconic，所以**最小化的窗口也可能报成功**——务必用返回的 foreground 与后续截图**双重核验**。",
+      "description": "把窗口切到前台（必要时从最小化恢复）。**点击/打字的前置条件**，属动作 → B 级。⚠️ 已知缺陷：底层 act.py 的 do_focus 判成功只看 foreground、不验 IsIconic ⇒ **最小化的窗口也可能报成功** —— 务必用返回的 foreground 与后续截图**双重核验**。",
       "annotations": {
         "readOnlyHint": false,
         "destructiveHint": false,
@@ -195,11 +195,11 @@
         "properties": {
           "verify_expect": {
             "type": "string",
-            "description": "★可选，闭环验证。动作【前】声明期望谓词（分号分隔，与 legacy_tools/验动作.py 同一套：file-exists: / file-created: / file-changed: / file-contains:路径|子串 / dir-count-up: / proc-exists: / proc-gone: / window-exists: / window-gone: / any-change / no-change）。给了它，动作前后各拍一次快照并由**独立进程**判定；返回包会带 verdict（satisfied/unsatisfied/unknown/snapshots-incomparable）。★verdict 不是 satisfied 时**不会报 ok** —— 「动作发出去了」不等于「事情发生了」。★必须在动作前声明，事后补不算（否则无法归因）。"
+            "description": "★可选，闭环验证。动作【前】声明期望谓词（分号分隔，与 legacy_tools/验动作.py 同一套：file-exists: / file-created: / file-changed: / file-contains:路径|子串 / dir-count-up: / proc-exists: / proc-gone: / window-exists: / window-gone: / any-change / no-change）。给了它，动作前后各拍一次快照、由**独立进程**判定，返回带 verdict（satisfied/unsatisfied/unknown/snapshots-incomparable）。★verdict 不是 satisfied **不会报 ok**（「动作发出去了」≠「事情发生了」）；★必须动作前声明，事后补不算（否则无法归因）。"
           },
           "verify_watch": {
             "type": "string",
-            "description": "★可选。快照要盯的路径（分号分隔）。省略则自动从 verify_expect 里的 file-* 谓词抽路径 —— 前后盯防范围必须一致，否则判定器会拒绝判定（判为 snapshots-incomparable）。"
+            "description": "★可选。快照要盯的路径（分号分隔）。省略则自动从 verify_expect 里的 file-* 谓词抽路径 —— 前后盯防范围必须一致，否则判为 snapshots-incomparable。"
           },
           "hwnd": {
             "type": "integer"
@@ -237,7 +237,7 @@
     {
       "name": "ctl_windows",
       "title": "窗口清单",
-      "description": "列窗口（hwnd/标题/类名/rect/前台/最小化/进程名）。坐标一律从这里实时取，不许缓存。★ **同步原子快照 + 代际（2026-10-18 · P0 神经层）**：返回里带 `gen`（**服务端签发、append-only**）与 `windows[{hwnd,class,title,rect,z_index,is_foreground,minimized,cloaked}]` —— 一次 EnumWindows 走完的**同一瞬**，不是事件流（钩子只当唤醒提示；「无事件 = 没变」是禁止的推理）。窗口清单**一动**（移动 / 最小化 / 新建 / 销毁 / 飞出屏外）`gen` 就进位：坐标动作带上 `window_gen=<上次的 gen>`，对不上 ⇒ **code=12 且零像素**（旧坐标作废）。也可以直接 ctl_windows（gen=<上次的 gen>）做对账，对不上返回 code=12 + 本次的新快照。快照取不到时 `windows=null`、`gen=null` —— **不返回空列表冒充「桌面上没有窗口」**。",
+      "description": "列窗口（hwnd/标题/类名/rect/前台/最小化/进程名）。坐标一律从这里实时取，**不许缓存**。★ **同步原子快照 + 代际**：返回 `gen`（服务端签发、append-only）与 `windows[]`（**同一瞬**的 EnumWindows 快照，不是事件流；「无事件=没变」是禁止的推理）。窗口清单一动（移动/最小化/新建/销毁/飞出屏外）`gen` 就进位：坐标动作带 `window_gen=<上次的 gen>`，对不上 ⇒ **code=12 且零像素**（旧坐标作废）；也可直接 ctl_windows(gen=上次的 gen) 对账，不一致返回 code=12 + 本次新快照。快照取不到时 `windows=null`、`gen=null` —— **不返回空列表冒充「桌面上没有窗口」**。",
       "annotations": {
         "readOnlyHint": true,
         "destructiveHint": false,
@@ -345,7 +345,7 @@
     {
       "name": "ctl_tree",
       "title": "元素树（不截图）",
-      "description": "★ **不截图的识别通道。** 读 Windows 的 UI Automation（UIA）无障碍树，读屏软件用的就是它。每个控件天生带名字、类型、矩形、可用状态，所以认题、认选项、认按钮**不靠截图像素、不 OCR、不编码 PNG**。实测本机 Edge：787 节点 / 393 ms，页面 DOM 全穿透。\n\n★ **优先用 ctl_find**，别默认拉全树 —— 全树在复杂页面上就是刷屏。\n\n★ 每个可操作元素带 eid（e0、e1…），下一步用 ctl_click 的 eid 点它，**不用自己算坐标** —— 坐标算错就是点错按钮。\n\n★ 边界：UIA 看不见 Canvas 自绘 / 游戏画面 / PDF 内嵌 / 没开无障碍的 Electron。**拿不到元素树 ≠ 界面上没有这个东西**，这种情况退回 ctl_shot。\n\n★ 只读属性，不 Invoke、不点击。",
+      "description": "★ **不截图的识别通道**：读 Windows 的 UI Automation（UIA）无障碍树（读屏软件用的就是它）⇒ 控件天生带名字/类型/矩形/可用状态，认题/认选项/认按钮**不靠像素、不 OCR、不编码 PNG**。★ **优先用 ctl_find**，别默认拉全树（复杂页面拉全树就是刷屏）。★ 每个可操作元素带 eid（e0、e1…），下一步用 ctl_click 的 eid 点它，**不用自己算坐标**（算错就是点错按钮）。★ 边界：UIA 看不见 Canvas 自绘/游戏画面/PDF 内嵌/没开无障碍的 Electron；**拿不到元素树 ≠ 界面上没有它** ⇒ 退回 ctl_shot。★ 只读属性，不 Invoke、不点击。",
       "annotations": {
         "readOnlyHint": true,
         "destructiveHint": false,
@@ -399,7 +399,7 @@
     {
       "name": "ctl_screen",
       "title": "语义屏（裁剪后的这一屏）",
-      "description": "★ **一次调用给 agent 一段裁剪过、带身份、带新鲜度的屏幕**，而不是一整棵树。在 ctl_find 找不到、但你确信东西在屏幕上时用它。\n\n★ 返回 screen_version（**服务端签发**）+ window + viewport + objects[] + texts[] + channels + omitted。每个对象带 id / uid / label / role / rect / in_view / interactive / actions / source / source_confidence / conf_bbox / conf_text / conf_existence / name_trust / volatile / score；**给了 since** 时还带 uid_state（OK / TEXT_CHANGED / STALE）。\n\n★ **uid = struct_key@text_key**（结构路径@规范化文本）。volatile 且未被声明（objects[].exempted=true）的节点**不参与 text_key 比对**（被声明 watched=true 的照常实算） —— 否则计时器每帧换字都会变成「新对象」，STALE 判据会被刷爆。\n\n★ **uid_state 三档**（**给了 since 才有**，逐对象产出）：struct_key 变 ⇒ **STALE**（可能压根不是同一对象，寻址**拒绝**）；struct_key 同而 text_key 变 ⇒ **TEXT_CHANGED**（同一对象内容变了 —— **动作核验期待这一档**，别当成过期）；两者都同 ⇒ **OK**。\n\n★ **score 口径**（见返回的「打分口径」段，可解释可调）：0.35·看得见 + 0.25·可交互 + 0.20·query 命中 + 0.10·面积占比 + 0.10·相对上次是新面孔。\n★ **必进保证**：`interactive 且看得见` 的节点**永不裁掉**，哪怕超过 top —— 裁掉一个现在能点的按钮，agent 只会以为「界面上没有它」。因此 returned 可以 > top。\n\n★ **属性级置信度**（没有裸 confidence）：每个来源按 {bbox, text, existence} **三档分开报**；对象上给 conf_bbox / conf_text / conf_existence，聚合口径 source_confidence = min(conf_existence, conf_text)（「读得准不准」）。**conf_bbox 单列**（「点得准不准」）—— 不会被低分 OCR 文本把 UIA 的精确坐标一起拖低。\n★ **name_trust 三档**：high = 原生窗口；low = 网页/Chromium（无障碍 name 来自 DOM/ARIA 映射，不是像素事实，判不出来也按 low）；**offset-suspect** = 网页且选项字母疑似与它在屏幕上的位置错位（超星选择题就是实例）—— 这一档**直接关掉 R2**，这种页面必须落到 VLM，别让 UIA 的自述一手遮天。判定依据见返回里的 name_trust_依据。\n\n★ **channels 段**给出 must_vlm = not R1 and not R2 and not R3（R1=CDP 可达且 DOM 命中 / **R2=UIA 可交互≥5 ∧ 目标命中 ∧ name_trust ≠ offset-suspect** / R3=OCR 命中且 bbox 可当锚）。**本版 R1、R3 只判定不接线**，未接线一律报 false。\n\n★ **screen_version 只能回传、不能指定**（版本由**服务端签发**）：想对照上一次就把上次拿到的值原样放进 since。给了 since，返回里就有 **since_echo（原样回传）/ version_match（你回传的值本进程见过没有）/ screen_version_新值（本次新签发的）** —— 版本号是「这屏到底变没变」的凭据，version_match 为 true 且新值与回传值相同就说明这屏没动，**别拿同一个 uid 盲扫**。传 version / screen_version 会被忽略并在 blind_spots 里明说。\n\n★ **任务声明制 watch_text**（可选）：声明本任务要盯的文本（规范化后**子串**匹配 label）。\n\n★ **OCR 通道（R3）**：走系统自带 Windows.Media.Ocr（本机没有 tesseract）。只截**客户区**、截图只在内存里过（不留文件）；坐标换算回**物理像素**（÷放大倍数 × dpi_scale），dpi_scale 一并写在 ocr 段里。默认 4 倍放大识别（实测原尺寸会漏行）。ocr 段最多回 80 个词，omitted.total 是**真实总数**；超预算（默认 1500ms）就返回 ok=false + 原因，**不会挂着**。R3 = wired ∧ hit ∧ usable；**认出了但框落在客户区外或太小 ⇒ usable=false**（框不能当锚）。★ 认出了目标却仍然 must_vlm=false 才成立；没认出不等于「页面上没有」，那种情况会写进 blind_spots。\n\n★ 被声明的节点即使命中 volatile 规则也**不豁免**（objects[].watched=true ⇒ exempted=false）：text_key 照常实算、参与 screen_version 进位与 delta，变更必报 TEXT_CHANGED；且**不受视口过滤**（滚出屏幕也照比）、**不受 top 预算**裁剪（声明必进）。声明压过 role 名单与正则。生命周期＝**本调用**（服务端不留声明状态），每次扫描都带上同一份。\n★ 首扫校验：某条声明匹配不到任何节点 ⇒ **整个调用拒绝**（rc≠0）并列出 watch_校验.unmatched，**不静默**；要等节点稍后出现须显式 watch_pending=true（挂起的逐条标 pending）。声明条数 ≤ 32（超了拒绝并说明）。\n\n★ **首屏可能不热**：Chromium 的无障碍树是**懒启用**的（真页实测：开窗 0.5 秒只拿到 18 个\n\n节点的外壳、3 秒才稳定到 49 个；同一调用等 2 秒后再扫就齐了）。本工具首扫判为未热时会**有界暖机重试**（最多 2 次、间隔约 400ms、取节点数更多的那次），并返回 screen_ready / ready_证据。\n★ **网页类窗口（Chrome/Edge/Firefox/Electron）本进程首扫会强制探两次**（探一趟 → 等约 400ms → 再探一趟，取可报对象更多的那次，重试=1）：首扫没有上一屏可对比，而真页冷扫三个特征一个都不沾 —— 真页实测冷扫是 **60 个原始节点 / 372ms / 18 个可报对象**，照样会被判成「已热」（2026-10-18 实测）。**非网页类窗口不加这次延迟**（原生窗首扫照旧只采一趟）。网页类还有一道门槛：可报对象（可交互或有 label 的节点）不足 40 个就报未热，**不看耗时**（真页热扫 49 个、冷扫 18 个，40 取中间）。ready_证据.窗口类别 / 首扫强制探测 会写明这次是不是探了两趟。\n\n★ **screen_ready=false 是「证据不足」，不是错误码**：信封照样 ok=true，说明本屏大概率只拿到外壳。此时 blind_spots 会明写「本屏可能未热」并给出下一步（稍候再调 / 换 ctl_shot 交叉确认）——**在这一屏上没看到某个东西，不许当成「页面上没有它」**。传 warmup=false 可关掉重试（测性能用），就绪判定仍照实给。\n\n★ ⚠ objects[].id 是**屏内对象号**，不是 eid。但每个对象**另带 eid**（窗G3，与 ctl_tree/ctl_find 同一套旁表）—— 要动作就用 `ctl_click --eid <eid> --from_capture <本屏 capture_id> [--expect_uid <uid>]`。★ eid 与 uid 并存、**不互当前别名**：eid 说「上次那批里的哪个」（定位），uid 说「还是不是那个对象」（身份；给了 expect_uid 就严格核对，对不上拒，一像素不点并报 STALE_SCREEN）。★ 签发口径 = 本次 walk（roles=all、include_offscreen 取超集），复核也取超集 ⇒ 滚出视口的对象仍可点。★ 本屏 capture_id **带元素明细**（ctl_screen 的全量 walk 明细是顺带的），可直接喂 ctl_click --from_capture；拿到的是 data.capture_id 这一张，data.结果.capture_id 与它是同一张。\n\n★ **返回信封（2026-10-18 真跑踩过）**：经 MCP/CLI 拿到的不是裸结果 —— 工具结果被包在 **`data.结果`** 里，`objects` 在 **`data.结果.objects`**（**不是** `data.objects`）。**这是信封结构、不是空屏** —— 取错层读到 undefined，看起来像「这一屏什么都没有」，其实只是少剥了一层信封；别据此判「界面上没有」。\n\n★ 只读属性，不 Invoke、不点击。",
+      "description": "★ **一次调用给 agent 一段裁剪过、带身份、带新鲜度的屏幕**（不是一整棵树）。ctl_find 找不到、但确信东西在屏幕上时用它。\n\n★ 返回 screen_version（**服务端签发**）+ window + viewport + objects[] + texts[] + channels + omitted。对象带 id/uid/label/role/rect/in_view/interactive/actions/source/source_confidence/conf_bbox/conf_text/conf_existence/name_trust/volatile/score；给了 since 还带 uid_state。\n\n★ **uid = struct_key@text_key**（结构路径@规范化文本）。volatile 且未声明（objects[].exempted=true）**不参与 text_key 比对**（watched=true 的照算）—— 否则计时器每帧换字会把 STALE 判据刷爆。\n\n★ **uid_state 三档**（给了 since 才有）：struct_key 变⇒**STALE**（可能压根不是同一对象，寻址**拒绝**）；struct_key 同而 text_key 变⇒**TEXT_CHANGED**（同一对象内容变了，**动作核验期待这一档**）；都同⇒**OK**。\n\n★ **score 口径**：0.35·看得见 + 0.25·可交互 + 0.20·query 命中 + 0.10·面积占比 + 0.10·相对上次是新面孔。★ **必进保证**：`interactive 且看得见` 的节点**永不裁掉** ⇒ returned 可 > top。\n\n★ **没有裸 confidence**：每来源按 {bbox, text, existence} 三档分报（conf_bbox/conf_text/conf_existence），source_confidence = min(conf_existence, conf_text)；**conf_bbox 单列**（「点得准不准」），不被低分 OCR 拖低。★ **name_trust 三档**：high=原生窗口；low=网页/Chromium（无障碍 name 来自 DOM/ARIA 映射，不是像素事实）；**offset-suspect**=网页且选项字母疑似与屏幕位置错位（超星选择题即实例）⇒ **直接关掉 R2**，这种页面必须落到 VLM（依据见 name_trust_依据）。\n\n★ **channels.must_vlm** = not R1 and not R2 and not R3（R1=CDP 可达且 DOM 命中 / R2=UIA 可交互≥5 ∧ 目标命中 ∧ name_trust ≠ offset-suspect / R3=OCR 命中且 bbox 可当锚）。**本版 R1、R3 只判定不接线**，未接线一律报 false。\n\n★ **screen_version 只能回传、不能指定**（版本由服务端签发）：把上次的值原样放进 since，返回带 since_echo / version_match / screen_version_新值 ⇒ version_match 为 true 且新值相同 = **这屏没动**，**别拿同一个 uid 盲扫**。传 version / screen_version 会被忽略并在 blind_spots 里明说。\n\n★ **任务声明制 watch_text**（可选）：声明本任务要盯的文本（规范化后**子串**匹配 label，**不是正则**）。被声明节点即使命中 volatile 也**不豁免**（watched=true ⇒ exempted=false）：text_key 照算、参与 screen_version 进位与 delta，变更必报 TEXT_CHANGED；且不受视口过滤、不受 top 预算裁剪。★ **首扫校验**：某条声明匹配不到任何节点 ⇒ **整个调用拒绝**（rc≠0）并列 watch_校验.unmatched（**不静默**）；要等节点稍后出现须显式 watch_pending=true（挂起项逐条标 pending）。声明条数 ≤ 32。\n\n★ **OCR 通道（R3）**：系统自带 Windows.Media.Ocr（本机没有 tesseract）。只截**客户区**、截图只在内存里过（不留文件）；坐标换算回**物理像素**（dpi_scale 写在 ocr 段里）。ocr 段最多回 80 个词，超预算（默认 1500ms）即 ok=false + 原因，**不会挂着**。R3 = wired ∧ hit ∧ usable；**框落在客户区外或太小 ⇒ usable=false**（框不能当锚）。没认出不等于「页面上没有」，那种情况写进 blind_spots。\n\n★ **首屏可能不热**（Chromium 无障碍树懒启用）：判未热时**有界暖机重试**（最多 2 次、间隔约 400ms、取节点更多那次），返回 screen_ready / ready_证据；**网页类窗口本进程首扫会强制探两次**。★ **screen_ready=false 是「证据不足」不是错误码**（信封照样 ok=true），blind_spots 明写「本屏可能未热」—— **这一屏没看到某东西，不许当成「页面上没有它」**。warmup=false 可关重试（测性能用），就绪判定仍照实给。\n\n★ ⚠ objects[].id 是**屏内对象号**、不是 eid；每个对象**另带 eid**（与 ctl_tree/ctl_find 同一套旁表）—— 要动作就用 `ctl_click --eid <eid> --from_capture <本屏 capture_id> [--expect_uid <uid>]`。★ eid 与 uid 并存、**不互当前别名**：eid 说「上次那批里的哪个」（定位），uid 说「还是不是那个对象」（身份；给了 expect_uid 就严格核对，对不上拒，一像素不点并报 STALE_SCREEN）。本屏 capture_id **带元素明细**，可直接喂 ctl_click --from_capture。\n\n★ **返回信封（2026-10-18 真跑踩过）**：经 MCP/CLI 拿到的不是裸结果 —— 工具结果被包在 **`data.结果`** 里，`objects` 在 **`data.结果.objects`**（**不是** `data.objects`）。**这是信封结构、不是空屏** —— 取错层读到 undefined，看起来像「这一屏什么都没有」，其实只是少剥了一层信封；别据此判「界面上没有」。\n\n★ 只读属性，不 Invoke、不点击。★ 机制细节与完整口径见 docs\\AGENT接口.md 附录 A。",
       "annotations": {
         "readOnlyHint": true,
         "destructiveHint": false,
@@ -442,12 +442,12 @@
               "type": "string"
             },
             "maxItems": 32,
-            "description": "★ 任务声明制：声明本任务要盯的文本。匹配口径：声明串与 label 各自经 NFKC→去零宽→空白折叠→casefold 归一后作**真子串**比对（方向=声明串 ⊆ label，不可逆；**不是正则**，元字符按字面量）。声明串必须选**跨本次任务改动仍稳定**的子串（盯「剩余可选 3 项 · 第 7/20 步」就声明「剩余可选」，别声明全文——全文会在目标改文的那一趟被拒）。★ 被命中的节点即使命中 volatile 规则也**不豁免**（watched=true ⇒ exempted=false）：text_key 照常实算、参与 screen_version 进位与 delta，变更必报 TEXT_CHANGED；且不受视口过滤（滚出屏幕也照比）、不受 top 预算裁剪。声明压过 role 名单与正则。★ 记账是**全收**的：一个节点命中几条声明就记几条；单条声明命中节点数上限 **8**（WATCH_TEXT_WIDTH_MAX），超宽 ⇒ **拒绝整调用**并点名串与命中数（watch_pending 救不了超宽——它现在就命中了）。★ 首扫校验：某条声明匹配不到任何节点 ⇒ 整个调用拒绝（rc≠0）并列出 watch_校验.unmatched（不静默）；拒绝信封带 screen_version / window / 对象总数，blind_spots 明写这是**校验失败**不是屏幕空。要等节点稍后出现须显式 watch_pending=true（挂起项会进 blind_spots）。★ 单次声明条数上限 32；watch_text 传**空串**按形态错误拒绝，空数组/缺省 = 不声明。★ 声明集不同 ⇒ screen_version 口径不同：同一任务每次扫描都带**同一份**声明；带声明的自走串会持续推高 version，别拿「version 没动」当「页面没动」。"
+            "description": "★ 任务声明制：声明本任务要盯的文本。口径：声明串与 label 各自经 NFKC→去零宽→空白折叠→casefold 归一后作**真子串**比对（声明串 ⊆ label，不可逆；**不是正则**，元字符按字面量）。★ 被命中的节点即使 volatile 也**不豁免**（watched=true ⇒ exempted=false）：text_key 照算、参与 screen_version 进位与 delta，变更必报 TEXT_CHANGED；且不受视口过滤、不受 top 预算裁剪。★ 记账**全收**：一个节点命中几条声明记几条；单条声明命中节点数上限 **8**，超宽 ⇒ **拒绝整调用**并点名串与命中数（watch_pending 救不了超宽——它现在就命中了）。★ 首扫校验：某条声明匹配不到任何节点 ⇒ 整个调用拒绝（rc≠0）并列 watch_校验.unmatched（不静默）；要等节点稍后出现须显式 watch_pending=true。★ 声明条数 ≤ 32；空串按形态错误拒绝，空数组/缺省 = 不声明。"
           },
           "watch_pending": {
             "type": "boolean",
             "default": false,
-            "description": "允许 watch_text 里暂时匹配不到的声明挂起（返回里逐条标 pending，并进 blind_spots 提醒「还没盯上」）。默认 false＝匹配不到就拒绝整个调用，不许静默。宽度超限（单条命中 >8）的声明挂起救不了——它已命中，只是太宽，须把串改具体。"
+            "description": "允许 watch_text 里暂时匹配不到的声明挂起（返回里逐条标 pending，并进 blind_spots 提醒「还没盯上」）。默认 false＝匹配不到就拒绝整个调用，不许静默。宽度超限（单条命中 >8）的声明挂起救不了——它已命中，只是太宽。"
           },
           "cdp": {
             "type": "boolean",
@@ -457,7 +457,7 @@
           "cdp_port": {
             "type": "integer",
             "default": 9222,
-            "description": "CDP 调试端口（默认 9222）。★ cdp.py 已认 `--port`，本工具也把 `cdp_port` **原样透传**给它 —— 所以**填非 9222 现在真的可用**：R1 照常成立，DOM 段不必迁就默认端口。（2026-10-18 之前这里写的是「cdp.py 端口写死 9222、填别的端口 DOM 段报不可用」—— 那句话是 cdp.py 时代的老账，窗B 改了 cdp.py、窗E2 拆了 core.py 那道闸门，已作废。）"
+            "description": "CDP 调试端口（默认 9222）。★ cdp.py 已认 `--port`，本工具**原样透传** ⇒ **填非 9222 现在真的可用**：R1 照常成立，DOM 段不必迁就默认端口。"
           },
           "cdp_url_contains": {
             "type": "string",
@@ -485,7 +485,7 @@
           "warmup": {
             "type": "boolean",
             "default": true,
-            "description": "★ 首屏未热时是否自动暖机重试（**有界**：最多 2 次、间隔约 400ms、取节点数更多的那次）。Chromium 的无障碍树是懒启用的（真页实测：开窗 0.5s 只拿到 18 个节点的外壳，3s 才稳定到 49 个），首扫常不完整。传 false 可关掉重试（用于测性能）；**关掉重试不影响 screen_ready 的如实判定** —— 本屏到底热没热仍会照实报。\n\n★ **网页类窗口（Chrome/Edge/Firefox/Electron）本进程首扫会强制探两次**（先探一趟 → 等约 400ms → 再探一趟，取可报对象更多的那次）：首扫没有上一屏可对比，而真页冷扫的三个特征（旧阈值「采集<300ms ∧ 节点≤24」）一个都不沾 —— 真页实测冷扫是 **60 个原始节点 / 372ms / 18 个可报对象**，照样会被判成「已热」。**非网页类窗口不加这次延迟**（原生窗首扫照旧只采一趟）。ready_证据.首扫强制探测 / 窗口类别 会告诉你这次是不是探了两次。"
+            "description": "★ 首屏未热时是否自动暖机重试（**有界**：最多 2 次、间隔约 400ms、取节点数更多的那次）。Chromium 无障碍树懒启用（真页实测开窗 0.5s 只拿到外壳、3s 才稳定），首扫常不完整。传 false 关掉重试（测性能用）；**关掉重试不影响 screen_ready 的如实判定** —— 本屏热没热仍照实报。"
           },
           "max_nodes": {
             "type": "integer",
@@ -507,7 +507,7 @@
     {
       "name": "ctl_find",
       "title": "按名字找元素",
-      "description": "★ **先想清楚要什么就用这个，别拉全树。** 按文字/类型/自动化 id 搜 UI 元素，返回带 eid 和坐标的命中列表。实测本机 Edge：搜「订阅」扫 534 节点、命中 7、558 ms，输出只有 7 行 —— 而拉全树是几百行。",
+      "description": "★ **先想清楚要什么就用这个，别拉全树。** 按文字/类型/自动化 id 搜 UI 元素，返回带 eid 和坐标的命中列表（实测 Edge：搜「订阅」扫 534 节点、命中 7、558 ms，输出只有 7 行；拉全树是几百行）。",
       "annotations": {
         "readOnlyHint": true,
         "destructiveHint": false,
@@ -561,18 +561,18 @@
         "properties": {
           "verify_expect": {
             "type": "string",
-            "description": "★可选，闭环验证。动作【前】声明期望谓词（分号分隔，与 legacy_tools/验动作.py 同一套：file-exists: / file-created: / file-changed: / file-contains:路径|子串 / dir-count-up: / proc-exists: / proc-gone: / window-exists: / window-gone: / any-change / no-change）。给了它，动作前后各拍一次快照并由**独立进程**判定；返回包会带 verdict（satisfied/unsatisfied/unknown/snapshots-incomparable）。★verdict 不是 satisfied 时**不会报 ok** —— 「动作发出去了」不等于「事情发生了」。★必须在动作前声明，事后补不算（否则无法归因）。"
+            "description": "★可选，闭环验证。动作【前】声明期望谓词（分号分隔，与 legacy_tools/验动作.py 同一套：file-exists: / file-created: / file-changed: / file-contains:路径|子串 / dir-count-up: / proc-exists: / proc-gone: / window-exists: / window-gone: / any-change / no-change）。给了它，动作前后各拍一次快照、由**独立进程**判定，返回带 verdict（satisfied/unsatisfied/unknown/snapshots-incomparable）。★verdict 不是 satisfied **不会报 ok**（「动作发出去了」≠「事情发生了」）；★必须动作前声明，事后补不算（否则无法归因）。"
           },
           "verify_watch": {
             "type": "string",
-            "description": "★可选。快照要盯的路径（分号分隔）。省略则自动从 verify_expect 里的 file-* 谓词抽路径 —— 前后盯防范围必须一致，否则判定器会拒绝判定（判为 snapshots-incomparable）。"
+            "description": "★可选。快照要盯的路径（分号分隔）。省略则自动从 verify_expect 里的 file-* 谓词抽路径 —— 前后盯防范围必须一致，否则判为 snapshots-incomparable。"
           },
           "hwnd": {
             "type": "integer"
           },
           "name": {
             "type": "string",
-            "description": "按 UIA 控件名点击。⚠️ 网页（Chromium 内核）里只命中浏览器外壳 —— 那条老路径的 find_control 深度上限只有 10（D2，窗2 在修）；桌面窗口场景才适用"
+            "description": "按 UIA 控件名点击。⚠️ 网页（Chromium 内核）里只命中浏览器外壳 —— 桌面窗口场景才适用"
           },
           "xy": {
             "type": "array",
@@ -599,7 +599,7 @@
           "retry": {
             "type": "integer",
             "default": 0,
-            "description": "★ 2026-10-21（P0-3）默认 **0**：坐标点击「没变化」时**不再自动重点一次**（对输入框是多余的一下、可能顺手选中一段字；对 toggle 是「开了又关」）。「点了没反应」由调用方判断（换定位招 / 换目标）；确要重试就显式传 N。"
+            "description": "★ 默认 **0**（2026-10-21 P0-3）：坐标点击「没变化」时**不再自动重点一次**（对输入框是多余的一下、可能顺手选中一段字；对 toggle 是「开了又关」）。「点了没反应」由调用方判断（换定位招/换目标）；确要重试就显式传 N。"
           },
           "dry_run": {
             "type": "boolean",
@@ -607,7 +607,7 @@
           },
           "eid": {
             "type": "string",
-            "description": "✅ **D1 已于 2026-10-17 修好**（core.py 旁表 + 身份复核；判据 `_T1_W2` 15 绿）：ctl_tree / ctl_find 返回的 eid（如 e120）**可以跨调用使用**。旧限制是「签发用 roles=interactive,text、重解析用 all ⇒ 同号不同节点」，该口径差已消除。★ 仍有新鲜度约束：**窗口内容变化后 eid 会失效并返回 `STALE_SCREEN`**，按提示重扫一次即可（不要重试同一个 eid）。★ 若报「这次观测**没有元素明细**」，那说明 from_capture 指的那次观测是**轻量模式**的（比如 ctl_tree 没带 detail=true）—— 重扫一次带明细的（ctl_screen / ctl_find / ctl_tree+detail 都行）再点；文案会点名是哪个工具发起的这次观测。网页场景仍首选 xy ＋ from_capture（见 docs\\AGENT接口.md §3-bis）——那是为了少一次解析，不是因为 eid 不安全。"
+            "description": "✅ **D1 已于 2026-10-17 修好**（core.py 旁表 + 身份复核；判据 `_T1_W2` 15 绿）：ctl_tree/ctl_find 返回的 eid（如 e120）**可以跨调用使用**。★ 仍有新鲜度约束：**窗口内容变化后 eid 失效并返回 `STALE_SCREEN`**，按提示重扫一次（不要重试同一个 eid）。★ 若报「这次观测**没有元素明细**」，说明 from_capture 那次观测是**轻量模式**（如 ctl_tree 没带 detail=true）—— 重扫一次带明细的（ctl_screen/ctl_find/ctl_tree+detail）再点。网页场景仍首选 xy ＋ from_capture（见 docs\\AGENT接口.md §3-bis）。"
           },
           "expect": {
             "type": "string",
@@ -615,11 +615,11 @@
           },
           "expect_uid": {
             "type": "string",
-            "description": "★可选，但**一旦给了就严格执行**（窗G3）：把 ctl_screen objects[].uid 原样回传。点击前会在本屏用同一口径**重算一次** uid，对不上 ⇒ 直接拒绝（code=4 + STALE_SCREEN 语义 + 明说「对象已变，建议重扫」），**一个像素都不点**。回执里的 expect_uid_校验 ∈ {匹配, 不匹配, 无法判定} 三值。★ 与 expect 的分工：expect 认「名字」，expect_uid 认「还是不是那个对象」（uid = 结构路径 + 文本指纹，跨调用可比）。"
+            "description": "★可选，但**一旦给了就严格执行**：把 ctl_screen objects[].uid 原样回传。点击前在本屏用同一口径**重算一次** uid，对不上 ⇒ 直接拒（code=4 + STALE_SCREEN 语义 + 明说「对象已变，建议重扫」），**一个像素都不点**；回执里 expect_uid_校验 ∈ {匹配, 不匹配, 无法判定}。★ 与 expect 分工：expect 认「名字」，expect_uid 认「还是不是那个对象」（uid = 结构路径 + 文本指纹，跨调用可比）。"
           },
           "frame_id": {
             "type": "string",
-            "description": "★屏版凭据（P0-A，2026-10-18）：把 ctl_screen 返回的 screen_version 原样回传，当作坐标路径的**第二种凭据**（第一种是 from_capture）。① **与 from_capture 至少给一个**：两者都缺 ⇒ code=12 且零像素（这条旧坐标点新画面的铁律不动）。② **必须与当前 screen_version 对得上**，不符 ⇒ code=12 + 零像素（画面已变就不能再点旧坐标）；本机还没过该窗的 ctl_screen 时同样拒绝。③ 适用于**屏幕是超大的窗口**（ctl_shot 截的图看不清要点哪）：此时只需确认「还是那个屏版」，不需要完整截图。⛔ screen_version 由服务端签发，**传不可能的值就会被拒**。"
+            "description": "★屏版凭据：把 ctl_screen 返回的 screen_version 原样回传，作为坐标路径的**第二种凭据**（第一种是 from_capture）。① **与 from_capture 至少给一个**：都缺 ⇒ code=12 且零像素（「旧坐标不许点新画面」的铁律不动）。② **必须与当前 screen_version 对得上**，不符 ⇒ code=12 + 零像素；本机还没过该窗 ctl_screen 时同样拒绝。③ 适用于**超大窗口**（ctl_shot 的图看不清要点哪）。⛔ screen_version 由服务端签发，**传不可能的值就会被拒**。"
           },
           "diff_ignore": {
             "type": "object",
@@ -633,11 +633,11 @@
                 "description": "变化区面积 < 此值（像素²）⇒ 归为忽略区（默认 24）。用来过滤尾部尘落。"
               }
             },
-            "description": "★（接线单 §二-4，2026-10-18）after.diff 的忽略口径，默认 {caret_px:8, min_area_px:24}，**部分支持**（只传一个键另一个用默认值补齐）。★ changed 是**必要非充分**：真变了必须 changed=true（光标闪烁不算「变了」），零变化必须 false；被忽略的会在 diff.说明 里写明实情。"
+            "description": "★ after.diff 的忽略口径，默认 {caret_px:8, min_area_px:24}，**部分支持**（只传一个键另一个补默认值）。★ changed **必要非充分**：真变了必须 changed=true（光标闪烁不算「变了」），零变化必须 false；被忽略的写进 diff.说明。"
           },
           "window_gen": {
             "type": "integer",
-            "description": "★可选（P0 神经层 2026-10-18）：ctl_windows 返回的 `gen` 原样回传。**发送之前**校验：与当前窗口快照代际不符 ⇒ code=12 + blocked_by=stale_window_gen + **零像素**（窗口动过，这份坐标作废）。与 from_capture/frame_id 并存不互斥 —— 凭据管「画面没变」，gen 管「窗口清单没动」。"
+            "description": "★可选：ctl_windows 返回的 `gen` 原样回传。**发送之前**校验：与当前窗口快照代际不符 ⇒ code=12 + blocked_by=stale_window_gen + **零像素**（窗口动过，这份坐标作废）。与 from_capture/frame_id 并存不互斥：凭据管「画面没变」，gen 管「窗口清单没动」。"
           },
           "expect_region": {
             "type": "array",
@@ -646,12 +646,12 @@
             },
             "minItems": 4,
             "maxItems": 4,
-            "description": "★可选（P0 神经层 2026-10-18）：[x,y,w,h] —— **你预期会变的那一块**（与 xy/rect 同口径，屏幕物理像素）。两个用处：① **发送之前**校验它与目标窗矩形必须有交，为空 ⇒ code=12 + blocked_by=expect_region_outside_target + **零像素**（声明写到了别人窗里）；② 事后把 after.verdict 细化成「变化落不落在这块里」。⛔ 它**只细化判词，不是新凭据**：完全继承帧有效期（帧过期/内容变了照旧 code=12 先拒），**不延长 TTL、不设第二个计时器**；也**不许**让「别处的大变化」消失 —— 全帧 diff 照算、窗外变化照报（否则就变成「少声明混过验证」）。"
+            "description": "★可选：[x,y,w,h] —— **你预期会变的那一块**（与 xy/rect 同口径，屏幕物理像素）。① **发送之前**校验它与目标窗矩形必须有交，为空 ⇒ code=12 + blocked_by=expect_region_outside_target + **零像素**；② 事后把 after.verdict 细化成「变化落不落在这块里」。⛔ 它**只细化判词、不是新凭据**：完全继承帧有效期（帧过期/内容变了照旧 code=12 先拒），**不延长 TTL**；也**不许**让「别处的大变化」消失（全帧 diff 照算、窗外变化照报）。"
           },
           "expect_within_sec": {
             "type": "number",
             "default": 0,
-            "description": "★可选（P0 神经层 2026-10-18）：预期多久之内见效。0 = 只看本次动作后的那一次比对（默认）。**非 0 时本版不另造等待机制** —— 异步效果（2 秒后才弹窗）请挂既有 ctl_wait 语义轮询。"
+            "description": "★可选：预期多久之内见效。0 = 只看本次动作后的那一次比对（默认）。**非 0 时本版不另造等待机制** —— 异步效果（2 秒后才弹窗）请挂既有 ctl_wait 语义轮询。"
           }
         },
         "required": [
@@ -664,7 +664,7 @@
     {
       "name": "ctl_type",
       "title": "打字",
-      "description": "往目标窗口打字。默认先 Ctrl+A 清空（改值变追加是本机踩过的坑）。中文走 KEYEVENTF_UNICODE。★ mode=focus（P0-A）是**无元素打字**：不去找 UIA 元素，直接往**前台焦点窗**逐字符发（中文 / emoji / 密码框都通用）。用于往输入框打字：旧路径要先在窗口里找到那个元素才能对它打字，而很多输入框在树 / UIA 里根本不出现（那就是今天 QQ 现场的‘ctl_type 要元素’）。⛔ mode=focus 强制快照差分：发出去了但**画面没变** ⇒ code=8（**绝不当成功**），见 after.diff。",
+      "description": "往目标窗口打字。默认先 Ctrl+A 清空（改值变追加是本机踩过的坑）。中文走 KEYEVENTF_UNICODE。★ mode=focus（P0-A）是**无元素打字**：不找 UIA 元素，直接往**前台焦点窗**逐字符发（中文/emoji/密码框都通用）—— 很多输入框在树/UIA 里根本不出现。⛔ mode=focus 强制快照差分：发出去了但**画面没变** ⇒ code=8（**绝不当成功**），见 after.diff。",
       "annotations": {
         "readOnlyHint": false,
         "destructiveHint": false,
@@ -677,11 +677,11 @@
         "properties": {
           "verify_expect": {
             "type": "string",
-            "description": "★可选，闭环验证。动作【前】声明期望谓词（分号分隔，与 legacy_tools/验动作.py 同一套：file-exists: / file-created: / file-changed: / file-contains:路径|子串 / dir-count-up: / proc-exists: / proc-gone: / window-exists: / window-gone: / any-change / no-change）。给了它，动作前后各拍一次快照并由**独立进程**判定；返回包会带 verdict（satisfied/unsatisfied/unknown/snapshots-incomparable）。★verdict 不是 satisfied 时**不会报 ok** —— 「动作发出去了」不等于「事情发生了」。★必须在动作前声明，事后补不算（否则无法归因）。"
+            "description": "★可选，闭环验证。动作【前】声明期望谓词（分号分隔，与 legacy_tools/验动作.py 同一套：file-exists: / file-created: / file-changed: / file-contains:路径|子串 / dir-count-up: / proc-exists: / proc-gone: / window-exists: / window-gone: / any-change / no-change）。给了它，动作前后各拍一次快照、由**独立进程**判定，返回带 verdict（satisfied/unsatisfied/unknown/snapshots-incomparable）。★verdict 不是 satisfied **不会报 ok**（「动作发出去了」≠「事情发生了」）；★必须动作前声明，事后补不算（否则无法归因）。"
           },
           "verify_watch": {
             "type": "string",
-            "description": "★可选。快照要盯的路径（分号分隔）。省略则自动从 verify_expect 里的 file-* 谓词抽路径 —— 前后盯防范围必须一致，否则判定器会拒绝判定（判为 snapshots-incomparable）。"
+            "description": "★可选。快照要盯的路径（分号分隔）。省略则自动从 verify_expect 里的 file-* 谓词抽路径 —— 前后盯防范围必须一致，否则判为 snapshots-incomparable。"
           },
           "hwnd": {
             "type": "integer"
@@ -696,7 +696,7 @@
               "focus"
             ],
             "default": "element",
-            "description": "★ element（默认，回退兼容）：找 UIA 元素后对它打字。focus（P0-A）：**不找元素**，直接往前台焦点窗逐字符 SendInput(KEYEVENTF_UNICODE)。⛔ 失败口径（与模式无关，两模式都这样）：① **没前台** ⇒ code=5，可传 allow_foreground=true 置前后解决（目标窗已在前台时不需要放行）；② **发了但画面没变** ⇒ code=8，绝不当成功。⛔ 认不出的 mode 直接拒绝（不猜你意思。"
+            "description": "★ element（默认，回退兼容）：找 UIA 元素后对它打字。focus（P0-A）：**不找元素**，直接往前台焦点窗逐字符 SendInput(KEYEVENTF_UNICODE)。⛔ 失败口径（两模式都一样）：① **没前台** ⇒ code=5（可传 allow_foreground=true 置前后解决；目标窗已在前台时不需要放行）；② **发了但画面没变** ⇒ code=8，绝不当成功。⛔ 认不出的 mode 直接拒（不猜你意思）。"
           },
           "allow_foreground": {
             "type": "boolean",
@@ -755,11 +755,11 @@
         "properties": {
           "verify_expect": {
             "type": "string",
-            "description": "★可选，闭环验证。动作【前】声明期望谓词（分号分隔，与 legacy_tools/验动作.py 同一套：file-exists: / file-created: / file-changed: / file-contains:路径|子串 / dir-count-up: / proc-exists: / proc-gone: / window-exists: / window-gone: / any-change / no-change）。给了它，动作前后各拍一次快照并由**独立进程**判定；返回包会带 verdict（satisfied/unsatisfied/unknown/snapshots-incomparable）。★verdict 不是 satisfied 时**不会报 ok** —— 「动作发出去了」不等于「事情发生了」。★必须在动作前声明，事后补不算（否则无法归因）。"
+            "description": "★可选，闭环验证。动作【前】声明期望谓词（分号分隔，与 legacy_tools/验动作.py 同一套：file-exists: / file-created: / file-changed: / file-contains:路径|子串 / dir-count-up: / proc-exists: / proc-gone: / window-exists: / window-gone: / any-change / no-change）。给了它，动作前后各拍一次快照、由**独立进程**判定，返回带 verdict（satisfied/unsatisfied/unknown/snapshots-incomparable）。★verdict 不是 satisfied **不会报 ok**（「动作发出去了」≠「事情发生了」）；★必须动作前声明，事后补不算（否则无法归因）。"
           },
           "verify_watch": {
             "type": "string",
-            "description": "★可选。快照要盯的路径（分号分隔）。省略则自动从 verify_expect 里的 file-* 谓词抽路径 —— 前后盯防范围必须一致，否则判定器会拒绝判定（判为 snapshots-incomparable）。"
+            "description": "★可选。快照要盯的路径（分号分隔）。省略则自动从 verify_expect 里的 file-* 谓词抽路径 —— 前后盯防范围必须一致，否则判为 snapshots-incomparable。"
           },
           "hwnd": {
             "type": "integer"
@@ -796,7 +796,7 @@
     {
       "name": "ctl_scroll",
       "title": "滚动",
-      "description": "滚动窗口内容。★ **浏览器/网页场景优先用 ctl_browser 的 CDP 通道，不要用这个**：CDP 能拿到精确的 scrollY、能确认真的滚到了，而不是「动作发出去了」。★ 网页没开 CDP 时再用本工具。**方向口径（唯一口径，别自己猜）**：`amount > 0` 向上（看更靠前的内容）、`amount < 0` 向下（看更靠后的内容），core.py **原样透传**不做取反。⚠️ 老脚本 do_scroll 有两条分支，看着像自相矛盾其实**不是**（取证见 work/_A1_receipt.md 第二节）：UIA 分支 `LargeIncrement if amount < 0`，而 `ScrollAmount.LargeIncrement` 的定义是 **PageDown（向下）**、`LargeDecrement` 是 **PageUp（向上）** —— Increment/Decrement 讲的是**滚动偏移的增减**，不是屏幕方向；滚轮分支 `wheel(120 * amount)`，而 mouseData 的**正值 = 向前滚 = 向上**。两条分支各自独立算出来的结论是同一条：**负数 = 向下**。★ **滚动前先取 scroll_y**（CDP：`document.scrollingElement.scrollTop`；桌面：用 ctl_shot 看当前可视区），滚动后比一比 —— GUI 动作没有返回值，「回执说成功」不等于「内容滚过去了」。★ `at` **只做越界校验**，不决定落点：老脚本的 do_scroll 不收落点参数，实际落在控件中心（或窗口中心），本次实际落点会在返回的 `data.落点实际` 里回填。★ `allow_foreground` 不传 = true 就**拒绝**：老脚本有「动作前自动置前」这一步，会把你正在用的窗口切走，抢注意力；放行会写一条 `action_allow_foreground` 事件留痕。★ 返回的 `blind_spots` 里始终有一条「动作发出去了 ≠ 内容滚到位了」，转述结果时必须一并带上。",
+      "description": "滚动窗口内容。★ **网页场景优先用 ctl_browser 的 CDP 通道**：CDP 能拿到精确 scrollY、能确认真的滚到了；网页没开 CDP 时再用本工具。★ **方向口径（唯一口径，别自己猜）**：`amount > 0` 向上（看更靠前的内容）、`amount < 0` 向下（看更靠后的内容），core.py **原样透传**不做取反。老脚本两条分支看着像矛盾其实不是：UIA 分支 `LargeIncrement if amount < 0`，而 `ScrollAmount.LargeIncrement` 的定义是 **PageDown（向下）**、`LargeDecrement` 是 PageUp —— Increment/Decrement 讲的是**滚动偏移的增减**、不是屏幕方向；滚轮分支 `wheel(120*amount)`，mouseData **正值 = 向前滚 = 向上**。两条分支各自算出的结论同一条：**负数 = 向下**。★ **滚动前先取 scroll_y**（CDP：`document.scrollingElement.scrollTop`；桌面：ctl_shot 看当前可视区），滚动后比一比 —— GUI 动作没有返回值，「回执说成功」≠「内容滚过去了」。★ `at` **只做越界校验**，不决定落点（实际落点回填在 `data.落点实际`）。★ `allow_foreground` 不传 = true 就**拒绝**（老脚本的动作前自动置前会把你正在用的窗口切走）；放行会写 `action_allow_foreground` 留痕。★ 返回的 `blind_spots` 始终含「动作发出去了 ≠ 内容滚到位了」，转述结果时必须一并带上。",
       "annotations": {
         "readOnlyHint": false,
         "destructiveHint": false,
@@ -849,7 +849,7 @@
     {
       "name": "ctl_keys",
       "title": "按键",
-      "description": "发送虚拟键 / 键组合（C 级）。**键名走白名单**：PageDown / PageUp / Home / End / ArrowUp / ArrowDown / ArrowLeft / ArrowRight / F1–F12 / Enter / Tab / Esc / Escape / Space / Backspace / Delete / Insert；也可以直接给这些键的十进制或十六进制 vk（如 `34` / `0x22`）。⚠️ **不在白名单里的 vk 一律拒绝**（code=5）—— 虚拟键码是个 16 位空间，其中绝大多数是「切窗口 / 截屏 / 锁屏 / 重启」这类组合键，全量放行等于把它们直接递出去。★ 只声明了 `ctrl` 一个修饰键：老脚本的 do_keys 目前只有 ctrl 一路组合，要 shift / alt 得改 legacy_tools/act.py。★ **必须显式放行置前**：`allow_foreground` 不传或不是布尔 true 就拒绝（code=5），一个键都没发出去 —— 按键只能发给前台窗口，老脚本的「动作前自动置前」会把你正在用的窗口切走，抢注意力；放行会写一条 `action_allow_foreground` 事件留痕。★ 这不是打字：一次性字符串请用 ctl_type。★ 返回的 `blind_spots` 里始终有一条「键发出去 ≠ 界面响应了」（老脚本的证据是前后截图，界面没动时会报「页面无变化」，别把那种情况当成功）。",
+      "description": "发送虚拟键/键组合（C 级）。**键名走白名单**：PageDown/PageUp/Home/End/ArrowUp/ArrowDown/ArrowLeft/ArrowRight/F1–F12/Enter/Tab/Esc/Escape/Space/Backspace/Delete/Insert，也可直接给这些键的十进制或十六进制 vk（如 `34`/`0x22`）。⚠️ **不在白名单里的 vk 一律拒绝**（code=5）—— 16 位空间里绝大多数是「切窗口/截屏/锁屏/重启」这类组合键。★ **只有 ctrl 一路组合**（老脚本只支持 ctrl；shift/alt 得改 legacy_tools/act.py）。★ **必须显式放行置前**：`allow_foreground` 不传或不是布尔 true 就拒（code=5），一个键都没发出去 —— 按键只能发给前台窗口，老脚本的动作前自动置前会把你正在用的窗口切走；放行写 `action_allow_foreground` 留痕。★ 这不是打字：一次性字符串请用 ctl_type。★ 返回的 `blind_spots` 始终含「键发出去 ≠ 界面响应了」（老脚本证据是前后截图，界面没动时报「页面无变化」，别当成功）。",
       "annotations": {
         "readOnlyHint": false,
         "destructiveHint": false,
@@ -865,12 +865,12 @@
           },
           "keys": {
             "type": "string",
-            "description": "键名（如 `v` / `F5` / `PageDown`），或数值（`0x41` / `65`）。★ 键名**原样透传**真源 act.py（接线单 §二-1，2026-10-18）：键名表**只留真源一份**，a~z / A~Z / 0~9 不再被 core 拦下来。⛔ 认不出的键名返 **code=4（NO_CTRL）**而不是 code=5（§二-3）：code=4 的处方是「键名不合法」，而 code=5 的处方是「重新观测」——对键名写错了这件事没意义。⛔ 数值写法仍有护栏：16 位空间里绝大多数是切窗口/截屏/锁屏类组合键，不在放行名单的一律拒（字母/数字键除外）。"
+            "description": "键名（如 `v`/`F5`/`PageDown`）或数值（`0x41`/`65`）。★ 键名**原样透传**真源 act.py（键名表只留真源一份，a~z/A~Z/0~9 不再被 core 拦）。⛔ 认不出的键名返 **code=4（NO_CTRL）**而不是 code=5：code=4 的处方是「键名不合法」，code=5 是「重新观测」——对键名写错了没意义。⛔ 数值仍有护栏：16 位空间里绝大多数是切窗口/截屏/锁屏类组合键，不在放行名单的一律拒（字母/数字键除外）。"
           },
           "ctrl": {
             "type": "boolean",
             "default": false,
-            "description": "配 Ctrl（按住 Ctrl → 敲键 → 松开 Ctrl）。★只有这一路组合 —— 老脚本不支持 shift / alt。★ ★**组合 allowlist = {A, C, V, X, Z}**（接线单 §二-2，2026-10-18）：只放行编辑类五件套（全选/复制/粘贴/剪切/撤销），其余（如 Ctrl+W、Ctrl+F4）拒绝并报 code=4 。原因：ctrl 若是自由布尔就会放出破坏性组合。"
+            "description": "配 Ctrl（按住 Ctrl → 敲键 → 松开）。★只有这一路组合 —— 老脚本不支持 shift/alt。★ **组合 allowlist = {A, C, V, X, Z}**（编辑类五件套：全选/复制/粘贴/剪切/撤销），其余（如 Ctrl+W、Ctrl+F4）拒并报 code=4（ctrl 若自由布尔就会放出破坏性组合）。"
           },
           "times": {
             "type": "integer",
@@ -956,7 +956,7 @@
     {
       "name": "ctl_authorize",
       "title": "请求用户授权",
-      "description": "唤起独立 tkinter 弹窗，由用户亲自在弹窗里输密钥。★ 本 agent 只拿到『通过/不通过』，物理上接触不到明文（铁律 11④）。★ 不得改用 MCP elicitation 收密钥——规范明文禁止用它请求敏感信息。",
+      "description": "唤起独立 tkinter 弹窗，由用户亲自在弹窗里输密钥。★ 本 agent 只拿到『通过/不通过』，物理上接触不到明文（铁律 11④）。★ 不得改用 MCP elicitation 收密钥 —— 规范明文禁止用它请求敏感信息。★ **同一时刻只弹一个**（单例仲裁）：并发请求等前一个弹窗的结果，证已覆盖本次范围就直接放行、不再弹窗。",
       "annotations": {
         "readOnlyHint": false,
         "destructiveHint": false,
@@ -1004,7 +1004,7 @@
     {
       "name": "ctl_brake",
       "title": "急停",
-      "description": "急停通道之一，共四条：① 全局热键 Ctrl+Alt+Home（独立常驻进程 brake-daemon）② 控制面板的「⏹ 终止 / ▶ 解除急停」按钮 ③ 本接口 ctl_brake ④ 状态文件 %LOCALAPPDATA%\\AgentCtl\\_急停.flag（由上述三者写入）。任一生效即停一切控制动作（含 A 级感知），且必须留痕（谁、什么时候、为什么）。⚠ 该状态文件 2026-10-04 已从桌面迁走到上面那个位置；旧桌面文件不再被任何组件读取。 ★★ 2026-10-21（P0-2）：**agent 侧只允许 action=stop / status**；action=release 一律被拒（code=9）—— 「刹车能被被刹者拆掉，就不叫刹车」（2026-10-21 现场：agent 连解三次自己触发的急停）。解除急停必须由人做，两条人路都会留痕：① 面板上的「▶ 解除急停」按钮 ② 命令行 AgentCtl.exe brake --action release --confirm-release",
+      "description": "急停通道之一，共四条：① 全局热键 Ctrl+Alt+Home（常驻进程 brake-daemon）② 面板「⏹ 终止 / ▶ 解除急停」按钮 ③ 本接口 ctl_brake ④ 状态文件 %LOCALAPPDATA%\\AgentCtl\\_急停.flag（由上述三者写入）。任一生效即停一切控制动作（含 A 级感知），且必须留痕（谁、何时、为什么）。★★ 2026-10-21（P0-2）：**agent 侧只允许 action=stop / status**，action=release 一律拒（code=9）——「刹车能被被刹者拆掉，就不叫刹车」。解除必须由人做，两条人路都留痕：① 面板「▶ 解除急停」② 命令行 AgentCtl.exe brake --action release --confirm-release",
       "annotations": {
         "readOnlyHint": false,
         "destructiveHint": true,
@@ -1103,7 +1103,7 @@
     {
       "name": "ctl_wait",
       "title": "阻塞等事件",
-      "description": "阻塞等一个事件，到达立即返回，不靠轮询烧轮次。用户在面板上点了授权，agent 不知道就只能往轮询：等 5 分钟就是十几次工具调用，而 agent 的回合是贵的。这里一次调用就占一个回合。★ 只等「调用之后新到的」事件，之前已发生的同类事件不会唤醒它。★ 超时不是错误（ok=true + timed_out=true），超时是 agent 自己设的等待上限。",
+      "description": "阻塞等一个事件，到达立即返回，不靠轮询烧轮次（用户在面板点了授权，agent 只能靠等：等 5 分钟就是十几次工具调用，而 agent 的回合是贵的）。★ 只等「调用之后新到的」事件，之前已发生的同类事件不会唤醒它。★ 超时不是错误（ok=true + timed_out=true），超时是 agent 自己设的等待上限。",
       "annotations": {
         "readOnlyHint": true,
         "destructiveHint": false,
@@ -1300,7 +1300,7 @@
     {
       "name": "ctl_browser",
       "title": "浏览器 CDP",
-      "description": "包壳调用现有 cdp.py：列标签页 / 读可见文字 / 按选择器找元素 / 执行 JS。网页场景的最强通道。\n\n★ **launch = 起一个我们自己的浏览器实例**（独立 profile，不碰你正在用的浏览器）：`--user-data-dir=<独立profile目录> --remote-debugging-port=<port> --no-first-run --no-default-browser-check --disable-sync`。★ **端口被别人占着就明确拒绝、绝不抢**（那个端口后面是用户正在用的会话，抢了等于替他关标签页）—— 报错里给出「换个 port=」的下一步。关用 `action=close`（taskkill /T 并核对进程真的退出）。launch/close 会起/杀进程，**要 B 级通行证**；其余子命令仍是 A 级只读。",
+      "description": "包壳调用现有 cdp.py：列标签页/读可见文字/按选择器找元素/执行 JS —— 网页场景最强通道。★ **launch = 起我们自己的浏览器实例**（独立 profile，不碰你正在用的浏览器）：`--user-data-dir=<独立profile目录> --remote-debugging-port=<port> --no-first-run --no-default-browser-check --disable-sync`。★ **端口被别人占着就明确拒绝、绝不抢**（那后面是用户正在用的会话）—— 报错给出「换个 port=」的下一步。关用 `action=close`（taskkill /T 并核对进程真退出）。launch/close 起杀进程 ⇒ **要 B 级通行证**，其余子命令仍是 A 级只读。",
       "annotations": {
         "readOnlyHint": false,
         "destructiveHint": false,
@@ -1342,7 +1342,7 @@
           "port": {
             "type": "integer",
             "default": 9222,
-            "description": "调试端口（launch/close 用；默认 9222）。★ 端口上已有**别人**的实例时明确拒绝接管。★ `cdp.py --port` **已同步支持**（窗B，2026-10-18）：cdp.py 原先把调试端口写死 9222，`launch` 到非 9222 端口的实例后它连不上；现在 `cdp.py <子命令> --port <port>` 认这个端口，**与本工具的 `port` 传同一个值**即可，不必再迁就 9222。"
+            "description": "调试端口（launch/close 用；默认 9222）。★ 端口上已有**别人**的实例时明确拒绝接管。★ `cdp.py --port` **已同步支持**：`cdp.py <子命令> --port <port>` 认这个端口，**与本工具的 `port` 传同一个值**即可，不必再迁就 9222。"
           },
           "exe": {
             "type": "string",
@@ -1398,7 +1398,7 @@
     {
       "name": "ctl_quiz",
       "title": "超星客观题",
-      "description": "超星/学习通 客观题作答通道（**只答不提交**）。action=status 看页面/题数/已答；dump 抽题面落盘；truth 从「作业详情」页抽标准答案（**有标准答案就别硬答**）；apply 按答案表灌入（按原始 key 定位 + 幂等，单选再点会取消）；verify 逐题回读校验（不一致必须为 0）；save 调「暂时保存」落草稿。⛔ **没有提交动作** —— 交卷永远由人点。全程 CDP（DOM 级），不发真实键鼠动作。★ 选项乱序（randomOptions）⇒ 必须按原始 key（span.num_option 的 data）定位，按显示字母会点错题；★ 判断题 key 是 true/false、多选 key 是字母串，两者拆分规则不同。",
+      "description": "超星/学习通客观题通道（**只答不提交**）。action=status 看页面/题数/已答；dump 抽题面落盘；truth 从「作业详情」页抽标准答案（**有标准答案就别硬答**）；apply 按答案表灌入（按原始 key 定位 + 幂等，单选再点会取消）；verify 逐题回读校验（不一致必须为 0）；save 调「暂时保存」落草稿。⛔ **没有提交动作** —— 交卷永远由人点。全程 CDP（DOM 级），不发真实键鼠动作。★ 选项乱序（randomOptions）⇒ 必须按原始 key（span.num_option 的 data）定位，按显示字母会点错题；★ 判断题 key 是 true/false、多选 key 是字母串，拆分规则不同。",
       "annotations": {
         "readOnlyHint": false,
         "destructiveHint": false,

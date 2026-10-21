@@ -40,7 +40,12 @@ PORT = int(os.environ.get("AGENTCTL_MCP_PORT") or "8761")
 ENV_NAME = "AGENTCTL_MCP_TOKEN"
 LOG = os.path.join(os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"),
                    "AgentCtl", "mcp_http_daemon.log")
-POLL = 20
+# ★ 2026-10-21（Codex）：20s → 3s。
+#   实测：服务被杀后，看门狗要等一个轮询周期才拉起 ⇒ 崩溃后最长 20 秒不可用
+#   （A/B 三轮实测端口回来用了 12.2 / 20.3 / 24.3 / 24.7 秒）。
+#   本地 TCP connect 到没人听的端口是**瞬时拒绝**（不是超时），每 3 秒探一次的代价可忽略，
+#   而「既开既用」要的就是：崩了 ⇒ 几秒内自己回来。
+POLL = 3
 
 
 def log(msg):
@@ -100,6 +105,7 @@ def start_server():
     subprocess.Popen([pyw, "-X", "utf8", "-m", "agentctl.mcp_http"],
                      cwd=SRC, env=env,
                      creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+
 
 
 def main():

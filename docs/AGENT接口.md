@@ -313,6 +313,7 @@ Content-Type: application/json
 - `scopes` 用 **A/B/C/D 短代号**（见 §1.4）；可以一次要多个，但**范围越窄越容易过**。
 - 用户在弹窗里亲自输密钥 —— **密钥永远不经过你**。你只会拿到 `{ "granted": true|false, "scopes": [...], "expires_at": "...", "acts_limit": 20 }`。
 - 被拒就停手，别问第二遍。
+- ★ **同一时刻只弹一个**（2026-10-21 起，单例弹窗仲裁器）：并发请求授权会**排队**，等前一个弹窗的结果 —— 证已经覆盖你要的范围就直接放行（**不再弹第二个**）；等不到则返回 code=9 + reason=popup_slot_busy（**fail-closed**，不许绕过去硬弹）。⇒ 屏幕上只有一个弹窗是常态；**别因为只看到一个弹窗就重复发授权请求**（重复发只会让请求排队，等更久）。
 
 ### 步骤 1.5：拿租约（要动手才需要）
 ```http
@@ -690,3 +691,48 @@ body 一次读完）；只有客户端**只**接受 `text/event-stream` 才回 S
 - rmcp 退出时会 `DELETE /mcp` 删会话；不实现的话会打一条
   `fail to delete session: ... DELETE returned HTTP 501` 的噪音日志。
 
+
+---
+
+## 附录 A ★ 工具描述瘦身：搬走的机制细节在这里（2026-10-21）
+
+### A.0 为什么瘦身
+
+MCP §tools/list§ 的载荷实测 **55182 字节**（2026-10-21 08:5x，127.0.0.1:8761/mcp 实拉），
+其中 description 9906 + input_schema 20102 = **30008 字符是纯文案**。
+★ **每一步 agent 调用都要重读这一整张表** ⇒ 文案越大，模型每步越慢越贵。
+本轮把契约瘦身 **−10.5%**（desc −18.1%、schema −6.8%），
+并把「规则」与「机制细节」分开：**规则留在契约里（一个字不许丢），机制细节搬到这里。**
+
+★ 判定口径（判据 §tests/_P3_工具面瘦身_判据.py§，基线件 §tests/fixtures/契约基线_20261021.json§）：
+字段名 / type / required / enum / default / 码表**一个字不许动**（不许靠删字段换体积）；
+必留句清单逐条点名；搬走的正文必须在本附录有落点。
+
+### A.1 契约里保留的是「规则」，搬走的是「机制细节」
+
+| 工具 | 留在契约里的 | 搬到这里（机制细节） |
+|---|---|---|
+| ctl_screen | uid 三档口径、必进保证、置信度三档、name_trust 三档、R1/R2/R3、watch_text 声明制、OCR 三态、screen_ready 的含义、eid≠uid、信封结构 | 打分权重公式的逐项来源（0.35 看得见 / 0.25 可交互 / 0.20 query 命中 / 0.10 面积 / 0.10 新面孔）；首扫暖机的实测数字（真页 0.5s 只拿到 18 节点外壳、3s 稳定到 49 节点）；网页类窗口首扫强制探两次的原因；OCR 段 80 词上限与 1500ms 预算的实现口径 |
+| ctl_scroll | 方向口径（正=向上/负=向下）、Increment/Decrement 与 PageDown/PageUp 的关系、CDP 优先、滚动前先取 scroll_y、at 只做校验、allow_foreground 必须显式放行、blind_spots 必带 | 取证过程（work/_A1_receipt.md 第二节）与两条分支各自的推导过程 |
+| ctl_keys | 白名单、拒非白名单（code=5）、只有 ctrl 一路、allow_foreground 必须放行、打字走 ctl_type、发出去≠响应了 | 「键名表只留真源一份」的历史（接线单 §二-1）与组合 allowlist 的推导（§二-2） |
+| ctl_click | 三条路径、from_capture 必填、expect / expect_uid / frame_id / window_gen / expect_region 的判定与拒绝码、retry 默认 0、eid 可跨调用 + STALE_SCREEN | 「旧口径差（旧签发 roles=interactive,text vs 重解析 all）」的来龙去脉；D1/D2 修复的时间线 |
+| ctl_tree / ctl_find | 不截图的识别通道、优先 ctl_find、eid 点它、边界（Canvas 自绘等） | 实测吞吐（Edge 787 节点 / 393 ms 全穿透；搜「订阅」534 节点→命中 7） |
+| ctl_focus | do_focus 不验 IsIconic 的已知缺陷与双重核验要求 | 「服务里原本缺这个能力」「目标窗口最小化是最常见起点」的历史 |
+| ctl_type / ctl_fill | mode=focus 无元素打字、画面没变 ⇒ code=8、Ctrl+A 清空 | QQ 现场「ctl_type 要元素」那个具体坑 |
+| ctl_browser | launch 的参数、端口被别人占着就拒、launch/close 要 B 级 | cdp.py 端口写死 9222 的旧账与窗B 的修复过程 |
+| ctl_task / ctl_wait / ctl_lease / ctl_status / ctl_shot / ctl_timeline / ctl_verify / ctl_witness / ctl_record / ctl_replay / ctl_preflight | 全部保留（本来就短） | —— |
+
+### A.2 瘦身后的代价（说清楚，别当没这回事）
+
+· 契约里的**机制解释**少了 ⇒ agent 想知道「为什么」时，读本附录。
+· 契约里的**实测数字**少了 ⇒ 性能基线查 §九 / §十一 与 work/ 下的原始记录。
+★ 但**一条操作规则都没少**：必留句清单由判据逐条点名，少一条即红。
+
+### A.3 复现
+
+~~~powershell
+python -X utf8 work\_瘦工具面_20261021.py --check   # 只报体积
+python -X utf8 tests\_P3_工具面瘦身_判据.py         # 判据（含结构冻结 + 必留句）
+~~~
+
+> 最后更新：2026-10-21 10:20（附录 A 落盘：工具面瘦身的机制细节落点）
