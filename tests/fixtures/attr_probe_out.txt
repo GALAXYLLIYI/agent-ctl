@@ -1,0 +1,95 @@
+==============================================================================
+输入归因层·最小探针  tests/_attr_probe.py
+==============================================================================
+模式        : 只观察（钩子回调恒返回 CallNextHookEx ⇒ 不吞噬、不改写）
+监听窗口    : 5.0 秒（跑完即退，无常驻）
+python      : 3.12.7
+宿主进程 pid: 34848   主线程 id: 11468
+时间戳来源  : t_mono=perf_counter（单调）／ t_wall=ISO8601（墙钟）
+DPI 感知    : PER_MONITOR_AWARE_V2 = True（否则逻辑坐标与钩子物理坐标差一个缩放倍数）
+进程上下文  : 完整性=S-1-16-8192  会话 id=1  远程会话(RDP)=False
+             ★ 完整性级别决定本探针能看见哪些窗口的输入：低级钩子**看不见**比自己级别更高的窗口。
+
+── ① 装低级钩子 ──────────────────────────────────────────────
+  SetWindowsHookExW(WH_KEYBOARD_LL=13, hMod=NULL) -> hhook=357633435  err=0 
+  SetWindowsHookExW(WH_MOUSE_LL=14,    hMod=NULL) -> hhook=120590513  err=0 
+  ★ 本探针**从不**调用 BlockInput，钩子回调**从不**返回 0 ⇒ 对用户输入完全透明。
+
+── ② 自检：自注入一次「绝对移动到光标当前像素」────────────────
+  光标位置    : 前=[2104, 890] 后=[2104, 890]  **实测位移=[0, 0]**
+  SendInput    : sent=1  收到的鼠标事件=1
+  ★ 回调确实被调用：msg=0x0200 flags=0x01 injected=True lower_il=False
+  ★ 注入位判读成立：LLMHF_INJECTED(0x01) 读到 ⇒ 本机能区分注入 vs 物理
+
+── ③ 监听窗口（5.0 秒）────────────────────────────────
+  GetMessageW 返回 0（0 = 收到 WM_QUIT ⇒ 正常到点退出）
+
+── ④ 卸钩子 ─────────────────────────────────────────────────
+  UnhookWindowsHookEx(keyboard) -> True
+  UnhookWindowsHookEx(mouse)    -> True
+
+── ⑤ 采到的事件 ─────────────────────────────────────────────
+  总数 309   键盘 0   鼠标 309
+  其中 injected=True 的：1
+    2026-10-21T22:16:08.233+08:00 ms  msg=0x0200 (2104,890) flags=0x01 inj=True  lower=False extra=0x0
+    2026-10-21T22:16:08.484+08:00 ms  msg=0x020A (2104,890) flags=0x00 inj=False lower=False extra=0x0
+    2026-10-21T22:16:08.484+08:00 ms  msg=0x020A (2104,890) flags=0x00 inj=False lower=False extra=0x0
+    2026-10-21T22:16:08.488+08:00 ms  msg=0x020A (2104,890) flags=0x00 inj=False lower=False extra=0x0
+    2026-10-21T22:16:08.503+08:00 ms  msg=0x0200 (2104,890) flags=0x00 inj=False lower=False extra=0x0
+    2026-10-21T22:16:08.512+08:00 ms  msg=0x0200 (2104,889) flags=0x00 inj=False lower=False extra=0x0
+    2026-10-21T22:16:08.519+08:00 ms  msg=0x0200 (2104,887) flags=0x00 inj=False lower=False extra=0x0
+    2026-10-21T22:16:08.528+08:00 ms  msg=0x0200 (2104,885) flags=0x00 inj=False lower=False extra=0x0
+    2026-10-21T22:16:08.536+08:00 ms  msg=0x0200 (2104,884) flags=0x00 inj=False lower=False extra=0x0
+    2026-10-21T22:16:08.728+08:00 ms  msg=0x020A (2104,884) flags=0x00 inj=False lower=False extra=0x0
+    2026-10-21T22:16:08.744+08:00 ms  msg=0x020A (2104,884) flags=0x00 inj=False lower=False extra=0x0
+    2026-10-21T22:16:08.767+08:00 ms  msg=0x020A (2104,884) flags=0x00 inj=False lower=False extra=0x0
+    2026-10-21T22:16:08.792+08:00 ms  msg=0x0200 (2104,883) flags=0x00 inj=False lower=False extra=0x0
+    2026-10-21T22:16:08.920+08:00 ms  msg=0x020A (2104,883) flags=0x00 inj=False lower=False extra=0x0
+    2026-10-21T22:16:08.927+08:00 ms  msg=0x020A (2104,883) flags=0x00 inj=False lower=False extra=0x0
+    2026-10-21T22:16:08.944+08:00 ms  msg=0x020A (2104,883) flags=0x00 inj=False lower=False extra=0x0
+    2026-10-21T22:16:08.952+08:00 ms  msg=0x020A (2104,883) flags=0x00 inj=False lower=False extra=0x0
+    2026-10-21T22:16:08.960+08:00 ms  msg=0x020A (2104,883) flags=0x00 inj=False lower=False extra=0x0
+    2026-10-21T22:16:08.968+08:00 ms  msg=0x020A (2104,883) flags=0x00 inj=False lower=False extra=0x0
+    2026-10-21T22:16:09.072+08:00 ms  msg=0x0200 (2104,883) flags=0x00 inj=False lower=False extra=0x0
+    2026-10-21T22:16:09.079+08:00 ms  msg=0x0200 (2104,882) flags=0x00 inj=False lower=False extra=0x0
+    2026-10-21T22:16:09.088+08:00 ms  msg=0x0200 (2105,880) flags=0x00 inj=False lower=False extra=0x0
+    2026-10-21T22:16:09.095+08:00 ms  msg=0x0200 (2105,879) flags=0x00 inj=False lower=False extra=0x0
+    2026-10-21T22:16:09.103+08:00 ms  msg=0x0200 (2106,878) flags=0x00 inj=False lower=False extra=0x0
+    2026-10-21T22:16:09.112+08:00 ms  msg=0x0200 (2106,877) flags=0x00 inj=False lower=False extra=0x0
+    2026-10-21T22:16:09.120+08:00 ms  msg=0x0200 (2106,876) flags=0x00 inj=False lower=False extra=0x0
+    2026-10-21T22:16:09.127+08:00 ms  msg=0x0200 (2106,876) flags=0x00 inj=False lower=False extra=0x0
+    2026-10-21T22:16:09.151+08:00 ms  msg=0x0200 (2107,876) flags=0x00 inj=False lower=False extra=0x0
+    2026-10-21T22:16:09.184+08:00 ms  msg=0x020A (2107,876) flags=0x00 inj=False lower=False extra=0x0
+    2026-10-21T22:16:09.199+08:00 ms  msg=0x020A (2107,876) flags=0x00 inj=False lower=False extra=0x0
+    2026-10-21T22:16:09.208+08:00 ms  msg=0x020A (2107,876) flags=0x00 inj=False lower=False extra=0x0
+    2026-10-21T22:16:09.216+08:00 ms  msg=0x020A (2107,876) flags=0x00 inj=False lower=False extra=0x0
+    2026-10-21T22:16:09.223+08:00 ms  msg=0x020A (2107,876) flags=0x00 inj=False lower=False extra=0x0
+    2026-10-21T22:16:09.232+08:00 ms  msg=0x020A (2107,876) flags=0x00 inj=False lower=False extra=0x0
+    2026-10-21T22:16:09.240+08:00 ms  msg=0x020A (2107,876) flags=0x00 inj=False lower=False extra=0x0
+    2026-10-21T22:16:09.247+08:00 ms  msg=0x0200 (2107,875) flags=0x00 inj=False lower=False extra=0x0
+    2026-10-21T22:16:09.408+08:00 ms  msg=0x0200 (2107,874) flags=0x00 inj=False lower=False extra=0x0
+    2026-10-21T22:16:09.416+08:00 ms  msg=0x0200 (2107,873) flags=0x00 inj=False lower=False extra=0x0
+    2026-10-21T22:16:09.454+08:00 ms  msg=0x020A (2107,873) flags=0x00 inj=False lower=False extra=0x0
+    2026-10-21T22:16:09.464+08:00 ms  msg=0x020A (2107,873) flags=0x00 inj=False lower=False extra=0x0
+    ……（其余 269 条略）
+
+── ⑥ 与 timeline 对账（真相源 = work/timeline/timeline-*.jsonl）──
+  jsonl 文件 14 个   事件行 3359
+  ★ 链完整性：断链 21 处（首个：{'file': 'timeline-20261007.jsonl', 'seq': 78, 'kind': 'authorize_request', 'actor': 'panel'}）
+  ★ 重复 seq 组 38（多出的行 38）⇒ SQLite 索引里被 INSERT OR REPLACE 覆盖掉了那么多条
+  ★ 对账结论：sqlite events 表**不能**当真相源，核对必须回 jsonl。
+
+  探针事件 309 条，其中能在 ±2.0s 内对上一条 timeline 动作的：0 条
+    （本次窗口内没有 agent 动作发生 ⇒ 没有候选，属正常）
+
+── ⑦ 结论（本探针只给证据，不下判决）─────────────────────────
+  · 钩子可用：是（两个都装上）
+  · 回调链路：通（自检事件已回来）
+  · 注入位可判读：是
+  · 观测到的注入事件：1 条；物理事件：308 条
+  · 闲置刻度 GetLastInputInfo：before=54911875 after=54917046
+  · 判决口径见设计稿《归因判据表》；判据骨架见 tests/_P1_输入归因_判据.py
+
+==============================================================================
+探针结束（已退出，无常驻进程）。
+原始输出留：tests/attr_probe_out.txt
