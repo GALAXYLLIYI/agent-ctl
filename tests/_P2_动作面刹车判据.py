@@ -445,6 +445,81 @@ def main():
 
     attempt("8 · 一级命中：面板上有带证据的提示（且闸门没被碰）", c8)
 
+    # ══ 9 · ★P0-1 失败分类：环境性拒绝**不许**灌满 fail_streak ═════════
+    #   治的病（2026-10-21 真实事故）：同一坐标连续 8 次**环境性**失败
+    #   （wrong_target / foreground_blocked / 缺 from_capture）
+    #   → fail_streak=6 拉急停 → 急停连带吊销租约 → 后续动作全被拒 → 更多失败。
+    #   病根不是阈值太低，是「环境不满足」与「动作没生效」混在同一个失败桶里。
+    def c9():
+        clear_brake()
+        ag.reset_state()
+        FLAG = os.environ["AGENTCTL_BRAKE_FLAG"]
+        anom_before = len([p for k, p in events("action_anomaly")])
+        blocked_before = len([p for k, p in events("action_blocked")])
+        raw = []
+        for i in range(10):
+            raw.append(ag.guard().observe(actor="窗F", tool="ctl_click", args={"hwnd": 1234, "xy": [400, 500]}, ok=False, failure_class="rejected_env"))
+        hits = [h for h in raw if h]
+        if hits:
+            return False, "★环境性拒绝被当成了异常命中 %d 次（第一处 %s）" % (len(hits), _brief(hits[0]))
+        if os.path.exists(FLAG):
+            return False, "★连续 10 次环境性拒绝把急停拉下来了（动作压根没发出去，凭什么停机）"
+        anom = [p for k, p in events("action_anomaly")]
+        if len(anom) != anom_before:
+            return False, "★环境性拒绝不该写 action_anomaly 事件（新增 %d 条）" % (len(anom) - anom_before)
+        blocked = [p for k, p in events("action_blocked")]
+        if len(blocked) - blocked_before != 10:
+            return False, "环境性拒绝应留痕 10 条（kind=action_blocked），实测新增 %d 条" % (len(blocked) - blocked_before)
+        if not all(p.get("failure_class") == "rejected_env" for p in blocked):
+            return False, "留痕里缺 failure_class=rejected_env"
+        return True, "10 次环境性拒绝：0 次命中、0 拉闸、10 条 blocked 留痕"
+
+    attempt("9 · ★P0-1：环境性拒绝（没证/没租约/被挡/缺凭据）**不计入** fail_streak，也不拉闸", c9)
+
+    # ══ 10 · 真失败照旧：护栏不许松 ═══════════════════════════════════
+    def c10():
+        clear_brake()
+        ag.reset_state()
+        FLAG = os.environ["AGENTCTL_BRAKE_FLAG"]
+        raw = []
+        flag_after = {}
+        for i in range(1, 8):
+            raw.append(ag.guard().observe(actor="窗G", tool="ctl_click", args={"hwnd": 1234, "xy": [600 + i, 700]}, ok=False, failure_class="no_effect"))
+            flag_after[i] = os.path.exists(FLAG)
+        hits = [h for h in raw if h]
+        if not hits:
+            return False, "连续 7 次真失败（画面没变）一次都没触发（护栏松了）"
+        if flag_after[6]:
+            return False, "★第 1 次命中就拉闸（两级被压成一级）"
+        if hits[0].get("threshold_name") != "fail_streak":
+            return False, "阈值名不对：%r" % hits[0].get("threshold_name")
+        if hits[-1].get("stage") != "brake":
+            return False, "第 7 次应拉闸，实测 %r" % (hits[-1].get("stage"))
+        if not flag_after[7]:
+            return False, "★真失败第二次命中后急停旗子不存在（护栏没拉）"
+        return True, "真失败（no_effect）连续 7 次：第 6 次只提示、第 7 次拉闸（护栏没松）"
+
+    attempt("10 · 真失败（动作发出去了但没生效）**照旧**两级拉闸（护栏没松）", c10)
+
+    # ══ 11 · 接线：core 动作出口把 failure_class 传进去了 ═════════════
+    def c11():
+        with open(CORE, encoding="utf-8", errors="replace") as f:
+            src = f.read()
+        bad = []
+        if "def failure_class(" not in src:
+            bad.append("core.py 里没有 failure_class()（失败性质没人判）")
+        if "def dispatch(" in src:
+            body = src.split("def dispatch(", 1)[1].split("\ndef ", 1)[0]
+            if "failure_class=" not in body:
+                bad.append("dispatch 里没有把 failure_class 传给 observe（分类判了也白判）")
+        else:
+            bad.append("core.py 里找不到 dispatch（判据失效，请核代码结构）")
+        if "rejected_env" not in src:
+            bad.append("core.py 里没有 rejected_env 这个类别名（口径漂了）")
+        return (not bad), ("；".join(bad) if bad else "dispatch → observe(failure_class=...) 接线在位")
+
+    attempt("11 · 接线：core.dispatch 把 failure_class 传给了 observe", c11)
+
 
 if __name__ == "__main__":
     _completed = False

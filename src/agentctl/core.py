@@ -15,6 +15,7 @@ r"""core.py —— AgentCtl 的**唯一调度核心**（三态同源的"同源"�
 from __future__ import annotations
 
 import glob
+import hashlib
 import json
 import os
 import re
@@ -222,6 +223,22 @@ def store() -> Store:
     if _STORE is None:
         _STORE = Store(TIMELINE_DIR)
     return _STORE
+
+
+import threading
+
+# ★★ P0-2（2026-10-21）：「这次调用是**人**发起的吗」这条标记。
+#   为什么用 thread-local 而不是塞进 args：
+#     ① args 会过契约校验（additionalProperties: false）⇒ 塞私字段会被当成非法参数；
+#     ② args 会被原样落进事件流 ⇒ 留痕里出现 "_human": true 对查账的人毫无意义。
+#   为什么需要它：解除急停（ctl_brake --action release）**必须由人做** ——
+#   agent 用自己唯一的工具接口解掉自己触发的急停，等于「刹车能被被刹者拆掉」。
+_call_ctx = threading.local()
+
+
+def _is_human_call() -> bool:
+    """本次调用是不是人发起的（人路：面板按钮 / 命令行显式确认）。"""
+    return bool(getattr(_call_ctx, "human", False))
 
 
 def env(**head) -> dict:
@@ -719,6 +736,24 @@ def t_brake(args: dict) -> dict:
                    data={"engaged": True, "flag": gate.BRAKE_FLAG},
                    warning="刹车已拉下（这是预期结果，不是错误）；%s" % msg)
     if action == "release":
+        # ★★ P0-2（2026-10-21）：**解除急停必须由人做**。
+        #   事故（2026-10-21 现场）：agent 用自己的工具接口（ctl_brake --action release）
+        #   连续三次解掉自己触发的急停 —— 「刹车能被被刹者拆掉，就不叫刹车」。
+        #   改法：**工具面（MCP / HTTP）只允许 stop 与 status**；
+        #     release 只走两条人路：① 面板「▶ 解除急停」按钮 ② 命令行显式确认
+        #     （AgentCtl.exe brake --action release --confirm-release）。
+        #   ★ 诚实边界：这一条堵的是「顺手自解锁」——agent 唯一顺手的接口没了。
+        #     shell 层面直接删旗子文件（%LOCALAPPDATA%\AgentCtl\_急停.flag）不是本条能挡的，
+        #     那是 OS 权限问题；但那条路会**绕过留痕**，所以本条只承诺「工具面不许自解锁」。
+        if not _is_human_call():
+            return env(code=gate.CODE_UNAUTH,
+                       data={"engaged": gate.brake_engaged(), "flag": gate.BRAKE_FLAG,
+                             "human_paths": ["面板的「▶ 解除急停」按钮",
+                                             "命令行：AgentCtl.exe brake --action release --confirm-release"]},
+                       warning="⛔ 解除急停是**人的动作**，agent 侧只允许 ctl_brake 的 stop / status。"
+                               "要解除请让用户在面板上点「▶ 解除急停」，"
+                               "或运行：AgentCtl.exe brake --action release --confirm-release"
+                               "（两边都会留痕）。")
         # 同 W7：解除也统一走 gate，别再自己 os.remove
         ok, msg = gate.clear_brake()
         if not ok:
@@ -1271,6 +1306,102 @@ def _rect_inter(a, b):
 CAUSAL_VERDICTS = ("met", "no_effect_in_region", "changed_outside_target", "unknown")
 
 
+# ★★ P0-1 失败分类（2026-10-21；Codex 实跑 + MiniMax Code / ZCode 两份评审一致认定）：
+#   把「失败」拆成三类 —— 这是 action_guard 的 fail_streak 能不能当信号的分水岭。
+#     rejected_env   动作**根本没发出去**（没证 / 没租约 / 被别的窗挡 / 缺凭据 /
+#                    前台不对 / 找不到控件）：重试没有意义（再点一次还是被挡），
+#                    但**不该**被算成「agent 在乱点」。
+#     no_effect     发出去了但画面没变（code=8）：这才是「点了但没点到」。
+#     action_failed  真异常（服务内部错误、动作抛异常）：同样该急停。
+#   ★ 2026-10-21 实测事故链（现场取证）：同一坐标连续 8 次**环境性**失败
+#     （wrong_target / foreground_blocked / 缺 from_capture）
+#     → fail_streak=6 拉急停
+#     → 急停连带吊销租约 → 后续动作全被拒 → 更多失败（**正反馈**）。
+#     病根不是阈值太低，是**失败没分类**：把「环境不满足」和「动作没生效」混在一个桶里。
+FAILURE_CLASS_REJECTED_ENV = "rejected_env"
+FAILURE_CLASS_NO_EFFECT = "no_effect"
+FAILURE_CLASS_ACTION_FAILED = "action_failed"
+
+#: 前置拒绝码 —— 共同点是**动作一个像素都没发出去**
+_REJECTED_ENV_CODES = frozenset((3, 4, 5, 7, 9, 10, 11, 12, 13))
+#: 发出去了但没变化
+_NO_EFFECT_CODES = frozenset((8,))
+
+
+def failure_class(r: dict) -> str | None:
+    """把一次调用的失败归到三类之一；成功 ⇒ None。
+
+    ★ **判不出来的一律按 action_failed（真失败）算** —— 宁可多算不可漏算：
+      漏算 = 护栏松了（该急停没急停）；多算 = 只是保守（回到改前口径）。
+    ★ 口径**只贴标签、不改判定**：不改任何 code 数值、不改放行条件。
+    """
+    if not isinstance(r, dict) or r.get("ok"):
+        return None
+    try:
+        code = int(r.get("code"))
+    except (TypeError, ValueError):
+        return FAILURE_CLASS_ACTION_FAILED
+    if code in _NO_EFFECT_CODES:
+        return FAILURE_CLASS_NO_EFFECT
+    if code in _REJECTED_ENV_CODES:
+        return FAILURE_CLASS_REJECTED_ENV
+    return FAILURE_CLASS_ACTION_FAILED
+
+
+# ★ W5-B（2026-10-20，用户拍板「统一补写判词」）：**判词统一词表 + 统一写法**。
+#   改前的毛病：判词**散在三个地方、各说各话**
+#     · 因果判词（窗Z）  met / no_effect_in_region / changed_outside_target / unknown
+#     · 闭环判词（T17）  satisfied / unsatisfied / snapshots-incomparable / unknown
+#     · 输入判词         accepted / not_target / foreground_blocked / unknown
+#   台账那边却只有一张表（met / no_effect / changed_outside_target / denied / unknown）
+#   ⇒ 同一件事两栈两套读法，离线对不上账；而且判词**只回给调用方**、不落盘，
+#     出了事没人查得到「当时到底判成了什么」。
+#   修法（**只加不改**）：
+#     ① 不动任何既有字段的语义 —— 顶层 verdict 仍是闭环判词、data.after.verdict
+#        仍是因果判词（判据 36 读的就是它，动了就改判定输入）。
+#     ② 只**加**一个统一块 `verdict_canonical`（折到台账那一张表），
+#        并把同一份判词**顺手写进事件流（timeline）与证据落盘（evidence.json）**
+#        —— 这才是「统一补写」的落点：判词从此有据可查，而不是只活在返回值里。
+CANONICAL_VERDICTS = ("met", "no_effect", "changed_outside_target", "denied", "unknown")
+
+_VERDICT_CANON = {
+    # 因果判词（窗Z）
+    "met": "met",
+    "no_effect_in_region": "no_effect",
+    "changed_outside_target": "changed_outside_target",
+    "unknown": "unknown",
+    # 闭环判词（T17）
+    "satisfied": "met",
+    "unsatisfied": "no_effect",
+    "snapshots-incomparable": "unknown",
+    # 输入判词
+    "accepted": "met",
+    "not_target": "denied",
+    "foreground_blocked": "denied",
+    # 闸门 / 台账原生词
+    "denied": "denied",
+    "no_effect": "no_effect",
+}
+
+
+def _canon_verdict(value, kind: str = "", reason: str = "", evidence=None) -> dict:
+    """把各路判词折成**一张表**（台账口径），并记清它是从哪种判词折来的。
+
+    折不出的一律落 unknown —— **不许猜**："折不出"本身就是一种可查的事实。
+    """
+    raw = str(value or "").strip()
+    ev = evidence if isinstance(evidence, dict) else None
+    if ev is not None:
+        # 证据只留判词相关的几项（整个 diff 太大，落盘不是判词的事）
+        ev = {k: ev.get(k) for k in ("region", "changed_bbox", "changed_outside_pct")
+              if k in ev}
+    return {"value": _VERDICT_CANON.get(raw, "unknown"),
+            "raw": raw,
+            "kind": kind or "unknown",
+            "reason": str(reason or "")[:300],
+            "evidence": ev}
+
+
 def _causal_verdict(diff, *, hit_rect=None, expect_region=None) -> dict:
     """因果判词（后置验）：把「发了」与「成了」分开，**四态不许两态**。
 
@@ -1328,6 +1459,48 @@ def _causal_verdict(diff, *, hit_rect=None, expect_region=None) -> dict:
     return {"verdict": "changed_outside_target", "verdict_evidence": ev}
 
 
+def _own_panel_blocks(hit: dict) -> bool:
+    """落点命中的窗口链里，有没有**我们自己的面板**（agentctl 的悬浮面板）。
+
+    ★ 与「敏感窗黑名单」是两件事，别混：
+      · 黑名单：agent **不许点**自己的面板（防绕过授权）—— 红线，不动
+      · 这里：面板**挡住了别人**时，让它让路（见 _panel_yield_and_retry）
+    读不到面板登记 ⇒ False（宁可被拒，不许乱动）。
+    """
+    try:
+        from agentctl import panel_yield                # noqa: PLC0415
+        ph = panel_yield.panel_hwnd()
+        if not ph:
+            return False
+        for n in (hit or {}).get("chain") or []:
+            if int(n.get("hwnd") or 0) == int(ph):
+                return True
+        return False
+    except Exception:
+        return False
+
+
+def _panel_yield_and_retry(timeout: float = 2.0) -> bool:
+    """请自己的面板让位（收起来），并等它**真的**藏起来。成功返回 True。
+
+    ★ 恢复不在这里做：统一放在 dispatch 出口（动作做完 ⇒ 弹回来），
+      免得每个调用点各写一遍、漏一处就永远收着面板。
+    ★ 面板没登记 / 让位失败 ⇒ False ⇒ 照旧按「被遮挡」拒（fail-safe）。
+    """
+    try:
+        from agentctl import panel_yield                # noqa: PLC0415
+        if not panel_yield.request_yield():
+            return False
+        deadline = time.time() + float(timeout)
+        while time.time() < deadline:
+            if not panel_yield.panel_visible():
+                return True
+            time.sleep(0.1)
+        return False
+    except Exception:
+        return False
+
+
 def _ownership_precheck(args: dict, hwnd: int, tool: str = "ctl_click"):
     """发送瞬间的**归属前置闸**：不过就不发（一个像素都不动）。
 
@@ -1382,6 +1555,15 @@ def _ownership_precheck(args: dict, hwnd: int, tool: str = "ctl_click"):
                          "（act.py 自己的包含校验会拦这种点）" % (x, y, list(w_xyxy)))
         else:
             hit = _win_at_point(x, y)
+            # ★★ 2026-10-20 新增：落点被**我们自己的面板**挡住 ⇒ 先让位再判一次。
+            #   为什么不是直接拒：面板是常驻挂件，经常正好盖在目标窗上，
+            #   agent 每每撞「wrong_target」却无路可走；人手动就是「把面板收起来再点」。
+            #   ⚠ 让位**不是**放开敏感窗：点自己的面板照样被黑名单拒，这里只解决「挡视线」。
+            if hit is not None and _own_panel_blocks(hit):
+                if _panel_yield_and_retry():
+                    hit = _win_at_point(x, y)          # 重新取归属事实（面板已经让开）
+                    if hit is None:
+                        blind.append("面板让位后取不到落点 (%s,%s) 上的窗口 ⇒ 归属**未判定**" % (x, y))
             if hit is None:
                 blind.append("归属**未判定**：WindowFromPoint 取不到落点 (%s,%s) 上的窗口 "
                              "⇒ 「没看见」不等于「没有遮挡」" % (x, y))
@@ -2403,6 +2585,64 @@ def _act_diff_store(fid, before, after, diff) -> dict:
     return _out
 
 
+def _mk_action_evidence(action, hwnd, diff, store_ret, verdict, before, after,
+                         canon=None) -> dict:
+    """★ A2：把一次动作的**证据**拼成一个字典（回执顶层 `evidence` 键）。
+
+    独立成键的三个理由：
+      ① 刻意**不塞进 data.after** —— data.after.verdict 是判据 36 在读的字段，
+         往里加东西就改了它的判定输入（判据不是靠约定活的）。
+      ② 落盘与回执**同源**：evidence.json 里就是回执里那份，不是另算一遍。
+      ③ 独立成模块级函数 ⇒ 离线验证脚本能**直接调真源**跑三态，不用发真动作。
+    只加字段：不动 r["code"] / r["ok"] / r["data"] 的任何既有语义。
+    """
+    diff = diff if isinstance(diff, dict) else {}
+    st = store_ret if isinstance(store_ret, dict) else {}
+    vd = verdict if isinstance(verdict, dict) else {}
+    bb = diff.get("bbox")
+    win = _win_rect(hwnd) or [0, 0, 0, 0]
+    ar = None
+    if bb and len(bb) == 4 and win[2] > win[0] and win[3] > win[1]:
+        wa = float(win[2] - win[0]) * float(win[3] - win[1])
+        if wa > 0:
+            # area_ratio = 变化包围盒面积 / 窗口面积（**包围盒口径**，非逐像素占比）
+            ar = round(float(bb[2]) * float(bb[3]) / wa, 6)
+    dirx = st.get("dir")
+    return {
+        "action": action,
+        "hwnd": int(hwnd or 0),
+        "changed": diff.get("changed"),
+        "bbox": bb,
+        "area_ratio": ar,
+        "verdict": vd.get("verdict"),
+        "verdict_evidence": vd.get("verdict_evidence"),
+        # ★ W5-B：统一判词块也进证据落盘 ⇒ 离线只看 evidence.json 就能读懂判词。
+        "verdict_canonical": canon,
+        "before_png": (os.path.join(dirx, "before.png")
+                       if dirx and before is not None else None),
+        "after_png": (os.path.join(dirx, "after.png")
+                      if dirx and after is not None else None),
+        "crop_png": st.get("crop_path"),
+        "dir": dirx,
+        "说明": diff.get("说明"),
+        "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+    }
+
+
+def _write_action_evidence(ev: dict) -> str | None:
+    """把证据字典写进 **动作同目录** 的 evidence.json；返回写入路径。
+
+    ⛔ 落盘失败不许连带动作失败 —— 证据是附带品，动作本身才是主线。
+    """
+    d = (ev or {}).get("dir")
+    if not d:
+        return None
+    p = os.path.join(d, "evidence.json")
+    with open(p, "w", encoding="utf-8") as f:
+        json.dump(ev, f, ensure_ascii=False, indent=1)
+    return p
+
+
 def _act(action: str, args: dict, argv: list[str], scope: str = "B") -> dict:
     """统一：**先验证通行证（非消耗）→ 再验租约 → 再验观测绑定 → 调 act.py → 成功后消费 capture_id**。
 
@@ -2436,6 +2676,8 @@ def _act(action: str, args: dict, argv: list[str], scope: str = "B") -> dict:
     exp = (args.get("verify_expect") or "").strip()
     watch = (args.get("verify_watch") or "").strip()
     _cl = None
+    # ★ W5-B：统一判词块（只在**有判词**时才写，见下方各写点）。
+    _canon = None
     if exp:
         _vy = _verify_py()
         if not _vy:
@@ -2457,7 +2699,13 @@ def _act(action: str, args: dict, argv: list[str], scope: str = "B") -> dict:
     #      —— 那条口径本身就需要快照才判得出，与 frame_id 无关。
     # ⛔ 不启用时**一张都不拍** ⇒ 输出与改前逐字节一致（非破坏性）。
     _need_diff = bool(args.get("_need_diff") or args.get("frame_id"))
-    _before = _act_grab(hwnd) if _need_diff else None
+    # ★ A2（2026-10-20 派单）：**动作一律留前后证据** ——
+    #   改前只有显式要 frame_id 的动作才拍前后图，于是「判不出」的那一大类
+    #   **连证据都没落盘**，事后无从复核（台账导出实测：diff.bbox / area_ratio / crop
+    #   在历史数据里全为 null，根因就是这里）。
+    #   ⚠ 只补证据，**不改任何判定语义**：下面 _need_diff 分支里的 code=8/5 与
+    #     changed_outside_target 判定原样保留 —— 这里只是把证据补齐。
+    _before = _act_grab(hwnd)
 
     rc, out, e = _legacy("act.py", argv, timeout=int(args.get("timeout_sec") or ACT_TIMEOUT_SEC))
     r = _map_rc(rc, out, e)
@@ -2508,6 +2756,27 @@ def _act(action: str, args: dict, argv: list[str], scope: str = "B") -> dict:
     # ★ P0-A：动作后拍一张、求差、落盘、写进信封。
     # ⛔ 信封的 data.after **合并**而不是覆盖：t_click 已经把 uid_state 放在
     #   data.after 里（窗G3），覆盖会把那个证据抹掉。
+    if not _need_diff:
+        # ★ A2：没显式要 diff 的动作，**照样**留证据（求差 + 落盘 + 判词）。
+        #   ⚠ 只产出证据，**不动 r["code"] / r["ok"]**（语义留给调用方判据看）。
+        _after = _act_grab(hwnd)
+        _ev_wr = _win_rect(hwnd) or [0, 0, 0, 0]
+        _df = _act_diff_of(_before, _after, (int(_ev_wr[0]), int(_ev_wr[1])),
+                           _diff_ignore_cfg(args))
+        _fid = "%s_%d" % (action, time.time_ns())
+        # ★ 2026-10-20 修：这里原来写的是 `_ev_after`（**没有这个变量**）
+        #   ⇒ NameError ⇒ 非 diff 路径（绝大多数动作）的 A2 证据整段炸掉。
+        #   改成 `_after`（就是上面刚抓的那张）。
+        _st = _act_diff_store(_fid, _before, _after, _df)
+        _pub = {k: v for k, v in _df.items() if not k.startswith("_")}
+        for _k in ("crop_path", "dir", "落盘失败"):
+            if _st.get(_k):
+                _pub[_k] = _st[_k]
+        _vd = _causal_verdict(_df, hit_rect=_win_rect(hwnd),
+                              expect_region=args.get("expect_region"))
+        _canon = _canon_verdict(_vd.get("verdict"), "causal",
+                                (_vd.get("verdict_evidence") or {}).get("channel_diag"),
+                                _vd.get("verdict_evidence"))
     if _need_diff:
         _after = _act_grab(hwnd)
         _wr = _win_rect(hwnd) or [0, 0, 0, 0]
@@ -2526,6 +2795,9 @@ def _act(action: str, args: dict, argv: list[str], scope: str = "B") -> dict:
         #   命中窗 = 目标窗本身（归属前置闸已保证落点归它）；expect_region 只**细化**判词。
         _vd = _causal_verdict(_df, hit_rect=_win_rect(hwnd),
                               expect_region=args.get("expect_region"))
+        _canon = _canon_verdict(_vd.get("verdict"), "causal",
+                                (_vd.get("verdict_evidence") or {}).get("channel_diag"),
+                                _vd.get("verdict_evidence"))
         r["data"] = {**_d0, "after": {**_a0, "diff": _pub, **_vd}}
 
         # ★ 契约 §二 · mode=focus 的第二种失败：「发了但画面没变 ⇒ code=8」。
@@ -2582,11 +2854,16 @@ def _act(action: str, args: dict, argv: list[str], scope: str = "B") -> dict:
         r["verdict"] = verdict
         r["verify"] = {"expect": exp, "watch": watch,
                        "action_ok": bool(r.get("ok")), **_vdetail}
+        # 闭环判词**优先**于因果判词（它是独立判定器给的，更权威）
+        _canon = _canon_verdict(verdict, "closed_loop",
+                                (_vdetail.get("judge_tail") or
+                                 _vdetail.get("snap_error") or ""),
+                                _vdetail)
         if r.get("ok") and verdict != "satisfied":
             _code = gate.CODE_NO_CHANGE if verdict == "unsatisfied" else gate.CODE_UNSTABLE
             # ★ 顶层也带上 verdict/verify：成功路径是挂在 r["verdict"] 上的，
             #   失败路径若只放进 data，agent 就得记两个位置 —— 同一件事必须只有一个读法。
-            return env(code=_code, verdict=verdict,
+            return env(code=_code, verdict=verdict, verdict_canonical=_canon,
                        verify={"expect": exp, "watch": watch, "action_ok": True, **_vdetail},
                        # ★ P0-A：合并 r["data"] 而不是新造 —— 动作确实发出去了，
                        #   那些已经拿到手的证据（after.uid_state / after.diff）不能因为
@@ -2598,6 +2875,23 @@ def _act(action: str, args: dict, argv: list[str], scope: str = "B") -> dict:
                        warning="★ 动作执行了，但【独立验证没通过】：verdict=%s。"
                                "两个结果都在（动作 rc 在 data.rc、判定 verdict 在本条）—— 别只看一个。"
                                "expect=%s" % (verdict, exp))
+    # ── ★ A2（2026-10-20 派单）：动作证据**独立成键 + 落盘** ──
+    #   回执多一个顶层 `evidence` 键：{changed, bbox, area_ratio, verdict,
+    #   before_png, after_png, crop_png, dir, 说明}，同一份内容写进
+    #   work/_actions/<fid>/evidence.json（**与动作同目录**）。
+    #   ⛔ **只加字段**：不碰 r["code"] / r["ok"] / r["data"] 的任何既有语义。
+    #     刻意**独立成键**而不塞进 data.after —— data.after.verdict 是判据 36
+    #     （文案与数据一致）在读的字段，往里加会改它的判定输入。
+    try:
+        _evx = _mk_action_evidence(action, hwnd, _df, _st, _vd, _before, _after, _canon)
+        r["evidence"] = _evx
+        # ★ W5-B：顶层也带一份统一判词（**只加键**；顶层 verdict 仍是闭环判词语义）。
+        if _canon:
+            r["verdict_canonical"] = _canon
+        _write_action_evidence(_evx)
+    except Exception as _e:
+        r["evidence_error"] = "%s: %s" % (type(_e).__name__, _e)
+
     return r
 
 
@@ -2684,7 +2978,9 @@ def _win_info_for(hwnd: int) -> dict:
         tid = win32process.GetWindowThreadProcessId(h)[1]
         return {"title": win32gui.GetWindowText(h) or "",
                 "process": psutil.Process(tid).name() if tid else "",
-                "class": win32gui.GetClassName(h) or ""}
+                "class": win32gui.GetClassName(h) or "",
+                # ★ A1（2026-10-20 派单）：pid 是窗口身份的一部分（hwnd 会被复用，pid 不会）
+                "pid": int(tid) if tid else 0}
     except Exception as e:
         return {"title": "", "process": "", "class": "", "error": str(e)}
 
@@ -3372,6 +3668,12 @@ def t_click(args: dict) -> dict:
     # ★ A 项：发送**之前**抓输入侧事实（发送之后前台可能已经变了，抓了就没意义）
     _inp = _input_snapshot(hwnd, _xy(args["xy"]) if args.get("xy") else None)
     r = _act("click", args, argv)
+    # ★ W5-B：输入判词（accepted / not_target / foreground_blocked）也并进统一块。
+    #   它和因果判词、闭环判词讲的是**三件不同的事**，但以前散在三个地方，
+    #   离线读判词的人得自己拼。统一块里各带各的 kind，**不混成一句**。
+    if isinstance(r.get("verdict_canonical"), dict) and _inp.get("verdict"):
+        r["verdict_canonical"]["input_verdict"] = _canon_verdict(
+            _inp.get("verdict"), "input", _inp.get("fg_ok") is False and "前台不对" or "")
     # ★ P0-A：frame_id 校验结论在**动作之后立即**回显，不只在 ok 时。
     #   动作本身失败但**凭据是对的**（例如点击发出去了但画面没变 → code=8）时，
     #   这条信息正好最值钱 —— 只在成功时才看得见的设计，恰好在需要它的场合隐身。
@@ -5857,6 +6159,17 @@ def t_preflight(args: dict) -> dict:
     return env(ok=True, code=0, data={"结果": out}, warning=None)
 
 
+def _t_quiz(a):
+    """超星/学习通 客观题通道（**只答不提交**）。
+
+    ★ 惰性导入：quiz 依赖 core（要复用它的 _cdp_eval/_cdp_pages）,
+      core 顶层 import quiz 会成环 ⇒ 这里在调用时才 import。
+    ★ 契约是唯一真源：登记在 contract/tools.json ⇒ CLI 与 MCP 两侧自动可见。
+    """
+    from agentctl import quiz                                      # noqa: PLC0415
+    return quiz.t_quiz(a)
+
+
 TOOLS = {
     "ctl_status": t_status,
     "ctl_preflight": t_preflight,
@@ -5881,9 +6194,17 @@ TOOLS = {
     "ctl_keys": t_keys,
     "ctl_focus": t_focus,
     "ctl_browser": t_browser,
+    "ctl_quiz": _t_quiz,
     "ctl_task": lambda a: tasks_dispatch.handle(a, store=store, env=env,
                                                  gate=gate, timeline_dir=TIMELINE_DIR),
 }
+
+
+# ★ W5（2026-10-20）：**动作类**工具 —— 它们的事件要带窗口身份。
+#   只读感知类（ctl_shot/ctl_tree/ctl_find/…）的事件不带：那些不是桌面动作，
+#   而且一次调用可能涉及多个窗口，硬塞一个标题反而是假事实。
+_ACTION_TOOLS = frozenset(("ctl_click", "ctl_type", "ctl_fill", "ctl_keys",
+                           "ctl_scroll", "ctl_focus"))
 
 
 def _ev(kind: str, *, actor="", tool="", payload=None, ok=True, code=0):
@@ -5894,7 +6215,7 @@ def _ev(kind: str, *, actor="", tool="", payload=None, ok=True, code=0):
         return None
 
 
-def dispatch(tool: str, args: dict, *, actor: str = "") -> dict:
+def dispatch(tool: str, args: dict, *, actor: str = "", human: bool = False) -> dict:
     """**唯一的入口。** 三种传输都调它。"""
     t0 = time.perf_counter()
     args = args or {}
@@ -5915,12 +6236,18 @@ def dispatch(tool: str, args: dict, *, actor: str = "") -> dict:
     if tool not in TOOLS:
         r = env(code=gate.CODE_NO_CTRL, warning=f"未知工具：{tool}")
     else:
+        # ★ P0-2：标上「这次是人发起的」（解除急停只走人路）。
+        #   用 try/finally 复原：HTTP 传输是多线程的，不复原会串到别的请求上。
+        _prev_human = getattr(_call_ctx, "human", False)
+        _call_ctx.human = bool(human) or _prev_human
         try:
             r = TOOLS[tool](args)
         except gate.GateDenied as e:
             r = env(code=e.code, warning=e.why)
         except Exception as e:
             r = env(code=gate.CODE_INTERNAL, warning=f"内部错误 {type(e).__name__}: {e}")
+        finally:
+            _call_ctx.human = _prev_human
 
     # ── ★ P2 动作面异常刹车（2026-10-16）─────────────────────────────
     #   放在**这里**（每种传输都走的唯一出口）而不是 t_click/t_type 各自一份：
@@ -5930,15 +6257,35 @@ def dispatch(tool: str, args: dict, *, actor: str = "") -> dict:
     #     本次动作该成还成（一级命中本来就只是提示），真要停也是闸门那边拦后续动作。
     #   ⚠ 判据自己崩了不许把动作带崩 —— 但**不许静默**：把错挂在返回值上，
     #     否则就是「安全机制静默失效」，比没有安全机制更坏（项目老教训）。
+    # ★ P0-1（2026-10-21）：把这次失败**贴上性质标签**再交给刹车判据。
+    #   以前只传 bool ok ⇒ 「环境不满足（被挡/没证/缺凭据）」与
+    #   「动作发出去了但没生效」在 fail_streak 里是同一个桶，
+    #   于是环境性失败会把「agent 在乱点」这个信号灌满（实测：8 次 → 急停 → 租约被吊销）。
+    #   现在 rejected_env 不再计入 fail_streak（只留痕），no_effect / action_failed 照旧计。
+    _fc = failure_class(r)
+    if _fc:
+        r["failure_class"] = _fc
     try:
         _anom = action_guard.guard().observe(
-            actor=actor, tool=tool, args=args, ok=bool(r.get("ok")))
+            actor=actor, tool=tool, args=args, ok=bool(r.get("ok")),
+            failure_class=_fc)
         if _anom:
             r["action_anomaly"] = _anom
     except Exception as _e:
         r["action_guard_error"] = "%s: %s" % (type(_e).__name__, _e)
 
     r["elapsed_ms"] = int((time.perf_counter() - t0) * 1000)
+
+    # ★★ 2026-10-20：动作做完了 ⇒ 请自己的面板弹回来。
+    #   放在 dispatch 出口（三态传输唯一出口）而不是 t_click/t_keys 各写一遍：
+    #   漏一处就永远收着面板（用户看不到挂件），统一在这儿收口最稳。
+    #   只读调用走到这儿 is_yielded() 为 False ⇒ 什么都不做。
+    try:
+        from agentctl import panel_yield                # noqa: PLC0415
+        if panel_yield.is_yielded():
+            panel_yield.request_back()
+    except Exception:
+        pass
     # ★ 通知搭载（2026-10-07）：每次调用都带上"用户那边发生了什么"。
     #   零额外调用 —— 用户在面板上点了授权，下次我调任何工具就带回来。
     #   失败时不得看成"没事发生"，而是面信件本身没了 —— 那就是静默失效，比没个字段更坏。
@@ -5952,8 +6299,63 @@ def dispatch(tool: str, args: dict, *, actor: str = "") -> dict:
     if tool in ("ctl_status", "ctl_timeline", "ctl_verify"):
         return r
     try:
+        _evp = {k: v for k, v in args.items() if k != "token"}
+        # ★ W5（2026-10-20）：动作类事件**补窗口身份**（标题/进程名/窗口类名）。
+        #   改前事件流**只落 hwnd** ⇒ 事后离线无法把一次动作归因到具体应用。
+        #   台账导出实测：1124 次写面动作里 634 次（56.4%）归因不到应用，
+        #   根因就是这里缺字段（不是解析漏读）。
+        #   ★ 身份必须在**动作发生的当下**取：事后靠 hwnd 反查不行 ——
+        #     hwnd 会被 Windows 复用，标题也会变，事后拿到的是别的窗口。
+        #   ★ 取不到（窗口已关/无权访问）就**不写这个键**，不留空壳假装有。
+        # ★ W5-B（2026-10-20）：窗口身份**不只给动作事件**——
+        #   感知类事件（截图/OCR/读树）也带 hwnd，一并补上身份，
+        #   离线才能把「看到了什么」和「哪个应用的窗口」挂上钩。
+        #   ⚠ 身份字段与取值口径**与动作事件完全一致**（同一段代码、同一套键）。
+        _h = args.get("hwnd")
+        try:
+            _h = int(_h) if _h else 0
+        except Exception:
+            _h = 0
+        if _h > 0:
+            _wi = _win_info_for(_h)
+            _t = _wi.get("title") or ""
+            _evp["win"] = {
+                "hwnd": _h,
+                "exe": _wi.get("process") or "",
+                "cls": _wi.get("class") or "",
+                # ★ 标题**只存摘要**（sha256 前 16 位）：标题里常有用户自己的文字
+                #   （文档名、会话标题），明文落盘不该。归因用 exe/cls，够用。
+                #   ★ 与台账 schema.md 口径一致（老栈 act.log 的标题也只落摘要）。
+                "title_hash": (hashlib.sha256(_t.encode("utf-8")).hexdigest()[:16]
+                               if _t else ""),
+                "pid": _wi.get("pid") or 0}
+        # ★ W5-B：**统一补写判词**——判词从此进事件流（台账的真相源之一）。
+        #   改前判词只回给调用方（返回值），**不落盘** ⇒ 事后无人能查
+        #   「当时判成了什么」；台账里的新栈动作只能拿返回码反推，
+        #   于是和「动作发出但画面没变」混成 unknown。
+        #   ⛔ 只加键：事件原有的 args / ok / code 一个字没改。
+        _cv = r.get("verdict_canonical")
+        # ★ W5-B：动作类事件**一律**要有一份判词 —— 连没走到求差那一步的
+        #   （闸门拒了、没通行证、目标不对）也得有，才叫「统一补写」。
+        #   口径与台账 CODE_TABLE 一致：拒=denied、没变=no_effect、判不出=unknown。
+        if (not isinstance(_cv, dict) or not _cv) and tool in _ACTION_TOOLS:
+            _rc = int(r.get("code") or 0)
+            _cv = _canon_verdict(
+                {0: "met", 8: "no_effect", 5: "unknown"}.get(
+                    _rc, "denied" if _rc in (3, 4, 7, 9, 10, 11, 12, 13, 15)
+                    else "unknown"),
+                "gate_code", "回执返回码 %d" % _rc)
+            r["verdict_canonical"] = _cv
+        if isinstance(_cv, dict) and _cv:
+            _evp["verdict_canonical"] = _cv
+        _ex = r.get("evidence")
+        if isinstance(_ex, dict) and _ex:
+            _evp["evidence"] = {k: _ex.get(k) for k in
+                                 ("changed", "bbox", "area_ratio", "verdict",
+                                  "verdict_canonical", "before_png", "after_png",
+                                  "crop_png", "dir")}
         ev = _ev(tool.replace("ctl_", ""), actor=actor, tool=tool,
-                 payload={k: v for k, v in args.items() if k != "token"},
+                 payload=_evp,
                  ok=bool(r.get("ok")), code=int(r.get("code") or 0))
         r["event_id"] = ev
     except Exception:

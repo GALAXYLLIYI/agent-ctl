@@ -42,6 +42,10 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 
 #: 事件 kind。写进 timeline.jsonl（store 是真相源），事件流里查得到每一次触发。
 KIND = "action_anomaly"
+#: ★ P0-1（2026-10-21）：环境性拒绝**只留痕不拉闸**，单独一个 kind。
+#:   为什么单独一个 kind：它不是「异常」，是「这次没轮到动作上场」；
+#:   混进 action_anomaly 会让「一级提示 = 有异常」这条口径失真。
+KIND_BLOCKED = "action_blocked"
 #: 留痕里的 by 值 —— 谁干的。判据第 4 条钉的就是这个字符串。
 BY = "action-anomaly"
 
@@ -57,6 +61,11 @@ _FALLBACK = {
     "hits_to_brake": 2,
     "hint_ttl_sec": 600,
     "action_tools": ["ctl_click", "ctl_type", "ctl_fill", "ctl_focus", "ctl_browser"],
+    # ★ P0-1（2026-10-21）：哪些失败性质**计入** fail_streak。
+    #   默认只算「动作发出去了但没生效」与「真异常」——
+    #   环境性拒绝（没证 / 没租约 / 被挡 / 缺凭据 / 前台不对）重试无意义，不该算信号。
+    "fail_counted_classes": ["no_effect", "action_failed"],
+    "blocked_event": True,
 }
 
 
@@ -197,18 +206,19 @@ _state = {
     "fail": {},     # actor -> {n 连续失败数, last}
     "rate": {},     # actor -> [时间戳, ...]
     "hits": {},     # (判据名, actor|目标) -> 连续命中次数（两级响应就靠它）
+    "blocked": {},  # actor -> {n 环境性拒绝次数, last, class}（★ P0-1：只留痕不计数）
 }
 
 
 def reset_state() -> None:
     """清空所有计数。测试隔离用；生产里**没有**人调它（计数理应跨调用累计）。"""
-    for k in ("same", "fail", "rate", "hits"):
+    for k in ("same", "fail", "rate", "hits", "blocked"):
         _state[k] = {}
 
 
 def _drop_stale(now: float, win: float) -> None:
     """把超过时间窗的计数丢掉 —— 否则计数只增不减，早晚误报。"""
-    for k in ("same", "fail", "hits"):
+    for k in ("same", "fail", "hits", "blocked"):
         for key, rec in list(_state[k].items()):
             if now - float(rec.get("last") or 0) > win:
                 _state[k].pop(key, None)
@@ -228,13 +238,13 @@ class ActionGuard:
         self._path = path
 
     # ── 默认依赖（懒解析，避免与 core 的循环 import）────────────────────
-    def _emit_event(self, payload: dict) -> None:
+    def _emit_event(self, payload: dict, kind: str | None = None) -> None:
         if self._emit is not None:
             self._emit(payload)
             return
         try:
             from agentctl import core
-            core._ev(KIND, actor=payload.get("actor") or "",
+            core._ev(kind or KIND, actor=payload.get("actor") or "",
                      tool=payload.get("tool") or "", payload=payload,
                      ok=(payload.get("stage") == "warn"),
                      code=0 if payload.get("stage") == "warn" else 11)
@@ -256,8 +266,16 @@ class ActionGuard:
 
     # ── 主入口 ──────────────────────────────────────────────────────────
     def observe(self, *, actor: str = "", tool: str = "", args: dict | None = None,
-                ok: bool = True) -> dict | None:
-        """一次动作调一次。返回本次触发的证据（没触发 ⇒ None，**不影响动作本身**）。"""
+                ok: bool = True, failure_class: str | None = None) -> dict | None:
+        """一次动作调一次。返回本次触发的证据（没触发 ⇒ None，**不影响动作本身**）。
+
+        ★ P0-1（2026-10-21）新增 failure_class：
+          「失败」不是一种东西 —— 环境性拒绝（没证/没租约/被挡/缺凭据/前台不对）
+          **重试没有意义**，不该算进「agent 在乱点」的信号；真正该急停的是
+          「动作发出去了但没生效」(no_effect) 与「真异常」(action_failed)。
+          failure_class=None ⇒ **按旧口径计数**（向后兼容：老调用方不传这个参数时，
+          行为与改前完全一致）。
+        """
         pol = load_policy(self._path)
         if not pol.get("enabled", True):
             return None
@@ -272,6 +290,21 @@ class ActionGuard:
         args = args or {}
         tgt = target_key(args)
 
+        # ── ★ P0-1（2026-10-21）：这次失败**算不算数**，先算清楚 ──
+        #   counted = True  ⇒ 动作**真的发出去了**（成功 / 发出去了没生效 / 真异常）
+        #                    ⇒ 进 fail_streak，也进同目标连击
+        #   counted = False ⇒ 环境性拒绝（没证 / 没租约 / 被挡 / 缺凭据 / 前台不对）
+        #                    ⇒ **一个像素都没发出去**：重试它没有意义，
+        #                      更不该被算成「agent 在乱点」的信号
+        #   failure_class=None ⇒ 调用方没给性质 ⇒ **按旧口径**（counted=True，向后兼容）
+        counted_classes = pol.get("fail_counted_classes")
+        if not isinstance(counted_classes, (list, tuple)):
+            counted_classes = _FALLBACK.get("fail_counted_classes")
+        if failure_class is None:
+            counted = True
+        else:
+            counted = str(failure_class) in [str(x) for x in (counted_classes or [])]
+
         # ── 判据 1：同目标连击 ──
         hit_tgt = ""
         if tgt:
@@ -284,17 +317,51 @@ class ActionGuard:
                 for k in [k for k in _state["same"]
                           if k[0] == actor and k != (actor, "#last")]:
                     _state["same"].pop(k, None)
-            n = ((rec.get("n") or 0) + 1) if rec else 1
-            _state["same"][key] = {"n": n, "last": now}
+            # ★ P0-1：动作**没发出去**的尝试不算「连点同一处」——
+            #   连点的危险信号是「agent 在同一个点上反复戳」，
+            #   而被闸门当场拦下（压根没戳）恰恰是闸门在正常工作。
+            if counted:
+                n = ((rec.get("n") or 0) + 1) if rec else 1
+                _state["same"][key] = {"n": n, "last": now}
+            else:
+                n = (rec.get("n") or 0) if rec else 0
             _state["same"][(actor, "#last")] = {"n": 0, "last": now, "t": tgt}
-            if n >= int(pol.get("same_target_streak") or 5):
+            if counted and n >= int(pol.get("same_target_streak") or 5):
                 hit_tgt = tgt
 
         # ── 判据 2：连续失败（成功一次即清零）──
+        #   ★ P0-1（2026-10-21）：**按失败性质分流**。
+        #     counted  = 真失败（动作发出去了但没生效 / 真异常）⇒ 计进 fail_streak
+        #     别的     = 环境性拒绝（没证 / 没租约 / 被挡 / 缺凭据 / 前台不对）
+        #                ⇒ 不加、也不清零（它既不是成功、也不是「乱点」的证据）
+        #     None    = 调用方没传性质 ⇒ **按旧口径计数**（向后兼容）
         rec = _state["fail"].get(actor)
-        fail_n = ((rec.get("n") or 0) + 1) if (rec and not ok) else (0 if ok else 1)
+        if ok:
+            fail_n = 0
+        elif counted:
+            fail_n = ((rec.get("n") or 0) + 1) if rec else 1
+        else:
+            fail_n = (rec.get("n") or 0) if rec else 0
         _state["fail"][actor] = {"n": fail_n, "last": now}
         hit_fail = fail_n >= int(pol.get("fail_streak") or 6)
+
+        # ── 环境性拒绝：只留痕，不进任何计数器（更不拉闸）──
+        #   为什么留痕：它仍然是「这次没成」的事实，事后要能查到；
+        #   为什么不拉闸：拉闸的理由是「agent 在乱点」，而它不是。
+        if (not ok) and (not counted) and failure_class:
+            _state["blocked"][actor] = {"n": (_state["blocked"].get(actor, {}).get("n") or 0) + 1,
+                                        "last": now, "class": failure_class}
+            if pol.get("blocked_event", True):
+                try:
+                    self._emit_event({
+                        "by": BY, "stage": "blocked", "threshold_name": "failure_class",
+                        "failure_class": failure_class, "actor": actor, "tool": tool,
+                        "target": tgt or "（无具体目标）",
+                        "count": _state["blocked"][actor]["n"],
+                        "note": "环境性拒绝：动作一个像素都没发出去 ⇒ 不计入 fail_streak",
+                    }, kind=KIND_BLOCKED)
+                except Exception:
+                    pass
 
         # ── 判据 3：短时高频 ──
         rw = float(pol.get("rate_window_sec") or 60)

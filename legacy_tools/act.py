@@ -12,7 +12,7 @@
 # 结果汇总进 _SELFTEST，**缺失项一次全列**，然后由 _selftest_or_die() 统一拦住。
 import os as _os
 import sys
-import tempfile as _sys
+import sys as _sys
 
 # 托管 Python 的路径特征（本机实测）：
 #   托管：%USERPROFILE%\.workbuddy\binaries\python\versions\<ver>\python.exe
@@ -2203,8 +2203,14 @@ def _img_fp(path):
         return None
 
 
-def do_click(hwnd, name=None, xy=None, dry=False, force_coord=False, retry=1,
+def do_click(hwnd, name=None, xy=None, dry=False, force_coord=False, retry=0,
              post=False, post_force=False):
+    # ★ P0-3（2026-10-21）：retry 默认 **1 → 0**。
+    #   为什么：坐标点击「没变化」时**默认会再点一次** —— 对输入框是多余的一下
+    #   （可能顺手选中一段字），对 toggle 类是「开了又关」。
+    #   「点了没反应」这件事**该由调用方判断**（换定位招 / 换目标），不该由脚本替他多点一次。
+    #   需要重试就显式传 --retry N（契约里 ctl_click 的 retry 参数照旧可传）。
+
     """force_coord=True：**强制走坐标点击**（考核用，专门练 SendInput 那条退路）。
 
     post=True：**后台投递模式** —— 本来要走坐标的那一次点击改用 PostMessage 投给
@@ -2405,6 +2411,15 @@ def do_click(hwnd, name=None, xy=None, dry=False, force_coord=False, retry=1,
     else:
         time.sleep(_settle(450))
         after = {} if dry else evidence(hwnd, "after")
+        # ★ P0-3（2026-10-21；ZCode 评审逮到的真 bug）：**UIA.Invoke / SelectionItem
+        #   这条路径原来从不计算 changed** ⇒ 末尾的 changed is True 恒不成立
+        #   ⇒ 这条路径**恒返回 rc=8**：name 点击即便 Invoke 成功、界面真的变了，
+        #   回执也只说「画面没变化」。桌面窗口的 name 点击路径实际上一直不可用。
+        #   修法：与另两条路径**同口径**比对前后整窗指纹（_img_fp）。
+        if not dry:
+            fp0 = _img_fp(before.get("文件") or "")
+            fp1 = _img_fp(after.get("文件") or "")
+            changed = None if (fp0 is None or fp1 is None) else (fp1 != fp0)
     ev = "" if dry else ("　前图=%s 后图=%s" % (before.get("文件") or "无", after.get("文件") or "无"))
     if not dry and ("拒绝" in before or "拒绝" in after):
         ev += "　⚠ 本次证据不完整"
@@ -2414,6 +2429,11 @@ def do_click(hwnd, name=None, xy=None, dry=False, force_coord=False, retry=1,
         ev += f"　⚠⚠ 页面无变化（点了 {attempts} 次都没反应）—— **别当成功，去核验**"
         if use_post:
             ev += "　⚠ 后台投递无反应：该应用很可能不消费 PostMessage（预扫结论候选＝不兼容）"
+    elif changed is None and not dry:
+        # ★ P0-3：None = **判不了**（前后图取不到），不是「没变」。
+        #   判据 34（unknown 不当成功）与判据 36（文案与数据一致）都盯着这条：
+        #   数据说「判不出」，文案就不许说「画面没变」。
+        ev += "　⚠ 判不了（前后图取不到，指纹比不出来）—— **不许当成功**，去核验"
     if attempts > 1:
         detail["重试次数"] = attempts - 1
     log(f"{'（演练）' if dry else ''}🖱 点击 [{method}] 窗口「{info['title']}」 {json.dumps(detail, ensure_ascii=False)}" + ev)
@@ -3028,7 +3048,7 @@ def main():
                     help="approve：放行几分钟（硬上限 %d 分钟，给再大也压回来）"
                          % TERMINAL_PASS_MAX_MIN)
     ap.add_argument("--coord", action="store_true", help="点击：强制走坐标路径（练 SendInput 退路）")
-    ap.add_argument("--retry", type=int, default=1,
+    ap.add_argument("--retry", type=int, default=0,
                     help="点击：页面无变化时自动重试几次（默认 1；**幂等动作才用**，切换类按钮设 0）")
     ap.add_argument("--vk", default="0x41",
                     help="keys：虚拟键码**或键名**（2026-10-18 P0-B 补了 a~z / A~Z / 0~9 / F1~F12 "

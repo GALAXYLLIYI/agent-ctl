@@ -54,7 +54,8 @@
     "elapsed_ms": "integer",
     "blind_spots": "array<string>，本次结论的盲区（不许隐藏）",
     "warning": "string|null",
-    "notices": "★ 2026-10-07：每个调用都搭载。列出上次调用之后用户那边发生的要紧事件（授权/急停/用户确认），零额外调用。第一次调用返回 _synced 标记 + 启动前最近几条要紧事件。成员 {seq, kind, t, actor, ok, note}，kind 可能是 _synced / _gap / 真实 kind。字段不存在意味着这一次拿不到事件流，不得当成没事发生。"
+    "notices": "★ 2026-10-07：每个调用都搭载。列出上次调用之后用户那边发生的要紧事件（授权/急停/用户确认），零额外调用。第一次调用返回 _synced 标记 + 启动前最近几条要紧事件。成员 {seq, kind, t, actor, ok, note}，kind 可能是 _synced / _gap / 真实 kind。字段不存在意味着这一次拿不到事件流，不得当成没事发生。",
+    "failure_class": "★ 2026-10-21（P0-1）：本次失败的**性质标签**，**只在失败时出现**（成功时字段不存在）。rejected_env = 动作一个像素都没发出去（没证 9 / 没租约 10 / 被别的窗挡 12 / 缺凭据 12 / 前台或稳定性不对 5 / 找不到控件 4 / 敏感窗 3 / 急停中 11）⇒ 重试它没有意义，换招或换序；no_effect = 动作发出去了但画面没变（code=8）⇒ 多半是目标不对；action_failed = 真异常（内部错误 15）。★ 它的用处：动作面急停的 fail_streak **只计** no_effect 与 action_failed —— 环境性拒绝不再把「agent 在乱点」这个信号灌满。（2026-10-21 实测事故：同一坐标连续 8 次环境性失败曾连锁触发急停 → 吊销租约 → 后续动作全被拒的正反馈。）"
   },
   "error_codes": {
     "0": "成功",
@@ -597,8 +598,8 @@
           },
           "retry": {
             "type": "integer",
-            "default": 1,
-            "description": "点击后无变化则自动重试；切换类按钮请显式 0"
+            "default": 0,
+            "description": "★ 2026-10-21（P0-3）默认 **0**：坐标点击「没变化」时**不再自动重点一次**（对输入框是多余的一下、可能顺手选中一段字；对 toggle 是「开了又关」）。「点了没反应」由调用方判断（换定位招 / 换目标）；确要重试就显式传 N。"
           },
           "dry_run": {
             "type": "boolean",
@@ -1003,7 +1004,7 @@
     {
       "name": "ctl_brake",
       "title": "急停",
-      "description": "急停通道之一，共四条：① 全局热键 Ctrl+Alt+Home（独立常驻进程 brake-daemon）② 控制面板的「⏹ 终止 / ▶ 解除急停」按钮 ③ 本接口 ctl_brake ④ 状态文件 %LOCALAPPDATA%\\AgentCtl\\_急停.flag（由上述三者写入）。任一生效即停一切控制动作（含 A 级感知），且必须留痕（谁、什么时候、为什么）。⚠ 该状态文件 2026-10-04 已从桌面迁走到上面那个位置；旧桌面文件不再被任何组件读取。",
+      "description": "急停通道之一，共四条：① 全局热键 Ctrl+Alt+Home（独立常驻进程 brake-daemon）② 控制面板的「⏹ 终止 / ▶ 解除急停」按钮 ③ 本接口 ctl_brake ④ 状态文件 %LOCALAPPDATA%\\AgentCtl\\_急停.flag（由上述三者写入）。任一生效即停一切控制动作（含 A 级感知），且必须留痕（谁、什么时候、为什么）。⚠ 该状态文件 2026-10-04 已从桌面迁走到上面那个位置；旧桌面文件不再被任何组件读取。 ★★ 2026-10-21（P0-2）：**agent 侧只允许 action=stop / status**；action=release 一律被拒（code=9）—— 「刹车能被被刹者拆掉，就不叫刹车」（2026-10-21 现场：agent 连解三次自己触发的急停）。解除急停必须由人做，两条人路都会留痕：① 面板上的「▶ 解除急停」按钮 ② 命令行 AgentCtl.exe brake --action release --confirm-release",
       "annotations": {
         "readOnlyHint": false,
         "destructiveHint": true,
@@ -1020,7 +1021,8 @@
               "stop",
               "release",
               "status"
-            ]
+            ],
+            "description": "★ agent 侧只认 stop / status；release 会被拒（code=9），并告诉你人怎么解。（停是安全方向，永远允许；解是人的动作。）"
           },
           "why": {
             "type": "string"
@@ -1392,6 +1394,53 @@
         "additionalProperties": true
       },
       "returns": "{ window, sensitive, channels{uia,ocr,cdp}, frame, auth, verdict, advice }"
+    },
+    {
+      "name": "ctl_quiz",
+      "title": "超星客观题",
+      "description": "超星/学习通 客观题作答通道（**只答不提交**）。action=status 看页面/题数/已答；dump 抽题面落盘；truth 从「作业详情」页抽标准答案（**有标准答案就别硬答**）；apply 按答案表灌入（按原始 key 定位 + 幂等，单选再点会取消）；verify 逐题回读校验（不一致必须为 0）；save 调「暂时保存」落草稿。⛔ **没有提交动作** —— 交卷永远由人点。全程 CDP（DOM 级），不发真实键鼠动作。★ 选项乱序（randomOptions）⇒ 必须按原始 key（span.num_option 的 data）定位，按显示字母会点错题；★ 判断题 key 是 true/false、多选 key 是字母串，两者拆分规则不同。",
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true
+      },
+      "gate": "A/B",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "status",
+              "dump",
+              "truth",
+              "apply",
+              "verify",
+              "save"
+            ],
+            "description": "status=看页面与进度；dump=抽题面落盘；truth=抽标准答案（详情页）；apply=灌答案；verify=逐题回读校验；save=暂存草稿。"
+          },
+          "port": {
+            "type": "integer",
+            "default": 9222,
+            "description": "CDP 调试端口，与 ctl_browser launch 的 port 传同一个值。"
+          },
+          "answers": {
+            "type": "string",
+            "description": "答案表：文件路径 或 内联 JSON。形状支持 {\"qid\":\"A\"} / {\"qid\":[\"A\",\"B\"]} / {\"qid\":{\"keys\":\"AB\"}}。不填则用 work\\quiz\\answers.json。"
+          },
+          "out": {
+            "type": "string",
+            "description": "落盘路径（dump/truth 用）；不填则 work\\quiz\\questions.json / truth.json。"
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "additionalProperties": false
+      },
+      "returns": "统一信封（ok/code/data/warning/…）。data 里：status→{页面:[{类型,在,题数,已答,详情页带标准答案}]}；dump/truth→{题数,落盘[,含标准答案]}；apply→{改动,题数}；verify→{题数,不一致,未作答,判定:PASS/FAIL,明细}；save→{暂存,已答}。"
     }
   ],
   "_本版未列入（v1.1 补，列在这里是为了不和设计文档的完整清单打架）": {
@@ -1418,5 +1467,6 @@
     "step_5": "GET /v1/events?from=...&to=...  → 复核"
   },
   "_2026-10-14_T1窗1": "schema_version 4 → 5。本轮改动全是**文档/文案**性质：①conventions 新增 edge_border_hint（含「接线未生效要如实报告」的前提句，并写死「边框不是传感信号、无边框≠安全、以 ctl_status 为准」）；②conventions.capture_binding 新增 ttl_sec=15 与 ttl_source（2026-10-14 实测 gate.py 的 CAPTURE_TTL 常量，非派单口径）；③conventions.coordinates 补明「只有这一套、--xy 原样收不换算」（DSH 裁定 D3 不成立）；④新增 conventions._写动作三步_唯一定义处 指针（唯一定义处＝docs\\AGENT接口.md §3-bis，避免第二真源）；⑤ctl_click 的 description/eid/name/xy 四处描述文案按 D1/D2 改写。⛔ **未动任何工具的 input_schema 结构**（properties 的键集、types、enum、required、additionalProperties 全部原样，只改 description 文本）；⛔ 未增删改任何 error_codes / event_codes。",
-  "_2026-10-07_白名单废止": "用户指示「不整名单限制，每次都问」。legacy_tools/whitelist.json 已作废：里面的 8 个条目一次性转成了 asked_targets.json 里的放行记录，之后不再读。现在起，任何**没见过**的窗口第一次被操作时都会弹窗问用户；同意一次管 30 分钟。**敏感窗口黑名单不在这条里** —— 用户自己的授权弹窗（标题 DSH电脑控制授权）任何动作一律禁止，不问、不放行。"
+  "_2026-10-07_白名单废止": "用户指示「不整名单限制，每次都问」。legacy_tools/whitelist.json 已作废：里面的 8 个条目一次性转成了 asked_targets.json 里的放行记录，之后不再读。现在起，任何**没见过**的窗口第一次被操作时都会弹窗问用户；同意一次管 30 分钟。**敏感窗口黑名单不在这条里** —— 用户自己的授权弹窗（标题 DSH电脑控制授权）任何动作一律禁止，不问、不放行。",
+  "_2026-10-21_P0-1_failure_class": "P0-1 失败分类。**加的是可选字段**：既有字段名 / types / enum / required / 错误码一个字未动，工具的 input_schema 也没动 ⇒ 按 §_2026-10-14_T1窗1 的同一口径（升 schema_version 等于对外宣称接口不兼容，那是谎报），本次**不升** schema_version（仍是 5）。★ 如果将来 failure_class 变成必填、或改了取值语义，就该升到 6 并同步 w1 / wF 两条钉子。同批改动（源码侧）：core.py 加 failure_class()；action_guard.observe() 收 failure_class，rejected_env 不计入 fail_streak 与同目标连击，改为单独留痕 kind=action_blocked。"
 }

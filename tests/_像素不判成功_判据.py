@@ -87,6 +87,11 @@ _INJ = LF.join([
         "        return 0",
 ])
 
+# ★ P0-3（2026-10-21）：把「UIA.Invoke 路径不算 changed」注入回去
+#   ⇒ 第 (3) 条必须变红（证明这一条真有判别力，不是恒绿）。
+_INJ3_OLD = '            changed = None if (fp0 is None or fp1 is None) else (fp1 != fp0)'
+_INJ3_NEW = '            changed = None  # ★注入：Invoke 路径不算 changed（回到真 bug）'
+
 
 def main():
     inject = "--inject" in sys.argv
@@ -102,6 +107,11 @@ def main():
     if inject:
         text = text + LF + _INJ
         print(("（--inject：已注入 if _kch: return 0 => 期望 (1) 红）"), flush=True)
+        if _INJ3_OLD in text:
+            text = text.replace(_INJ3_OLD, _INJ3_NEW, 1)
+            print("（--inject：已把 UIA.Invoke 路径的 changed 计算去掉 => 期望 (3) 红）", flush=True)
+        else:
+            print("（--inject：★没找到 Invoke 路径那一行（真源已变），第 (3) 条只能验不了）", flush=True)
     lines = text.split(LF)
 
     bad = []
@@ -122,6 +132,30 @@ def main():
     rec("(2) 既已自述像素判不出真相，就不许再用像素判生效", not (n_dis and n_pix),
         ("自述告诫 %d 处 与 像素判生效 %d 处 **并存** => 自相矛盾" % (n_dis, n_pix))
         if (n_dis and n_pix) else ("自述 %d 处 / 像素判生效 %d 处" % (n_dis, n_pix)))
+
+    # ── (3) ★P0-3（2026-10-21）：**UIA.Invoke 路径必须算 changed** ──
+    #   治的病（ZCode 评审逮到的真 bug）：do_click 里 UIA.Invoke / SelectionItem
+    #   那条分支**从不计算 changed** ⇒ 末尾 changed is True 恒不成立 ⇒ 恒返回 rc=8
+    #   ——「name 点击即便 Invoke 成功、界面真的变了，回执也说画面没变化」。
+    #   ⇒ 桌面窗口的 name 点击路径实际上一直不可用。
+    #   判据形态：找到「else: after = {} if dry else evidence(hwnd, "after")」那一支，
+    #   往后 12 行内必须出现 changed 的赋值。
+    anchor = 'after = {} if dry else evidence(hwnd, "after")'
+    idx = text.find(anchor)
+    bad3 = []
+    if idx < 0:
+        bad3.append("act.py 里找不到 UIA.Invoke 那条分支的锚点（真源结构变了）")
+    else:
+        seg = text[idx:idx + 1800]
+        if "changed = None if (fp0 is None or fp1 is None) else (fp1 != fp0)" not in seg:
+            bad3.append("UIA.Invoke 分支后面没有算 changed ⇒ 这条路径恒返回 rc=8")
+        if "判不了" not in seg:
+            bad3.append("Invoke 分支没说「判不了」（None 被说成「画面没变」= 文案与数据不一致）")
+    if "def do_click(hwnd, name=None, xy=None, dry=False, force_coord=False, retry=0" not in text:
+        bad3.append("do_click 的 retry 默认值不是 0（无变化时又自动重点一次）")
+    rec("(3) ★P0-3：UIA.Invoke 路径必须算 changed + None 说「判不了」 + retry 默认 0",
+        not bad3, ("；".join(bad3)) if bad3 else
+        "Invoke 路径算 changed；None 说判不了；retry 默认 0")
 
     if RED:
         print((LF + "红 %d：%s" % (len(RED), "；".join(RED))), flush=True)

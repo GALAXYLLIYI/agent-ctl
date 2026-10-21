@@ -9,7 +9,13 @@
   "_same_target_streak说明": "同一 actor 连续对同一坐标/eid/name 动作 N 次算命中。防误报的第一道：正常人同一按钮点两下不算。",
 
   "fail_streak": 6,
-  "_fail_streak说明": "同一 actor 连续失败 N 次算命中（成功一次即清零）。",
+  "_fail_streak说明": "同一 actor 连续失败 N 次算命中（成功一次即清零）。★ P0-1（2026-10-21）：只计「动作真的发出去了但没生效」与「真异常」——环境性拒绝（没证/没租约/被挡/缺凭据/前台不对）**不计入**，见 fail_counted_classes。",
+
+  "fail_counted_classes": ["no_effect", "action_failed"],
+  "_fail_counted_classes说明": "哪些失败性质计入 fail_streak。no_effect=发出去了但画面没变（code=8）；action_failed=真异常（内部错误/动作抛异常）。rejected_env（前置拒绝：3/4/5/7/9/10/11/12/13）**不计入**——重试它没有意义，却会把「agent 在乱点」这个信号灌满（2026-10-21 实测：8 次环境性失败 → 拉急停 → 吊销租约 → 后续全拒的正反馈）。",
+
+  "blocked_event": true,
+  "_blocked_event说明": "环境性拒绝是否单独留痕（kind=action_blocked，只留痕不拉闸、不计数）。留痕的理由：它仍然是「这次没成」的事实，事后要查得到；不拉闸的理由：拉闸是给「agent 在乱点」用的。",
 
   "rate_per_min": 60,
   "rate_window_sec": 60,

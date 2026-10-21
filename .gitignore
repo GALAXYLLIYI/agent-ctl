@@ -60,6 +60,12 @@ tools/*
 #   smoke_clean_clone 是"每次发版必跑"的脚本，不在仓就永远只有本机跑得动。
 !tools/legacy_ledger.json
 !tools/smoke_clean_clone.py
+# ★ 2026-10-21（Codex）：「既开既用」那套的**运行期硬依赖** ——
+#   守护_mcp_http.py（登录自启 + 看门狗 + 令牌对账）与 自检_mcp_http.py（六项自检）
+#   是 install.ps1 第 6/7 步**直接调用**的 ⇒ 不在仓 = 干净克隆装完没有守护、
+#   也没有自检 ⇒ 属于「静默缺件」（与上面那批发布链路脚本同一性质）。
+!tools/守护_mcp_http.py
+!tools/自检_mcp_http.py
 # ★ C3（2026-10-12）：`tools\验动作.py` / `tools\闭环.py` 的白名单**已撤**。
 #   这两份的真源是 `dsh-viewer-plugin\tools\`，产物落在 `legacy_tools\`（由 gen_legacy 生成）。
 #   在 tools\ 再留一份 tracked 副本 = **第二真源**，而第二真源正是本项目反复出病的根。

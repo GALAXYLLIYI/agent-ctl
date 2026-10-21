@@ -150,6 +150,23 @@ AgentCtl 是这台 Windows 机器上**电脑控制的唯一入口**：看屏幕�
 | `12` | capture_id 过期/画面变了 | 重新 `ctl_shot` 拿新 id，再动手 |
 | `15` | **服务内部错误**（服务自己抛了异常/出了故障） | ⛔ **别重试、别申请通行证、别重扫窗口/控件树** —— 那些处方都治不了它。看 `warning` 里的**异常类型与消息**，连同它一起**报告用户**。 |
 
+### 2.1-ter ★ failure_class —— 这次失败**属于哪一类**（2026-10-21 新增）
+
+失败回执里**多一个字段** `failure_class`（**只在失败时出现**；成功时这个字段不存在）。
+它**不新增错误码**，只给已有的 code 贴一个性质标签，好让你知道**该不该原地重试**：
+
+| failure_class | 含义 | 典型 code | 你该干什么 |
+|---|---|---|---|
+| `rejected_env` | 动作**一个像素都没发出去**（环境不满足） | 3 / 4 / 5 / 7 / 9 / 10 / 11 / 12 / 13 | **换招或换序**，⛔ 别原地重试 —— 再点一次还是被挡 |
+| `no_effect` | 动作**发出去了**，但画面没变 | 8 | 去核验目标对不对；换定位招（xy → eid → name → OCR → CDP） |
+| `action_failed` | 真异常（服务自己炸了） | 15 | 停手，把异常类型与消息报给用户 |
+
+★ **为什么加它**（2026-10-21 实测事故）：以前「环境不满足」与「动作没生效」在系统的失败计数里
+是**同一个桶** —— 于是**同一坐标连续 8 次环境性拒绝**（被别的窗挡 / 前台不是它 / 缺凭据）
+会连锁触发动作面急停 → 急停连带吊销租约 → 后续动作全被拒 → 更多失败（**正反馈**）。
+现在环境性拒绝**不计入**失败计数（只留痕，事件 kind=`action_blocked`），
+真正该急停的「点了没点到」（no_effect）与真异常（action_failed）照旧。
+
 ### 2.1-bis ★ 事件级内部码（⚠️ **不是信封码**，查不到别当文档漏了）
 
 下面这个码**只会**出现在 `ctl_timeline` 的 `data.events[].code` 里，**永远不会**作为信封的 `code` 返回。
@@ -209,6 +226,14 @@ AgentCtl 是这台 Windows 机器上**电脑控制的唯一入口**：看屏幕�
 
 > ⛔ **别处不要复述这三步。** 契约 `conventions`、`ctl_status` 的返回、设计文档都只放**指针**。
 > 同一段话写两遍就会漂，漂了就等于没有规矩。
+
+> ★ **网页场景其实有两条路**（2026-10-20 补，别只记一条）：
+> 本节写的是**屏幕坐标路线**（UIA/OCR → 坐标 + `from_capture`）；
+> 另一条是 **CDP 路线**（`ctl_browser`：直接读 DOM、跑 JS、导航、截图，**一帧像素都不碰**）。
+> **能用 CDP 的网页优先 CDP** —— 更准、不抢你鼠标、且不受窗口遮挡影响。
+> CDP 那条线的完整接线图（浏览器怎么开调试端口、`cdp.py` 在哪一层过闸、
+> CLI/MCP/面板怎么三态同源、2026-10-20 实测出来的六条硬事实与故障自查）
+> 见 **[浏览器CDP接线图.md](浏览器CDP接线图.md)**。
 
 **为什么网页要单独开一节**：Chromium 内核的页面内容深于 10 层，而 `--name` 那条老路径是
 `find_control(hwnd, name, max_depth=10)`（`legacy_toolsct.py` 的 `find_control()`，真源 `dsh-viewer-plugin	oolsct.py`）
@@ -330,12 +355,24 @@ GET /v1/events?event_id=10231&limit=5
 | `ctl_shot` | `POST /v1/perceive/shot` | `hwnd`(省略=整屏), `region`=[l,t,r,b], `scale`(0.5), `format`("jpeg"), `quality`(70), `inline`(false), `look`(false), `why`("") |
 | `ctl_tree` | `POST /v1/perceive/tree` | `hwnd`*, `max_nodes`(600), `max_depth`(25), `roles`(["interactive","text"]), `detail`(false) |
 | `ctl_find` | `POST /v1/perceive/find` | `hwnd`*, `query`*, `limit`(40), `max_nodes`(3000), `detail`(false) |
-| `ctl_click` | `POST /v1/act/click` | `hwnd`*, 定位方式：**`xy`=[x,y] ＋ `from_capture`（最稳，网页场景就用它，见 §3-bis）** ／ `eid`（配 `expect`；**D1 已修好、可跨调用**，窗口内容变化后返回 `STALE_SCREEN` 需重扫）／ `name`（**网页里只命中外壳**，桌面窗口才适用）；`button`("left"), `retry`(1), `dry_run`(false) |
+| `ctl_click` | `POST /v1/act/click` | `hwnd`*, 定位方式：**`xy`=[x,y] ＋ `from_capture`（最稳，网页场景就用它，见 §3-bis）** ／ `eid`（配 `expect`；**D1 已修好、可跨调用**，窗口内容变化后返回 `STALE_SCREEN` 需重扫）／ `name`（**网页里只命中外壳**，桌面窗口才适用）；`button`("left"), `retry`(**0** —— 2026-10-21 起默认**不**自动重点一次), `dry_run`(false) |
 | `ctl_type` | `POST /v1/act/type` | `hwnd`*, `text`*, `clear`(true), `force_send`(false) |
 | `ctl_fill` | `POST /v1/act/fill` | `hwnd`*, `xy`*, `from_capture`*, `text`*, `clear`(true) |
 | `ctl_lease` | `POST /v1/lease` | `action`*("acquire"/"renew"/"release"/"status"), `actor`, `scopes`=["B"], `ttl_sec`(600，上限 600) |
 | `ctl_authorize` | `POST /v1/authorize/request` | `scopes`*(["A"]/["B"]/["C"]/["D"] 可多选), `minutes`(10), `acts`(20), `reason`* |
-| `ctl_brake` | `POST /v1/brake` | `action`*("stop"/"release"/"status"), `why` |
+| `ctl_brake` | `POST /v1/brake` | `action`*("stop"/"status" —— **agent 侧只许这两个**), `why` |
+
+> ★★ **2026-10-21（P0-2）：agent 侧 `ctl_brake` 只允许 `stop` 与 `status`**，`action=release` 一律被拒（`code=9`）。
+> 理由：**「刹车能被被刹者拆掉，就不叫刹车」** —— 2026-10-21 现场，agent 用这个接口连解三次自己触发的急停。
+> 解除急停是**人的动作**，两条人路（都会留痕）：① 面板上的「▶ 解除急停」按钮
+> ② 命令行 `AgentCtl.exe brake --action release --confirm-release`（**必须带 `--confirm-release`**）。
+> ⚠ `stop` 是安全方向，**永远允许** —— 堵的只是「自己拆自己的刹车」。
+> ★★ **2026-10-21（P0-3）`ctl_click` 的 `retry` 默认从 1 改成 0**：
+> 以前坐标点击「画面没变化」时**默认会再点一次** —— 对输入框是多余的一下（可能顺手选中一段字），
+> 对 toggle 类是「开了又关」。现在「点了没反应」**由你判断**（换定位招：xy → eid → name → OCR → CDP；
+> 或换目标），确要重试就显式传 `retry=N`。
+> 同期修的真 bug：**`name`（UIA.Invoke）那条路径原来从不计算前后指纹 ⇒ 恒回 `code=8`** ——
+> 「Invoke 成功、界面真的变了，回执却说画面没变化」。现在它与另两条路径同口径比对前后整窗指纹。
 | `ctl_timeline` | `GET /v1/events?…` | `from`, `to`, `event_id`, `frame_id`, `actor`, `tool`, `kinds`=[…], `limit`(200，上限 2000), `include_restricted`(false) |
 | `ctl_wait` | POST /v1/wait | `kind`*, `actor`, `since_seq`, `timeout_sec`*(120, 上限 600) |
 | `ctl_replay` | `POST /v1/replay` | 二选一：`around_event` 或 `from`+`to`；`pad_sec`(5), `fps`(8), `formats`(["avi","contact_sheet","manifest"]) |
@@ -576,14 +613,80 @@ ctl_click    --actor <你> --hwnd <hwnd> \
 
 > 最后更新：2026-10-13 22:39｜S5 补两处 code=5 的情形（**纯文档**）：① §2.1 的 `code=5` 那一行补上「**被模态对话框挡住**（`data.blocked_by='modal_dialog'`）」与「**老脚本返回了没约定的码**（`data.unknown_rc=true`）」两种情形，并给出**各自对应的处置** —— 原处方只说「重新观测」，照着做会去重扫坐标，而模态情形该做的是**先关掉那个弹窗**；② §2 的信封 `data` 那行补一句，指名这两个**机读标记**，否则只读这份文档的 agent 看不到它们的存在。**没有新增错误码**（码表仍是 `src\agentctl\gate.py` 那一张）。⛔ 本轮**没碰** `code=13`/`14` 两行 —— 那属代码侧缺口，由 DSH 另立一单修代码，不在本文档单里迎合。
 
-> 最后更新：2026-10-14 01:2x｜**S7 补契约侧归口**（**纯文档，不动代码**）：`code=13` 已从「信封码」语义里**移出**、改记为**事件级内部码**（见上文 §2.1-bis：它只会出现在 `ctl_timeline` 的 `data.events[].code` 里，含义是**录制自保护停录**，身份是「服务把信封码镜像进事件行」之外的**手写内部码**）；`code=14` 已**从本文档撤出**（服务没起来就没有进程、没有信封——**结构上不可能有码**，真实表现是连接被拒）。契约 `contract\tools.json` 同步：`error_codes` 收窄为 `0/3/4/5/7/8/9/10/11/12`、新增 `event_codes`（`13` 在其中）、`schema_version` 2→3。
+> 最后更新：2026-10-14 01:2x｜**S7 补契约侧归口**（**纯文档，不动代码**）：`code=13` 已从「信封码」语义里**移出**、改记为**事件级内部码**（见上文 §2.1-bis：它只会出现在 `ctl_timeline` 的 `data.events[].code` 里，含义是**录制自保护停录**，身份是「服务把信封码镜像进事件行」之外的**手写内部码**）；`code=14` 已**从本文档撤出**（服务没起来就没有进程、没有信封——**结构上不可能有码**，真实表现是连接被拒）。契约 `contract\tools.json` 同步：`error_codes` 收窄为 §0/3/4/5/7/8/9/10/11/12`、新增 `event_codes`（`13` 在其中）、`schema_version` 2→3。
 > ★ 上一段（S5）末尾那句「本轮**没碰** `code=13`/`14`」是**它当时如实**的（它按边界没动）；**本轮 S7 动了**，故补此段——**不是改它的原话，是接在后面**。
 
 > 最后更新：2026-10-14 01:5x｜**新增 `15 = 服务内部错误`**（本轮唯一改动）：§2.1 表加了一行 `15`，处方是
 > 「别重试、别申请通行证、别重扫窗口；看 `warning` 里的异常类型与消息并报告用户」。为什么值得有它：以前诸如
 > dispatch 兜底、读元素树/事件流/出片抛异常、UIA 不可用，**全都落 `4`（找不到控件）** ⇒ agent 照着 4 的处方去
 > **重扫窗口**，白费力气还把排查引偏。
-> ⚠️ **更正上面 S7 那段里的码表清单**：`error_codes` 现在是 `0/3/4/5/7/8/9/10/11/12/15`
+> ⚠️ **更正上面 S7 那段里的码表清单**：`error_codes` 现在是 §0/3/4/5/7/8/9/10/11/12/15`
 > （S7 写的那 10 个在那一刻是对的，本轮新增 `15`）；`event_codes` 仍只有 `13`。
 >
 > 最后更新：2026-10-14 03:0x｜**T1 窗1（W1-A 网页场景 SOP ＋ W1-B 边框口径）**：① 新增 **§3-bis「网页场景正确姿势」** —— **唯一**定义「写动作三步」的地方（全项目别处只放指针，别复述）；② §3 与 §4.5/§4.6-bis/§7/§8 里 **「eid 优先 → 控件名 → 坐标」那一族说法全部改掉** —— 它们在 D1（eid 的 roles 口径不一致）修好之前是在教 agent 点歪：现在统一为「**坐标 ＋ `from_capture` 最稳**」，`eid` 不许跨调用用，`name` 在网页里只命中外壳；③ §3 补明**坐标只有一套（屏幕物理像素）、`--xy` 原样收不需要任何换算**，并把 capture_id 的 TTL 按代码实测值写成 **15 秒**（原为派单口径，本轮已核 `gate.py` 的 `CAPTURE_TTL` 常量）；④ §0 补一条边框提示，并写死「**边框不是传感信号、无边框 ≠ 安全，以 `ctl_status` 为准**」。本轮**未新增/未改动任何错误码**，**未动任何 `input_schema` 结构**。
+
+
+## §3-ter　MCP 的两种传输，和「Transport closed」的处置
+
+| 传输 | 配置名 | 地址 | 谁活着 | 典型死法 |
+|---|---|---|---|---|
+| stdio | `agentctl` | `<用户目录>\.codex\mcp\run_agentctl.cmd` | **宿主**（Codex）持有 stdin 管道 | 父进程一断管道，server 收到 EOF 就得退出（MCP 规范也要求退出） |
+| Streamable HTTP | `agentctl_http` | `http://127.0.0.1:8761/mcp` | **我们自己**（常驻进程） | 进程被杀才死；宿主在不在都不影响 |
+
+★ **传输层不是授权层**：两种传输走的是同一个 `core.dispatch()`，
+通行证（A/B/C）、单写者租约、三条急停、动作额度，**一道不少**。
+「谁都能连上 8761」≠「谁都能动手」——动手还是那套闸门。
+
+### SOP：工具在列表里，一调就 `Transport closed`
+
+1. **不要在 server 侧找原因** —— 那不是崩溃，是父进程把管道关了。
+2. 看日志 `%LOCALAPPDATA%\AgentCtl\mcp_server.log`；末行若是
+   `stdin 结束（EOF / 父进程断开）⇒ server 退出`，就是 stdio 的命门。
+   本机实测就是这个死因：`tools/call ctl_quiz -> ok=True code=0`，6 秒后 EOF 退出。
+3. 处置：**① 重启 Codex 会话**；**② 或改走 HTTP 入口**（常驻，不随宿主死）。
+4. ⛔ **别给 stdio 加心跳/重试** —— stdin EOF 之后没法 reopen，往里写只会 `OSError`。
+   重连永远是宿主的事，而我们改不了宿主 ⇒ 只能换一个不靠宿主连接的传输。
+
+### HTTP 入口怎么用
+
+- 常驻服务：`<用户目录>\.codex\mcp\run_mcp_http.cmd`
+  （已放进启动文件夹 ⇒ 登录自启；端口被占用时会自动让位，不顶掉已跑的实例）
+- 令牌：`agent-ctl\work\state\token`；Codex 侧用
+  `--bearer-token-env-var AGENTCTL_MCP_TOKEN`（用户环境变量已写好）
+- 体检：`curl -s http://127.0.0.1:8761/v1/health`
+- 端到端自测：`python -X utf8 agent-ctl\work\_mcp_http_test.py`
+  （initialize / tools/list / tools/call / 错 token 401 / GET 405）
+- 协议：`POST /mcp`，JSON-RPC 2.0，请求头 `Authorization: Bearer <token>`；
+  响应头带 `Mcp-Session-Id: agentctl-mcp-1`（常量会话）。
+
+### ★ 客户端 Accept 头的顺序，决定服务端回 JSON 还是 SSE（2026-10-21 00:00 实测）
+
+rmcp（Codex 的 MCP 客户端）发的是：
+
+```
+accept: text/event-stream, application/json
+```
+
+**SSE 排在前面**。于是有三个坑叠在一起，报错却长得像网络故障：
+
+1. 服务端若按「Accept 里含 text/event-stream 就回 SSE」判断 ⇒ 走进 SSE 分支；
+2. SSE 若用 chunked 且**不写结束块**（长连接，等服务端主动消息）⇒ 客户端
+   （reqwest）会把响应体**整个读完**，于是**干等到超时**；
+3. 超时/读流失败在 reqwest 里统一报成
+   `error sending request for url (...), when send initialize request`
+   —— **看着像网络错，其实在等流结束**。
+
+⇒ 本服务的取法：**Accept 同时含 `application/json` 时一律回 JSON**（Content-Length 明确、
+body 一次读完）；只有客户端**只**接受 `text/event-stream` 才回 SSE，且 SSE **必须写结束块**。
+
+⇒ 排查这类「连上了却握手失败」时的正确顺序：
+**先看服务端日志有没有收到这个请求**（本服务每次 POST 都记一行
+`HTTP POST 令牌=有 鉴权=过 actor=… ua=…`）—— 收到就说明**连接、鉴权、配置全对**，
+问题在**响应形态**；根本没收到才是连接/环境变量的事。
+
+⚠️ 顺带两条：
+- `Content-Type` 要**精确**是 `application/json`（别带 `; charset=utf-8`）——
+  rmcp 对 content-type 做字符串相等判断。
+- rmcp 退出时会 `DELETE /mcp` 删会话；不实现的话会打一条
+  `fail to delete session: ... DELETE returned HTTP 501` 的噪音日志。
+

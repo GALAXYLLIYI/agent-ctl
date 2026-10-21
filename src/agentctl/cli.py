@@ -36,6 +36,7 @@ ALIAS = {
     "click": "ctl_click", "type": "ctl_type", "fill": "ctl_fill",
     "authorize": "ctl_authorize", "replay": "ctl_replay",
     "record": "ctl_record", "browser": "ctl_browser",
+    "quiz": "ctl_quiz",          # 2026-10-20：超星客观题（只答不提交）
 }
 
 
@@ -183,7 +184,19 @@ def main() -> int:
         print(render_help(tools[tool], cmd))
         return 0            # 主动求帮助 = 正常请求
     args = parse_args(argv[1:])
-    r = core.dispatch(tool, args, actor=os.environ.get("AGENTCTL_ACTOR", "cli"))
+    # ★★ P0-2（2026-10-21）：**解除急停是人的动作** —— 命令行必须显式确认。
+    #   为什么：agent 用自己的工具接口（ctl_brake --action release）解掉自己触发的
+    #   急停，等于「刹车能被被刹者拆掉」（2026-10-21 现场连解三次）。
+    #   现在两条人路都留痕：① 面板「▶ 解除急停」按钮 ② 本命令（必须带 --confirm-release）。
+    #   ★ 诚实边界：这一条堵的是「顺手自解锁」；shell 层面直接删旗子文件不在本条范围。
+    _release = (tool == "ctl_brake" and str(args.get("action") or "").lower() == "release")
+    if _release and not ("--confirm-release" in argv[1:] or args.get("confirm_release")):
+        print("⛔ 解除急停是**人的动作**，命令行必须显式确认。", file=sys.stderr)
+        print("   AgentCtl.exe brake --action release --confirm-release", file=sys.stderr)
+        print("   （面板上的「▶ 解除急停」按钮同样可以，两边都会留痕）", file=sys.stderr)
+        return 2        # 用法错误 = 2（不是 1：1 留给「调用了但失败」）
+    r = core.dispatch(tool, args, actor=os.environ.get("AGENTCTL_ACTOR", "cli"),
+                      human=_release)
     print(json.dumps(r, ensure_ascii=False, indent=1))
     if r.get("ok"):
         return 0

@@ -78,7 +78,7 @@ function Bad { param([string]$m) Write-Host "[X] $m" -ForegroundColor Red }
 function Good { param([string]$m) Write-Host "[OK] $m" -ForegroundColor Green }
 
 # ─────────────────────────────────────────────────────────────
-Step '0/6  环境自检'
+Step '0/7  环境自检'
 # ─────────────────────────────────────────────────────────────
 if ($PSVersionTable.PSVersion.Major -lt 5) {
     Bad "PowerShell 版本太低（$($PSVersionTable.PSVersion)）。请用 Windows PowerShell 5.1 或 PowerShell 7+。"
@@ -91,7 +91,7 @@ $AppDir = Join-Path $Dir 'app'
 Say "安装根目录：$Dir"
 
 # ─────────────────────────────────────────────────────────────
-Step '1/6  找 Python（没有就用 winget 装）'
+Step '1/7  找 Python（没有就用 winget 装）'
 # ─────────────────────────────────────────────────────────────
 function Find-Python {
     $try = @()
@@ -160,7 +160,7 @@ $pyw = Join-Path (Split-Path $py.Exe -Parent) 'pythonw.exe'
 if (-not (Test-Path $pyw)) { Bad "找不到 pythonw.exe（面板要无窗口运行）：$pyw"; exit 3 }
 
 # ─────────────────────────────────────────────────────────────
-Step '2/6  取安装包'
+Step '2/7  取安装包'
 # ─────────────────────────────────────────────────────────────
 $tmp = Join-Path ([IO.Path]::GetTempPath()) ('agentctl_inst_' + [guid]::NewGuid().ToString('N').Substring(0, 8))
 $null = New-Item -ItemType Directory -Force -Path $tmp
@@ -216,7 +216,7 @@ if (-not (Test-Path (Join-Path $srcRoot 'src\agentctl\core.py'))) {
 Good "包内根目录：$srcRoot"
 
 # ─────────────────────────────────────────────────────────────
-Step '3/6  落地程序（数据目录不动）'
+Step '3/7  落地程序（数据目录不动）'
 # ─────────────────────────────────────────────────────────────
 if ((Test-Path $AppDir) -and -not $Force) {
     Good "已经装过了：$AppDir"
@@ -254,7 +254,7 @@ if (-not (Test-Path $legacyHome)) {
 }
 
 # ─────────────────────────────────────────────────────────────
-Step '4/6  装依赖'
+Step '4/7  装依赖'
 # ─────────────────────────────────────────────────────────────
 $req = Join-Path $AppDir 'requirements.txt'
 if ($NoDeps) {
@@ -270,7 +270,7 @@ if ($NoDeps) {
 }
 
 # ─────────────────────────────────────────────────────────────
-Step '5/6  桌面快捷方式 + 命令行入口'
+Step '5/7  桌面快捷方式 + 命令行入口'
 # ─────────────────────────────────────────────────────────────
 $entry = Join-Path $AppDir 'src\agentctl_main.py'
 $panelEntry = Join-Path $AppDir 'src\panel_main.py'
@@ -306,7 +306,35 @@ $cmdBody = '@echo off' + "`r`n" + 'chcp 65001 >nul' + "`r`n" + 'REM AgentCtl 命
 Good "命令行入口：$cmd"
 
 # ─────────────────────────────────────────────────────────────
-Step '6/6  自检'
+# ─────────────────────────────────────────────────────────────
+Step '6/7  MCP(HTTP) 守护：开机自启 + 令牌对账'
+# ─────────────────────────────────────────────────────────────
+# ★ 2026-10-21 新增：为什么这一步不能少 ——
+#   §config.toml§ 里 agentctl_http 是 **url 型** MCP ⇒ **Codex 自己不会去拉它**
+#   （url 型没有 command 可执行）。服务没起 ⇒ 新会话里 25 个工具一条都不出现。
+#   ⇒ 「装完就能用」的前提是：**这个服务自己会站起来，掉了会自己回来，令牌两边一致**。
+$daemon = Join-Path $Dir 'tools\守护_mcp_http.py'
+if (Test-Path $daemon) {
+    $pyw = Join-Path (Split-Path $py.Exe -Parent) 'pythonw.exe'
+    if (-not (Test-Path $pyw)) { $pyw = $py.Exe }
+    $runCmd = '"' + $pyw + '" "' + $daemon + '"'
+    $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+    if (-not (Test-Path $runKey)) { New-Item -Path $runKey -Force | Out-Null }
+    New-ItemProperty -Path $runKey -Name 'AgentCtlMcpHttp' -Value $runCmd -PropertyType String -Force | Out-Null
+    Good "登录自启已登记：AgentCtlMcpHttp ⇒ $runCmd"
+    Say '  （服务掉了会自动拉起；日志 %LOCALAPPDATA%\AgentCtl\mcp_http_daemon.log）'
+    & $pyw $daemon --once
+    Start-Sleep -Seconds 2
+    $selfck = Join-Path $Dir 'tools\自检_mcp_http.py'
+    if (Test-Path $selfck) {
+        Say '  跑一次自检（端口 / 协议 / 工具数 / 令牌 / 急停）：'
+        & $py.Exe -X utf8 $selfck 2>&1 | ForEach-Object { Say "  $_" }
+    }
+} else {
+    Bad "找不到守护脚本 $daemon（MCP over HTTP 不会开机自启）"
+}
+
+Step '7/7  自检'
 # ─────────────────────────────────────────────────────────────
 Say '跑一次只读自检（selftest 不消耗额度、不截图、不动任何东西）...'
 $st = & $py.Exe @prefix $entry selftest 2>&1
