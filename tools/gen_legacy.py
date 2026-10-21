@@ -64,6 +64,11 @@ FILES = ["gate.py", "gate_lock.py", "act.py", "perceive.py", "auth_popup.py", "b
          "preflight.py", "next_question.py", "minidump_probe.py",
          "minidump_stack.py", "pe_export_lookup.py", "radio_finder.py",
          "win_list.py", "zoomgrid.py",
+         # ↓ M4（2026-10-22）agent 注入的 dwExtraInfo 魔数（**单一真源**）：
+         #   act.py 里 `import inject_magic` —— 不登记的话包里缺件 ⇒ act.py 一 import 就死。
+         #   判定方（判据 / 将来的归因层）也 import **同一个**定义 ⇒ 数字不会两边各写一个。
+         #   ★ 不带前导下划线 ⇒ pack_dist 的「`_` 开头 = 一次性脚本」过滤不会把它丢掉。
+         "inject_magic.py",
          # ↓ 老线 act.py 的 load_post_compat() 要读它，打包缺了就是断链。
          #   旧 legacy_tools 里**没有**这个文件 —— T14 阶段 2 顺手补上。
          "post_compat.json",

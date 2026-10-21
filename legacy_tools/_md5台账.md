@@ -7,7 +7,7 @@
 |---|---|---:|---|---:|---|
 | `gate.py` | `dab72156a6ed12b273d3d7df1d5a26aa` | 27369 | `dab72156a6ed12b273d3d7df1d5a26aa` | 27369 | 无规则 |
 | `gate_lock.py` | `5b2c5ef3fa17e7ba505ed50705211385` | 4876 | `5b2c5ef3fa17e7ba505ed50705211385` | 4876 | 无规则 |
-| `act.py` | `0384361fdce1e65c9901fa1bfd1164b6` | 174618 | `0384361fdce1e65c9901fa1bfd1164b6` | 174618 | 无规则 |
+| `act.py` | `5b396c2b4d8db217cecfd27113c36cb2` | 188308 | `5b396c2b4d8db217cecfd27113c36cb2` | 188308 | 无规则 |
 | `perceive.py` | `6b2651ce12c093b13a419e5dd27f379f` | 40129 | `6b2651ce12c093b13a419e5dd27f379f` | 40129 | 截图目录：不写死本机路径=已是净化态（跳过）；树差量缓存目录：同上=已是净化态（跳过） |
 | `auth_popup.py` | `20fe4cb083c3924334662b66da118736` | 50282 | `20fe4cb083c3924334662b66da118736` | 50282 | 无规则 |
 | `brake.py` | `714cc345ecb9177935c783b6a99a2d7b` | 7973 | `714cc345ecb9177935c783b6a99a2d7b` | 7973 | 无规则 |
@@ -28,6 +28,7 @@
 | `radio_finder.py` | `d59fb637d406fc2bbae711f8cb680a40` | 4279 | `d59fb637d406fc2bbae711f8cb680a40` | 4279 | 无规则 |
 | `win_list.py` | `1e18dd1dfef3318fa39268add83b0870` | 3164 | `1e18dd1dfef3318fa39268add83b0870` | 3164 | 无规则 |
 | `zoomgrid.py` | `b779a436dda7d03eb219d95484c91074` | 4780 | `b779a436dda7d03eb219d95484c91074` | 4780 | 无规则 |
+| `inject_magic.py` | `4053920ac8ecd2d58b0306ccbf7b97fd` | 1653 | `4053920ac8ecd2d58b0306ccbf7b97fd` | 1653 | 无规则 |
 | `post_compat.json` | `e430115c280facf853b154b17875656d` | 13225 | `e430115c280facf853b154b17875656d` | 13225 | 无规则 |
 | `guardian_policy.json` | `9e47426aa46079f549a7d1944c50154e` | 4899 | `9e47426aa46079f549a7d1944c50154e` | 4899 | 无规则 |
 | `_session.py` | `b9657603c6db1b308f1889341c62ad8f` | 6339 | `b9657603c6db1b308f1889341c62ad8f` | 6339 | 无规则 |

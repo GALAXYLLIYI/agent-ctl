@@ -46,6 +46,7 @@ from agentctl.store import Store                         # noqa: E402
 from agentctl.clock import Clock, Witness                # noqa: E402
 from agentctl import tasks_dispatch                     # noqa: E402
 from agentctl import uia_tree                           # noqa: E402（不截图的识别通道）
+from agentctl import framecache                         # noqa: E402（M6-① 帧复用 + 变化判据）
 # ★ P2（2026-10-16）：动作面异常刹车。判据逻辑全在 action_guard 里，
 #   core 只在**动作出口**调一次 observe() —— 不在这里写任何阈值、不在这里判该不该停。
 from agentctl import action_guard                        # noqa: E402
@@ -2372,11 +2373,34 @@ def _cl_run(py: str, argv: list, timeout: int = 300):
 #   所以先把小于阈值的差抹掉，剩下的才算「画面真的变了」。
 
 ACT_DIFF_KEEP = 20        # work/_actions 下只留最近 N 组（契约 §二：20）
-ACT_DIFF_STEP = 2         # 每通道最大差 < 2 视为噪声（0=完全相同，255=黑白反转）
+# ★ M6-①：阈值与忽略口径**不再在本文件另立一份** —— 搬到了 `framecache`
+#   （全仓唯一真相源：core 的 `_act_diff_of` 与 act.py 的就绪轮询共用同一组常量，
+#   否则会出现「core.py 说没变、act.py 说变了」的自相矛盾）。
+#   数值与改前**完全一致**：2/255、caret_px=8、min_area_px=24。
+ACT_DIFF_STEP = framecache.DIFF_STEP
 # ★ 接线单 §二-4：变化区的忽略噪声口径。
 #   光标闪烁是一条 1~2px 宽的竖条，靠像素比对会让每一次动作都报变了。
 #   caret_px=8 是窄边上限：单个字符大概 9~11px 宽，7a84边 9 > 8 就不会被当成光标。
-ACT_DIFF_IGNORE_DEFAULT = {"caret_px": 8, "min_area_px": 24}
+#   ★ M6-①（2026-10-22）**光标规则改了**：老口径 `min(w,h) > caret_px`
+#     ⇒ 窄边 ≤8 一律丢 ⇒ 连 **8×8 的方块**也丢了；而派单补充 §2 明写
+#     「塞一个 8px 方块**必须**报变」。新口径见 `framecache.is_caret_like`：
+#     「窄边 ≤ caret_px **且** 长宽比 ≥ 2.0」才算光标 ⇒ 方块（比≈1）不算。
+ACT_DIFF_IGNORE_DEFAULT = {"caret_px": framecache.DIFF_CARET_PX,
+                           "min_area_px": framecache.DIFF_MIN_AREA}
+
+# ★ M6-①（2026-10-22）：**帧复用总开关**。
+#   False ⇒ 一次观测都不复用（退回改前行为：每步都重扫、每次都现拍）。
+#   判据 `tests\_P2_帧复用_判据.py --inject` 会把它打成 False ⇒ 判据必须变红。
+#   ⛔ 这是**行为开关**，不是阈值：打开它不会放宽任何安全判定 ——
+#     复用之前一定要过「画面没变」（客户区指纹，三值判据）与「凭据 TTL 未过」。
+SCREEN_REUSE_ENABLED = True
+
+# ★ M6-①：「这一次动作的『动作前』那一帧是复用来的吗」。
+#   ⚠ 走**模块级标记**而不是给 `_act_diff_store` 加参数 ——
+#     现役判据 `tests\_语义屏判据.py` 用 `lambda fid, b, a, d: {}` 把它整个换掉，
+#     加参数会让那条判据当场 TypeError（那是「注入把被测代码搞崩了」，
+#     不是「注入跑红了」——项目老教训：注入不许把被测代码搞崩）。
+_ACT_REUSE_BEFORE = False
 
 
 def _diff_ignore_cfg(args) -> dict:
@@ -2489,7 +2513,26 @@ def _act_grab(hwnd: int):
     """截目标窗当前画面 → PIL.Image。
 
     **取不到返回 None，绝不返回一张空白图冒充。**
+
+    ★ M6-①（2026-10-22）：口径从「整窗 mss 抓屏」改成「**客户区 PrintWindow**
+      （flag=3），拿不到才退回 mss」。三条理由，全是实测：
+      ① **可复用**：动作前那一帧必须能从「那次观测」**直接拿来用** ——
+         否则「帧复用」就是假的：mss 抓的是**屏幕**像素，屏幕一变（别的窗口、
+         桌面动画）它就跟着变，而 PrintWindow 抓的是**这个窗口自己**的内容，
+         与屏幕上其它东西无关。本机实测：同一记事本连抓 12 次客户区，
+         相邻两帧瓦片差**全为 0.000**。
+      ② **确定性**：整窗（带标题栏）三次 sha256 **各不相同**
+         （标题栏 DWM 亚像素噪声，2634 px = 3.43%）；客户区三次**完全相同**。
+      ③ **更省**：客户区抓帧 ≈24 ms vs 整窗 mss 77.6 ms（2560×1600）。
+      ⚠ 退路口径不同（mss 是整窗、mss 是屏幕实抓）⇒ 两帧必须同口径，
+        所以**退了 mss 就两边都退**（见 `_act` 里的 `_act_grab` 调用次序）。
     """
+    try:
+        img = framecache.capture_client(int(hwnd))
+        if img is not None:
+            return img
+    except Exception:
+        pass
     try:
         r = _win_rect(int(hwnd))
         if not r or r[2] <= r[0] or r[3] <= r[1]:
@@ -2499,9 +2542,37 @@ def _act_grab(hwnd: int):
         with mss.mss() as sct:
             shot = sct.grab({"left": r[0], "top": r[1],
                              "width": r[2] - r[0], "height": r[3] - r[1]})
+        framecache.STATS["整窗抓帧"] = int(framecache.STATS.get("整窗抓帧") or 0) + 1
         return Image.frombytes("RGB", shot.size, shot.rgb)
     except Exception:
         return None
+
+
+def _act_frame_origin(hwnd: int, img=None):
+    """这一帧在**屏幕物理像素**里的原点（客户区原点；退 mss 时是窗口原点）。
+
+    ★ 为什么要分两种：`_act_grab` 现在有两种口径（客户区 PrintWindow /
+      整窗 mss），而 `after.diff.bbox` 的口径是**屏幕绝对坐标**
+      —— 换算错一个原点，坐标就整体偏一截（本项目栽过 26px / 100~170px）。
+    ★ 判据：图尺寸 == 客户区尺寸 ⇒ 客户区口径；否则按窗口口径。
+      判据写在这里而不是让调用方声明，是为了让「口径」跟「图」永远绑在一起。
+    """
+    try:
+        cl = framecache.client_origin(int(hwnd))
+    except Exception:
+        cl = None
+    if cl and img is not None:
+        try:
+            import win32gui                                  # noqa: PLC0415
+            l, t, r, b = win32gui.GetClientRect(int(hwnd))
+            if (r - l, b - t) == tuple(img.size):
+                return cl
+        except Exception:
+            pass
+    r = _win_rect(int(hwnd))
+    if r:
+        return (int(r[0]), int(r[1]))
+    return (0, 0)
 
 
 def _act_diff_of(before, after, win_off=None, ignore=None) -> dict:
@@ -2512,63 +2583,80 @@ def _act_diff_of(before, after, win_off=None, ignore=None) -> dict:
     混起来就是把「我没看见」说成了「我看见了没变」。
     bbox 用**屏幕绝对坐标**（与项目☄1 go xy/rect 同口径），
     而 crop 裁图用窗口内坐标 —— 两者不同源，正好对得上。
+
+    ★ M6-①（2026-10-22）：算法换成**两级**（`framecache.diff_images`）——
+      ① 瓦片级召回：64×64 瓦片、降采样 8×，**任何**采样点有差就列候选；
+      ② 候选瓦片里**全分辨率**分块，再按「光标形状」与「最小面积」判真假。
+      为什么换：老口径是 2560×1600 = **4.1 MP** 的整幅 `ImageChops.difference`
+      + `point()` + `getbbox()` + 逐行 Python 分块 —— 实测是这一段最贵的。
+      两级之后，**没变化**时只在降采样层跑（全幅 BOX 均值 ≈3 ms/幅），
+      有变化时才在候选瓦片里做全分辨率计算。
+      ⚠ **光标规则改了**（老口径 `min(w,h) > caret_px` ⇒ 窄边 ≤8 一律丢）：
+      新口径是「窄边 ≤8 **且** 长宽比 ≥2.0」才算光标 ——
+      因为老口径连 **8×8 的方块**也一起丢掉了，而派单补充 §2 明写
+      「塞一个 8px 方块**必须**报变」。与 eye.py `diff_box_features` 同一件事：
+      「ratio 分不开，但**形状**分得开」。
     """
-    if before is None or after is None:
-        return {"changed": None, "bbox": None,
-                "说明": "取不到画面（窗口不可读 / 截图失败）⇒ 没测出来，不等于没变"}
-    if before.size != after.size:
-        _w = max(before.size[0], after.size[0])
-        _h = max(before.size[1], after.size[1])
-        _ox, _oy = win_off or (0, 0)
-        return {"changed": True, "bbox": [_ox, _oy, _w, _h],
-                "说明": "动作前后窗口尺寸变了（%s → %s）" % (before.size, after.size)}
-    try:
-        from PIL import ImageChops                        # noqa: PLC0415
-        _d = ImageChops.difference(before, after).convert("L")
-        _mask = _d.point(lambda v: 255 if v >= ACT_DIFF_STEP else 0)
-        _bb = _mask.getbbox()
-    except Exception as e:
-        return {"changed": None, "bbox": None, "说明": "求差失败：%s" % e}
-    if not _bb:
-        return {"changed": False, "bbox": None,
-                "说明": "逐像素比对无变化（阈值 %d/255）" % ACT_DIFF_STEP}
-    x0, y0, x1, y1 = _bb
-    _ox, _oy = win_off or (0, 0)
-    # ★ 接线单 §二-4：changed 是**必要非充分**。
-    #   真变了 => changed 必须 true（光标闪烁不算变了）；零变化 => 必须 false。
-    #   中间那个「只是光标在闪」现代成 false。
     _ig = ignore if isinstance(ignore, dict) else ACT_DIFF_IGNORE_DEFAULT
     _caret = int(_ig.get("caret_px", 8) or 0)
     _minarea = int(_ig.get("min_area_px", 24) or 0)
-    # ★ ★ changed 只在「diff_ignore 之外确实有面积 ≥ min_area_px 的差异」时为 True。
-    #   改前只看**包围盒**宽高与面积，地址是：光标闪烁 + 区域选取在同一行留下一串
-    #   互不相连的碎片 —— 包围盒横跃整行，**面积很大**，但真正变了的像素很少。
-    #   改成分块后才能回答「到底变了多少」这个问题。
-    _blocks = _act_diff_blocks(_mask)
-    _live = [_b for _b in _blocks if (not _caret) or min(_b[0], _b[1]) > _caret]
-    _sum = sum(_b[2] for _b in _live)
-    if (not _live) or (_minarea and _sum < _minarea):
-        _drop = len(_blocks) - len(_live)
-        return {"changed": False, "bbox": None, "忽略为": True,
-                "说明": ("共 %d 块变化（其中 %d 块窄边≤%d 判为光标类），"
-                        "剩余面积 %d px2 ≤ min_area_px=%d ⇒ 判为没变"
-                        % (len(_blocks), _drop, _caret, _sum, _minarea)) if _drop
-                       else ("变化面积 %d px2 ≤ min_area_px=%d ⇒ 判为没变" % (_sum, _minarea))}
-    x0 = min(_b[3][0] for _b in _live)
-    y0 = min(_b[3][1] for _b in _live)
-    x1 = max(_b[3][2] for _b in _live)
-    y1 = max(_b[3][3] for _b in _live)
+    try:
+        _d = framecache.diff_images(before, after, caret_px=_caret,
+                                    min_area_px=_minarea)
+    except Exception as e:
+        return {"changed": None, "bbox": None, "说明": "求差失败：%s" % e}
+    if _d.get("changed") is None:
+        return {"changed": None, "bbox": None, "说明": _d.get("说明")}
+    if _d.get("changed") is False:
+        _out = {"changed": False, "bbox": None, "说明": _d.get("说明")}
+        if _d.get("忽略为"):
+            _out["忽略为"] = True
+        return _out
+    x0, y0, x1, y1 = _d["bbox"]
+    _ox, _oy = win_off or (0, 0)
     # ★ 块的 (x0,y0,x1,y1) 是**闭区间**（含末端像素），所以宽高要 +1。
-    #   改前用 Image.getbbox()，它返回的是**右开区间**，宽就是 x1-x0 ——
-    #   换成闭区间后若不 +1，60px 的块会报成 59（K4b 实测报 59 键出的就是这个），
-    #   裁图还会少切一列。口径不能在重写后对不齐。
+    #   PIL crop 是**右开区间**，所以右下标 +1 —— 两处口径必须一致。
     _w = x1 - x0 + 1
     _h = y1 - y0 + 1
-    # _local 是窗口内坐标，给 _act_diff_store 裁图用；PIL crop 是**右开区间**，所以右下标 +1。
     return {"changed": True, "bbox": [_ox + x0, _oy + y0, _w, _h],
             "_local": (x0, y0, x1 + 1, y1 + 1),
-            "说明": ("变化区（窗口内 %d,%d 起 %dx%d；%d 块合计 %d px2）"
-                    % (x0, y0, _w, _h, len(_live), _sum))}
+            "ratio": _d.get("ratio"),
+            "候选瓦片": _d.get("候选瓦片"),
+            "丢弃光标块": _d.get("丢弃光标块"),
+            "说明": _d.get("说明")}
+
+
+def _act_after(hwnd: int, before):
+    """动作**后**那一帧：轮询指纹，**变了就停**。
+
+    ★ 这不是「把固定 sleep 砍成 0」（派单补充 §1 明令禁止）。
+      固定等待（客户端 act.py 里的 `_settle(400~500)`）是**一刀切**：
+      界面早变了就白等，界面还没变就等不够。
+      这里改成「**等到真的变了**，最多等 budget_ms」：
+        · 界面已经变了 ⇒ **第 1 轮就命中** ⇒ 只多抓 **1** 次帧（而不是白等 450 ms）；
+        · 界面还没变 ⇒ 继续轮询，等它变（或到预算为止）。
+    ★ 关键：**第一轮抓的那张图就是「动作后」那一帧** ——
+      所以「变化即停」不会让动作多抓一次帧（对比：固定等待 = 等待 + 抓帧）。
+    ★ 拿不到「动作前」那一帧 ⇒ 没法判变没变 ⇒ 直接现抓一张（老口径）。
+    """
+    if before is None:
+        return _act_grab(hwnd)
+    try:
+        r = framecache.wait_change(int(hwnd), before,
+                                   budget_ms=framecache.WAIT_BUDGET_MS,
+                                   poll_ms=framecache.WAIT_POLL_MS)
+    except Exception:
+        return _act_grab(hwnd)
+    _img = r.get("图")
+    if _img is None:
+        return _act_grab(hwnd)
+    try:
+        framecache.STATS["变化即停轮次"] = int(r.get("轮次") or 0)
+    except Exception:
+        pass
+    # ★ 证据帧计数：**留作 diff/落盘的**只有这一张（探测帧另计，见 framecache.STATS）。
+    framecache.STATS["动作后留帧"] = int(framecache.STATS.get("动作后留帧") or 0) + 1
+    return _img
 
 
 def _act_diff_store(fid, before, after, diff) -> dict:
@@ -2576,20 +2664,40 @@ def _act_diff_store(fid, before, after, diff) -> dict:
 
     返回 {dir, crop_path} 对 diff 做不可变补充（落盘失败不能连带 diff 本身丢了）。
     ⛔ 整个落盘都包在 try 里：落盘是**附带证据**，不是动作本身成功的前提。
+
+    ★ M6-①（2026-10-22）：**复用观测帧**的动作只落 **1 张** PNG。
+      为什么：动作前那一帧**已经在观测那趟拍过**了（就是复用来的那张），
+      再落一份是重复；而这张图还在帧仓库里（凭据 TTL 15 s）⇒ 需要时取得到。
+      留哪一张：变了 ⇒ 落 **crop.png**（「变了的那块直接看」）；
+      没变 ⇒ 落 **after.png**（「动作后就是这样，没变」也是证据）。
+      非复用路径**保持原样**（before/after/crop 三张），避免改变既有产物。
+    ⚠ **签名不许动**（4 个位置参数）：现役判据 `tests\_语义屏判据.py` 用
+      `lambda fid, b, a, d: {}` 把它整个换掉 —— 加参数会让那条判据当场 TypeError
+      （那是「注入把被测代码搞崩了」，不是「注入跑红了」）。
+      ⇒ 「这次是不是复用」走模块级标记 `_ACT_REUSE_BEFORE`，不走参数。
     """
     _out = {}
     try:
         _dir = os.path.join(ROOT, "work", "_actions", _act_fid(fid))
         os.makedirs(_dir, exist_ok=True)
-        for _nm, _im in (("before.png", before), ("after.png", after)):
-            if _im is not None:
-                _im.save(os.path.join(_dir, _nm))
-        _loc = diff.get("_local")
-        if diff.get("changed") and _loc and after is not None:
-            # crop_path = 「变了的那块直接看」—— 采用 after 的对应区（而不是差分图）
-            _cp = os.path.join(_dir, "crop.png")
-            after.crop(_loc).save(_cp)
-            _out["crop_path"] = _cp
+        if _ACT_REUSE_BEFORE:
+            _loc = diff.get("_local")
+            if diff.get("changed") and _loc and after is not None:
+                _cp = os.path.join(_dir, "crop.png")
+                after.crop(_loc).save(_cp)
+                _out["crop_path"] = _cp
+            elif after is not None:
+                after.save(os.path.join(_dir, "after.png"))
+        else:
+            for _nm, _im in (("before.png", before), ("after.png", after)):
+                if _im is not None:
+                    _im.save(os.path.join(_dir, _nm))
+            _loc = diff.get("_local")
+            if diff.get("changed") and _loc and after is not None:
+                # crop_path = 「变了的那块直接看」—— 采用 after 的对应区（而不是差分图）
+                _cp = os.path.join(_dir, "crop.png")
+                after.crop(_loc).save(_cp)
+                _out["crop_path"] = _cp
         _out["dir"] = _dir
     except Exception as e:
         _out["落盘失败"] = str(e)
@@ -2726,7 +2834,42 @@ def _act(action: str, args: dict, argv: list[str], scope: str = "B") -> dict:
     #   在历史数据里全为 null，根因就是这里）。
     #   ⚠ 只补证据，**不改任何判定语义**：下面 _need_diff 分支里的 code=8/5 与
     #     changed_outside_target 判定原样保留 —— 这里只是把证据补齐。
-    _before = _act_grab(hwnd)
+    # ★ M6-①（2026-10-22）：**动作前**那一帧优先**复用观测帧**，没有才现拍。
+    #   为什么能复用：调用方带着 `from_capture` 来点 ⇒ 「那一刻的画面」就是
+    #   **那次观测**拍的那张（凭据 TTL 15 s，且帧仓库与凭据一一对应）。
+    #   为什么必须复用：老口径每次动作**现拍一张**（mss 整窗 77.6 ms），
+    #   而观测那趟已经拍过同一扇窗 ⇒ 这一次是纯浪费。
+    #   ⚠ 复用不是「无条件用旧图」：帧仓库按 **token** 存（不按 hwnd），
+    #     且要核 hwnd 一致、TTL 未过、画面没退化（见 framecache.FrameStore）。
+    _cap0 = args.get("from_capture") or args.get("capture_id")
+    _before = None
+    _before_src = ""
+    if SCREEN_REUSE_ENABLED and _cap0:
+        try:
+            _rec = framecache.STORE.get(_cap0, hwnd)
+        except Exception:
+            _rec = None
+        if _rec and _rec.get("img") is not None:
+            _age = framecache.STORE.age_sec(_cap0)
+            # ⚠ 几何一致才算数：窗口挪了 ⇒ 客户区原点变了 ⇒ 旧帧的坐标不再对得上。
+            _cur_org = framecache.client_origin(hwnd)
+            _org_ok = (_cur_org is not None and _cur_org == _rec.get("origin"))
+            if _age <= framecache.FRAME_REUSE_MAX_AGE_SEC and _org_ok:
+                _before = _rec["img"]
+                _before_src = ("复用观测帧（龄 %.1f s ≤ %.0f s，客户区原点未变）"
+                               % (_age, framecache.FRAME_REUSE_MAX_AGE_SEC))
+            else:
+                _before_src = ("观测帧太老（龄 %.1f s > %.0f s）或客户区原点变了 ⇒ 不复用"
+                               % (_age, framecache.FRAME_REUSE_MAX_AGE_SEC))
+    if _before is None:
+        _before = _act_grab(hwnd)
+        _before_src = "现场抓帧"
+        framecache.STATS["动作前抓帧"] = int(framecache.STATS.get("动作前抓帧") or 0) + 1
+    _before_off = _act_frame_origin(hwnd, _before)
+    # ★ 落盘口径标记（走模块级标记，不给 _act_diff_store 加参数 ——
+    #   现役判据用 `lambda fid, b, a, d: {}` 把它整个换掉了，见该函数 docstring）。
+    global _ACT_REUSE_BEFORE
+    _ACT_REUSE_BEFORE = _before_src.startswith("复用")
 
     rc, out, e = _legacy("act.py", argv, timeout=int(args.get("timeout_sec") or ACT_TIMEOUT_SEC))
     r = _map_rc(rc, out, e)
@@ -2780,16 +2923,15 @@ def _act(action: str, args: dict, argv: list[str], scope: str = "B") -> dict:
     if not _need_diff:
         # ★ A2：没显式要 diff 的动作，**照样**留证据（求差 + 落盘 + 判词）。
         #   ⚠ 只产出证据，**不动 r["code"] / r["ok"]**（语义留给调用方判据看）。
-        _after = _act_grab(hwnd)
-        _ev_wr = _win_rect(hwnd) or [0, 0, 0, 0]
-        _df = _act_diff_of(_before, _after, (int(_ev_wr[0]), int(_ev_wr[1])),
-                           _diff_ignore_cfg(args))
+        _after = _act_after(hwnd, _before)
+        _df = _act_diff_of(_before, _after, _before_off, _diff_ignore_cfg(args))
         _fid = "%s_%d" % (action, time.time_ns())
         # ★ 2026-10-20 修：这里原来写的是 `_ev_after`（**没有这个变量**）
         #   ⇒ NameError ⇒ 非 diff 路径（绝大多数动作）的 A2 证据整段炸掉。
         #   改成 `_after`（就是上面刚抓的那张）。
         _st = _act_diff_store(_fid, _before, _after, _df)
         _pub = {k: v for k, v in _df.items() if not k.startswith("_")}
+        _pub["动作前来源"] = _before_src
         for _k in ("crop_path", "dir", "落盘失败"):
             if _st.get(_k):
                 _pub[_k] = _st[_k]
@@ -2799,14 +2941,13 @@ def _act(action: str, args: dict, argv: list[str], scope: str = "B") -> dict:
                                 (_vd.get("verdict_evidence") or {}).get("channel_diag"),
                                 _vd.get("verdict_evidence"))
     if _need_diff:
-        _after = _act_grab(hwnd)
-        _wr = _win_rect(hwnd) or [0, 0, 0, 0]
-        _df = _act_diff_of(_before, _after, (int(_wr[0]), int(_wr[1])),
-                           _diff_ignore_cfg(args))
+        _after = _act_after(hwnd, _before)
+        _df = _act_diff_of(_before, _after, _before_off, _diff_ignore_cfg(args))
         # 没带 frame_id 的（focus 模式）用作用名+时间戳当目录名 —— 同一次动作仍落在同一个目录里。
         _fid = args.get("frame_id") or ("%s_%d" % (action, time.time_ns()))
         _st = _act_diff_store(_fid, _before, _after, _df)
         _pub = {k: v for k, v in _df.items() if not k.startswith("_")}
+        _pub["动作前来源"] = _before_src
         for _k in ("crop_path", "dir", "落盘失败"):
             if _st.get(_k):
                 _pub[_k] = _st[_k]
@@ -5231,6 +5372,15 @@ SCREEN_SNAP_MAX_HWNDS = 32
 SCREEN_AFTER_CHANGED_CAP = 8
 _SCREEN_SEEN = {}
 
+# ★ M6-①（2026-10-22）：**帧复用台账**。
+#   hwnd → {screen_version, capture_id, payload（上一屏的完整答案）, img（客户区画面）,
+#           origin（客户区屏幕原点）, uids_in_view, uids_all, meta, nodes_n, t}
+#   用途两条：
+#     ① 「带 since 再看一次」：画面没变 ⇒ **直接回上一版答案**（不重扫 UIA）；
+#     ② 「观测 → 动作」：动作的「动作前」那一帧**复用**这里存的那张。
+#   ⚠ 只在**本进程**内存里（与 `_SCREEN_SEEN` 同生命周期）；换进程就没有基线 ⇒ 重扫。
+_SCREEN_FRAME_RESULT = {}
+
 
 def _screen_snap_get(hwnd: int):
     rec = _SCREEN_SEEN.get(int(hwnd))
@@ -5306,12 +5456,101 @@ def _screen_seen_view(prev):
             "screen_version": str(prev.get("seen_version") or "")}
 
 
+def _screen_reuse_lookup(hwnd: int, since: str, args: dict):
+    """带 `since` 再看一次：**这一屏没变**就回上一版答案（不重扫 UIA）。
+
+    ★ 判据链（三步，任何一步不成立就返回 None ⇒ 走正常路径重扫）：
+      ① 台账里有这一屏的记录，且 `screen_version` 与调用方回传的一致；
+      ② 记录没过期（与凭据 TTL 同量级：%d s）；
+      ③ **画面确实没变**：现抓一帧客户区，与台账里那帧逐瓦片 + 全分辨率分块比对，
+         `changed` 必须是 **False**（确认没变）。
+         `changed` 是 None（没测出来）⇒ **不复用**（fail open）。
+
+    ★ 返回的是**上一版的完整答案**（深拷贝），外加复用说明：
+      调用方能一眼看出「这次没有重扫」，不会把复用当成「重新看过」。
+    """
+    try:
+        import copy                                        # noqa: PLC0415
+    except Exception:
+        return None
+    rec = _SCREEN_FRAME_RESULT.get(int(hwnd))
+    if not rec:
+        return None
+    if str(rec.get("screen_version") or "") != str(since or ""):
+        return None
+    if time.time() - float(rec.get("t") or 0) > framecache.FRAME_TTL_SEC:
+        return None
+    img = rec.get("img")
+    if img is None:
+        return None
+    # ★★★ **连续 2 帧滞回**（裁决 B2 / 派单补充 §2）：「没变」必须是**连续两次**都说没变。
+    #   一次读数只能说明「这一瞬间」；动画区/光标闪烁会在两帧之间跳变 ⇒
+    #   连续两次一致才说明「这一屏真的没动」⇒ 才允许复用。
+    #   判据用**主线那套**（阈值 2/255 + 窄边 caret 滤除 + 最小面积 24px²）。
+    #   ⚠ 没稳 ⇒ **不复用**（走重扫）—— 方向是「宁可多扫一次，不许拿旧帧当新画面」。
+    try:
+        st = framecache.wait_stable(int(hwnd), baseline=img,
+                                    budget_ms=framecache.WAIT_BUDGET_MS,
+                                    poll_ms=framecache.WAIT_POLL_MS,
+                                    need=framecache.HYSTERESIS)
+    except Exception:
+        return None
+    if not st.get("稳定"):
+        return None
+    try:
+        cur = st.get("图")
+        d = framecache.diff_images(img, cur)
+    except Exception:
+        return None
+    if d.get("changed") is not False:
+        return None                                   # 变了 / 没测出来 ⇒ 必须重扫
+    try:
+        out = copy.deepcopy(rec.get("payload") or {})
+    except Exception:
+        return None
+    if not out:
+        return None
+    sv = str(rec.get("screen_version") or "")
+    out["screen_version"] = sv
+    out["复用"] = True
+    out["复用依据"] = ("客户区**连续 %d 帧**判「没变」（主线判据：阈值 %d/255 + 窄边<%dpx "
+                       "caret 滤除 + 最小面积 %d px²）⇒ 判定这一屏没动；"
+                       "未触发 UIA 重扫、未重探 CDP、未重跑 OCR"
+                       % (framecache.HYSTERESIS, framecache.DIFF_STEP,
+                          framecache.DIFF_CARET_PX, framecache.DIFF_MIN_AREA))
+    out["复用说明"] = ("这是**上一屏的答案**（画面自那一版起没变）。"
+                       "要一屏新的观察，请不要带 since。")
+    out["复用轮次"] = int(st.get("帧数") or 0)
+    out["复用耗时ms"] = round(float(st.get("耗时ms") or 0.0), 1)
+    # since 应答三件套：这次确实与调用方回传的一致，且没有新东西。
+    out["delta"] = {"since_echo": str(since), "version_match": True,
+                    "screen_version_新值": sv, "since_回显": str(since),
+                    "since_是本进程签发的": True, "有基线": True, "稳定": True,
+                    "新增": [], "新增数": 0, "消失": [], "消失数": 0,
+                    "口径": "复用路径：画面没变 ⇒ 新增/消失都是空"}
+    out["since_echo"] = str(since)
+    out["version_match"] = True
+    out["screen_version_新值"] = sv
+    # 基线照旧刷新（画面没变，基线内容不变，只是寿命续上）
+    try:
+        _screen_snap_put_ex(int(hwnd), sv, rec.get("uids_in_view") or set(),
+                            rec.get("meta") or {}, uids_all=rec.get("uids_all") or set(),
+                            nodes_n=int(rec.get("nodes_n") or 0),
+                            caller_seen=not args.get("_不推进seen"))
+    except Exception:
+        pass
+    framecache.STATS["复用命中"] = int(framecache.STATS.get("复用命中") or 0) + 1
+    return out
+
+
 def _screen_forget(hwnd: int = 0):
     """丢掉快照基线（判据分阶段用；也留给将来「用户说『这屏重算』」）。"""
     if hwnd:
         _SCREEN_SEEN.pop(int(hwnd), None)
+        _SCREEN_FRAME_RESULT.pop(int(hwnd), None)
     else:
         _SCREEN_SEEN.clear()
+        _SCREEN_FRAME_RESULT.clear()
 
 
 def _screen_proc_name(pid: int) -> str:
@@ -5534,6 +5773,19 @@ def _screen_build(hwnd: int, args: dict) -> dict:
     watch_decls, watch_err = _screen_watch_parse(args)
     watch_pending = bool(args.get("watch_pending") or False)
     watch_hits = {}
+
+    # ★ M6-①（2026-10-22）：**帧复用** —— 带 `since` 再看一次时，
+    #   先问「这一屏变没变」（客户区指纹，两级判据）：
+    #     · 没变 ⇒ **直接回上一版答案**：不重扫 UIA、不重探 CDP、不重跑 OCR。
+    #     · 变了 / 判不出来 ⇒ 走下面的正常路径（必须重扫）。
+    #   为什么安全：判据是**像素级**的（客户区逐瓦片 + 全分辨率分块），
+    #   「没变」是**确认**不是「没看见」；画面退化时 fail open（重扫）。
+    #   ⚠ `since` 的契约语义没变：它只是「你上次看到的那一版」，
+    #     服务端**不会**用它拼版本（版本永远是服务端签发的）。
+    if SCREEN_REUSE_ENABLED and since:
+        _reuse = _screen_reuse_lookup(hwnd, str(since), args)
+        if _reuse is not None:
+            return _reuse
 
     win = _screen_window_info(hwnd)
     # ★ name_trust 改成**建完候选之后再算**：offset-suspect 那档得看着一屏的选项才判得出来
@@ -5962,6 +6214,42 @@ def _screen_build(hwnd: int, args: dict) -> dict:
                  "不静默丢弃。要等它稍后出现，显式传 watch_pending=true 挂起（返回里逐条标 pending）。"
                  % (len(bad), json.dumps(bad, ensure_ascii=False)[:200])),
                 report, "unmatched")
+
+    # ★ M6-①（2026-10-22）：把这一屏的**客户区画面**存进帧仓库。
+    #   一次抓帧（≈24 ms）换来两件事：
+    #     ① 「观测 → 动作」：动作的「动作前」那一帧**复用**它 ⇒ 动作少抓一次帧；
+    #     ② 「观测 → 观测」：带 since 再看一次时，靠它判「这一屏变没变」
+    #        ⇒ 没变就**不重扫 UIA**（省 191 ms）。
+    #   ⚠ 口径必须是**客户区**（PrintWindow flag=3）：实测同一记事本连抓 12 次，
+    #     相邻两帧逐瓦片差**全为 0.000**；而整窗（带标题栏）三次 sha256 各不相同
+    #     （标题栏 DWM 亚像素噪声 2634 px = 3.43%）⇒ 整窗那张根本没法当「同一张图」。
+    #   ⚠ 退化画面（全黑/纯色）**不进**帧仓库 —— 恒等的退化指纹会「永远判没变」。
+    try:
+        _fimg = framecache.capture_client(hwnd)
+    except Exception:
+        _fimg = None
+    # ⚠ `_不发capture` = 动作内部那次回读（`_click_after_state`）——
+    #   它不签凭据、也不给调用方看 ⇒ **不抓这一帧**（否则白花 24 ms）。
+    if _fimg is not None and args.get("_不发capture"):
+        _fimg = None
+    if _fimg is not None:
+        _forigin = framecache.client_origin(hwnd)
+        if screen_capture_id:
+            framecache.STORE.put(screen_capture_id, hwnd, _fimg, _forigin,
+                                 src="ctl_screen")
+        _SCREEN_FRAME_RESULT[int(hwnd)] = {
+            "screen_version": screen_version,
+            "capture_id": screen_capture_id,
+            "payload": out,
+            "img": _fimg,
+            "origin": _forigin,
+            "uids_in_view": in_view_now,
+            "uids_all": set(o["uid"] for o in cands),
+            "meta": {o["uid"]: {"label": o["label"], "role": o["role"],
+                                "rect": list(o["rect"])} for o in cands},
+            "nodes_n": len(nodes),
+            "t": time.time(),
+        }
     return out
 
 

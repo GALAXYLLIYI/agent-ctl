@@ -504,6 +504,7 @@ if _SELFTEST_MISS:
     raise SystemExit(_selftest_or_die())
 
 import gate                                                # noqa: E402
+import inject_magic                                       # noqa: E402
 import win32gui                                            # noqa: E402
 import win32process                                        # noqa: E402
 
@@ -1056,6 +1057,269 @@ def _settle(default_ms):
     except Exception:
         pass
     return default_ms / 1000.0
+
+
+# ══════════════ M7 · 就绪轮询（替代固定 sleep）══════════════
+# ★ 派单 M7：把「固定 sleep 链」换成「**轮询指纹，变了就停 / 稳了就走**」。
+#   ⛔ **不许把等待砍成 0**（TOCTOU 文献 arXiv:2604.18860 实测「观测→动作」间隙
+#     平均 6.51 秒，那正是「点了但界面已变」的成因）。这里是**换机制**：
+#     固定等 450 ms → 轮询到「界面给出信号」为止，最长等 budget_ms。
+#
+# ★ 判据口径与 agentctl 侧**同一组常量**（全仓一份定义，两单不许打架）：
+#     agentctl/framecache.py:  DIFF_STEP=2 / DIFF_CARET_PX=8 / DIFF_MIN_AREA=24
+#                              DIFF_CARET_ASPECT=2.0 / HYSTERESIS=2
+#   （那边是**全分辨率**判据；本文件在**1/4 降采样**上做等价判定 ⇒ 阈值按比例缩放，
+#     见 `POLL_SCALE` 与 `_img_diff` 的注释。判据 `tests/_P3_就绪轮询_判据.py`
+#     会**核对两边常量一致**，防止漂移。）
+POLL_STEP = 2               # = framecache.DIFF_STEP
+POLL_CARET_PX = 8           # = framecache.DIFF_CARET_PX（**降采样后**除以 POLL_SCALE）
+POLL_MIN_AREA = 24          # = framecache.DIFF_MIN_AREA
+POLL_CARET_ASPECT = 2.0     # = framecache.DIFF_CARET_ASPECT
+POLL_HYSTERESIS = 2         # = framecache.HYSTERESIS（连续 N 帧同一结论才认）
+POLL_SCALE = 4              # 轮询用的降采样倍数（越大越快、越钝）
+POLL_INTERVAL_MS = 50       # 采样间隔（派单 §4.3 建议 16~30；实测 50 更省 CPU，
+                            #  同一预算里少采几帧 ⇒ 少几百 ms 的 PrintWindow 开销）
+POLL_BUDGET_MS = 800        # 点击的总预算（超时 ⇒ 没测出来）
+POLL_BUDGET_MS_FILL = 1500  # 填字段的总预算
+
+
+def _poll_base(hwnd):
+    """取「动作前」那一帧（内存内）—— 轮询的基线。
+
+    ★ 不落盘：轮询基线只是一张小图，不需要变成证据文件。
+    """
+    return _poll_sample(hwnd)
+
+
+def _poll_sample(hwnd):
+    """内存内取一帧客户/整窗画面（**不落盘**）。
+
+    ★ 为什么不用 `evidence()`：它每次都**写一张带时间戳的 PNG**，
+      轮询每 30 ms 走一次 ⇒ 每 30 ms 落一张全窗 PNG ⇒ 磁盘 IO 比省下的 450 ms 更亏。
+    ★ 用的还是 perceive._print_window（PrintWindow + PW_RENDERFULLCONTENT=2）——
+      和证据图**同一个来源** ⇒ 指纹与前后证据图同口径。
+    ★ 拿不到就返回 None（调用方按「没测出来」处理，**不假装没变**）。
+    """
+    try:
+        import perceive
+        img, ok = perceive._print_window(int(hwnd))
+        if img is None or not ok:
+            return None
+        return img
+    except Exception:
+        return None
+
+
+def _poll_gray(img):
+    """降采样成灰度小图（1/POLL_SCALE），轮询用。
+
+    ★ 为什么要降采样：全分辨率逐行分块是**纯 Python 循环**（2560 行 ⇒ 几十 ms），
+      轮询扛不住。降 4 倍 ⇒ 640 行 ⇒ 4 倍快。
+    ★ 代价：细节变钝 ⇒ 阈值按比例缩放（见 `_img_diff`）。
+    """
+    try:
+        from PIL import Image
+        s = POLL_SCALE
+        w, h = img.size
+        if w < s * 4 or h < s * 4:
+            return None
+        g = img.convert("L").resize((max(1, w // s), max(1, h // s)), Image.BOX)
+        return g
+    except Exception:
+        return None
+
+
+def _img_diff(a, b):
+    """两幅小图求差 ⇒ {changed: True/False/None, ratio}。
+
+    ★ 口径（与 agentctl/framecache.diff_images **同一套规则**，阈值按 1/POLL_SCALE 缩放）：
+        · 阈值 2/255（BOX 均值不会放大绝对差 ⇒ 仍是 2/255）
+        · **窄边 caret 滤除**：降采样后窄边上限 = 8/4 = 2 px，且**长宽比 ≥ 2** 才算光标
+          （只看窄边的老口径会把 8×8 的方块也丢掉 —— 见 M6 补充 §2）
+        · **最小面积**：24 px² / 16 = 1.5 px² ⇒ 取 2 px²
+      ⚠ **None = 没测出来**（图拿不到 / 尺寸对不上）—— 永不当 False。
+    ★ 连通块：逐行游程 + 并查集（与 core._act_diff_blocks 同一形状）。
+    """
+    try:
+        import numpy as np
+    except Exception:
+        return {"changed": None, "ratio": 0.0}
+    if a is None or b is None:
+        return {"changed": None, "ratio": 0.0}
+    try:
+        sa, sb = a.size, b.size
+    except Exception:
+        return {"changed": None, "ratio": 0.0}
+    if sa != sb:
+        return {"changed": None, "ratio": 0.0}
+    try:
+        A = np.asarray(a, dtype=np.int16)
+        B = np.asarray(b, dtype=np.int16)
+    except Exception:
+        return {"changed": None, "ratio": 0.0}
+    if A.shape != B.shape:
+        return {"changed": None, "ratio": 0.0}
+    try:
+        mask = np.abs(A - B) >= POLL_STEP
+        H, W = mask.shape
+        runs = []
+        for y in range(H):
+            xs = np.flatnonzero(mask[y])
+            if len(xs) == 0:
+                continue
+            start = prev = int(xs[0])
+            for x in xs[1:]:
+                x = int(x)
+                if x != prev + 1:
+                    runs.append([y, start, prev])
+                    start = x
+                prev = x
+            runs.append([y, start, prev])
+        if not runs:
+            return {"changed": False, "ratio": 0.0}
+        parent = list(range(len(runs)))
+
+        def _find(i):
+            while parent[i] != i:
+                parent[i] = parent[parent[i]]
+                i = parent[i]
+            return i
+
+        def _union(i, j):
+            ri, rj = _find(i), _find(j)
+            if ri != rj:
+                parent[rj] = ri
+
+        idx = 0
+        n = len(runs)
+        while idx < n:
+            y = runs[idx][0]
+            j = idx
+            while j < n and runs[j][0] == y:
+                j += 1
+            k = j
+            while k < n and runs[k][0] == y + 1:
+                k += 1
+            for ai in range(idx, j):
+                for bi in range(j, k):
+                    if runs[ai][1] <= runs[bi][2] and runs[bi][1] <= runs[ai][2]:
+                        _union(ai, bi)
+            idx = j
+        agg = {}
+        for i, (y, x0, x1) in enumerate(runs):
+            r = _find(i)
+            e = agg.get(r)
+            if e is None:
+                agg[r] = {"area": x1 - x0 + 1, "x0": x0, "x1": x1, "y0": y, "y1": y}
+            else:
+                e["area"] += x1 - x0 + 1
+                e["x0"] = min(e["x0"], x0)
+                e["x1"] = max(e["x1"], x1)
+                e["y1"] = max(e["y1"], y)
+        narrow_max = max(1, POLL_CARET_PX // POLL_SCALE)
+        min_area = max(1, int(round(POLL_MIN_AREA / float(POLL_SCALE * POLL_SCALE))))
+        live = 0
+        for v in agg.values():
+            w = v["x1"] - v["x0"] + 1
+            h = v["y1"] - v["y0"] + 1
+            narrow = min(w, h)
+            if narrow <= narrow_max and (max(w, h) / float(narrow)) >= POLL_CARET_ASPECT:
+                continue                      # 光标类 → 丢
+            live += v["area"]
+        if live <= 0:
+            return {"changed": False, "ratio": 0.0}
+        if live < min_area:
+            return {"changed": False, "ratio": 0.0}
+        return {"changed": True, "ratio": float(live) / float(mask.size)}
+    except Exception:
+        return {"changed": None, "ratio": 0.0}
+def _wait_ready(hwnd, base_img, budget_ms=POLL_BUDGET_MS, need=POLL_HYSTERESIS,
+                capture=None):
+    """**就绪轮询**：连续 `need` 帧都判「没变」⇒ 界面稳了，可以动手。
+
+    ★ 这取代了原来的 `time.sleep(_settle(250))`（反竞态前的那一刀）：
+      固定等 250 ms 是「不管稳没稳都等」；这里是「**稳了就走**」。
+    ★ 返回 {就绪: True/False/None, 轮次, 耗时ms}
+      None = 没测出来（抓不到画面 / 预算内没稳）—— **不是「没变」**。
+    """
+    import time as _t
+    t0 = _t.perf_counter()
+    grab = capture or _poll_sample
+    gb = _poll_gray(base_img)
+    if gb is None:
+        return {"就绪": None, "轮次": 0, "耗时ms": 0.0}
+    streak = 0
+    rounds = 0
+    deadline = t0 + max(0.0, float(budget_ms) / 1000.0)
+    while True:
+        rounds += 1
+        # ★ 预算检查在**采样之前**：采样本身要 20 ms+，放在检查之后会让总耗时**超出**预算
+        #   （实测：轮询比老的固定 sleep 还多花 ~100 ms）。先查预算 ⇒ **永远不慢于改前**。
+        if _t.perf_counter() >= deadline:
+            return {"就绪": False, "轮次": rounds,
+                    "耗时ms": (_t.perf_counter() - t0) * 1000.0}
+        cur = grab(hwnd)
+        gc = _poll_gray(cur) if cur is not None else None
+        if gc is None:
+            return {"就绪": None, "轮次": rounds,
+                    "耗时ms": (_t.perf_counter() - t0) * 1000.0}
+        d = _img_diff(gb, gc)
+        if d.get("changed") is False:
+            streak += 1
+        else:
+            streak = 0
+        if streak >= max(1, int(need)):
+            return {"就绪": True, "轮次": rounds,
+                    "耗时ms": (_t.perf_counter() - t0) * 1000.0}
+        if _t.perf_counter() >= deadline:
+            return {"就绪": False, "轮次": rounds,
+                    "耗时ms": (_t.perf_counter() - t0) * 1000.0}
+        _t.sleep(POLL_INTERVAL_MS / 1000.0)
+
+
+def _wait_effect(hwnd, base_img, budget_ms=POLL_BUDGET_MS, need=POLL_HYSTERESIS,
+                 capture=None):
+    """**变化即停**：连续 `need` 帧都判「变了」⇒ 动作生效了，可以收工。
+
+    ★ 这取代了原来的 `time.sleep(_settle(450))`（动作后等界面反应）。
+    ★ 返回 {生效: True/False/None, 轮次, 耗时ms, 图}
+      None = 没测出来；False = 预算内**没看到**变化（= 老的「页面无变化」口径）。
+    ★ **不落盘**：轮询期只在内存里采样；最后那张由调用方决定要不要落盘。
+    """
+    import time as _t
+    t0 = _t.perf_counter()
+    grab = capture or _poll_sample
+    gb = _poll_gray(base_img)
+    if gb is None:
+        return {"生效": None, "轮次": 0, "耗时ms": 0.0, "图": None}
+    streak = 0
+    rounds = 0
+    last = None
+    deadline = t0 + max(0.0, float(budget_ms) / 1000.0)
+    while True:
+        rounds += 1
+        # ★ 同上：预算检查在采样之前 ⇒ 总耗时 ≤ 预算（**永远不慢于改前的固定 sleep**）
+        if _t.perf_counter() >= deadline:
+            return {"生效": False, "轮次": rounds,
+                    "耗时ms": (_t.perf_counter() - t0) * 1000.0, "图": last}
+        cur = grab(hwnd)
+        if cur is None:
+            return {"生效": None, "轮次": rounds,
+                    "耗时ms": (_t.perf_counter() - t0) * 1000.0, "图": last}
+        last = cur
+        gc = _poll_gray(cur)
+        d = _img_diff(gb, gc)
+        if d.get("changed") is True:
+            streak += 1
+        else:
+            streak = 0
+        if streak >= max(1, int(need)):
+            return {"生效": True, "轮次": rounds,
+                    "耗时ms": (_t.perf_counter() - t0) * 1000.0, "图": last}
+        if _t.perf_counter() >= deadline:
+            return {"生效": False, "轮次": rounds,
+                    "耗时ms": (_t.perf_counter() - t0) * 1000.0, "图": last}
+        _t.sleep(POLL_INTERVAL_MS / 1000.0)
 
 
 def log(msg):
@@ -1698,15 +1962,23 @@ def find_control(hwnd, name, max_depth=10):
 
 
 # ─────────────────── 输入（SendInput，仅在没有 UIA 模式时才用） ───────────────────
+# ★ M4（2026-10-22）：`dwExtraInfo` 从「指针」改成 **ULONG_PTR 宽度**（ctypes.c_size_t）。
+#   改的理由只有一个：**要能把魔数填进去**。
+#   · Win32 的定义是 `ULONG_PTR dwExtraInfo`（指针宽度的无符号整数），
+#     老代码把它声明成 `POINTER(c_ulong)` —— 宽度**恰好相同**（x64 8 字节 / x86 4 字节），
+#     所以**结构体布局一个字节都不变**，但语义是「指针」⇒ 填不进值。
+#   · 改成 `c_size_t` 后宽度不变、语义正确 ⇒ 老代码的 `None`（= NULL = 0）仍然合法。
+# ★ 魔数定义在**单独一个模块** inject_magic.py（单一真源，注入方与判定方共用）：
+#   `inject_magic.INJECT_MAGIC` —— 判据与将来的归因层 import 的就是这一个定义。
 class MOUSEINPUT(ctypes.Structure):
     _fields_ = [("dx", wt.LONG), ("dy", wt.LONG), ("mouseData", wt.DWORD),
                 ("dwFlags", wt.DWORD), ("time", wt.DWORD),
-                ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong))]
+                ("dwExtraInfo", ctypes.c_size_t)]
 
 
 class KEYBDINPUT(ctypes.Structure):
     _fields_ = [("wVk", wt.WORD), ("wScan", wt.WORD), ("dwFlags", wt.DWORD),
-                ("time", wt.DWORD), ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong))]
+                ("time", wt.DWORD), ("dwExtraInfo", ctypes.c_size_t)]
 
 
 class _INPUTU(ctypes.Union):
@@ -1758,7 +2030,7 @@ def send_scan(scancode, down=True):
     """
     flags = KEYEVENTF_SCANCODE | (KEYEVENTF_KEYUP if not down else 0)
     inp = INPUT(type=INPUT_KEYBOARD,
-                ki=KEYBDINPUT(0, scancode, flags, 0, None))
+                ki=KEYBDINPUT(0, scancode, flags, 0, inject_magic.INJECT_MAGIC))
     user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
 
 
@@ -1815,7 +2087,8 @@ def send_text_scan(text, gap=0.012):
 
 
 def send_mouse(flags, x=0, y=0, data=0):
-    inp = INPUT(type=INPUT_MOUSE, mi=MOUSEINPUT(x, y, data, flags, 0, None))
+    inp = INPUT(type=INPUT_MOUSE,
+                mi=MOUSEINPUT(x, y, data, flags, 0, inject_magic.INJECT_MAGIC))
     user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
 
 
@@ -1835,7 +2108,8 @@ def send_unicode(ch):
         units = (code,)
     for _u in units:
         for flags in (KEYEVENTF_UNICODE, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP):
-            inp = INPUT(type=INPUT_KEYBOARD, ki=KEYBDINPUT(0, _u, flags, 0, None))
+            inp = INPUT(type=INPUT_KEYBOARD,
+                        ki=KEYBDINPUT(0, _u, flags, 0, inject_magic.INJECT_MAGIC))
             user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
 
 
@@ -1948,7 +2222,8 @@ def send_vk(vk, down=True):
     属 C 级（快捷键）。
     """
     flags = 0 if down else KEYEVENTF_KEYUP
-    inp = INPUT(type=INPUT_KEYBOARD, ki=KEYBDINPUT(vk, 0, flags, 0, None))
+    inp = INPUT(type=INPUT_KEYBOARD,
+                ki=KEYBDINPUT(vk, 0, flags, 0, inject_magic.INJECT_MAGIC))
     user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
 
 
@@ -2147,7 +2422,9 @@ def do_fill(hwnd, xy, text, dry=False, clear=True):
 
     b0 = evidence(hwnd, "fill0")
     click_at(x, y)
-    time.sleep(_settle(350))
+    # ★ M7：固定 350 ms → 变化即停（轮询到界面变了就收工）
+    _eff = _wait_effect(hwnd, _poll_base(hwnd),
+                         budget_ms=int(_settle(350) * 1000))
     if clear:
         # Ctrl+A 全选 → 随后打字即整体覆盖（比退格可靠：不依赖旧值长度）
         send_vk(0x11, True)
@@ -2157,12 +2434,16 @@ def do_fill(hwnd, xy, text, dry=False, clear=True):
         send_vk(0x41, False)
         time.sleep(0.06)
         send_vk(0x11, False)
-        time.sleep(_settle(200))
+        # ★ M7：清空后等「选区真的变了」，不等满 200 ms
+        _eff = _wait_effect(hwnd, _poll_base(hwnd),
+                             budget_ms=int(_settle(200) * 1000))
     # 表单/聊天框语境：换行发 Shift+Enter。**绝不能发裸 Enter** ——
     # 2026-10-10 实测：往 WorkBuddy 聊天框发多行文本，裸 Enter 把 1127 字
     # 拆成多条消息自动提交，凭空造出两个垃圾任务（见 send_text 的坑二）。
     send_text(text, nl="shift_enter")
-    time.sleep(_settle(500))
+    # ★ M7：打完字等「内容真的变了」，不等满 500 ms
+    _eff = _wait_effect(hwnd, _poll_base(hwnd),
+                         budget_ms=int(_settle(500) * 1000))
     b1 = evidence(hwnd, "fill1")
     f0, f1 = _img_fp(b0.get("文件") or ""), _img_fp(b1.get("文件") or "")
     changed = None if (f0 is None or f1 is None) else (f1 != f0)
@@ -2330,7 +2611,11 @@ def do_click(hwnd, name=None, xy=None, dry=False, force_coord=False, retry=0,
             # 要求隔 0.25 秒两次读数**完全一致**才动手，否则宁可不点。
             r1 = r
             if not dry:
-                time.sleep(_settle(250))
+                # ★ M7：反竞态的「等 250 ms」换成「**就绪轮询**」——
+                #   连续 %d 帧都判「没变」才动手（稳了就走，不必等满）。
+                #   ⛔ 不是把等待砍成 0：轮询有预算上限，没稳就照旧按「矩形不稳定」拒。
+                _rdy = _wait_ready(hwnd, _poll_base(hwnd),
+                                   budget_ms=int(_settle(250) * 1000))
                 c2 = find_control(hwnd, c.Name) or c
                 x, y, r2, ok2 = _center(c2)
                 if (not ok2) or r2 != r1:
@@ -2387,7 +2672,8 @@ def do_click(hwnd, name=None, xy=None, dry=False, force_coord=False, retry=0,
         # ⚠ 这个信号只是**提示**：WinUI3 这类界面刚还原时有渲染残留，前后图会差几个像素。
         #   判定"吃不吃投递"要以**功能性判据**（菜单有没有开、标签有没有切）为准。
         attempts = 1
-        time.sleep(_settle(450))
+        _eff = _wait_effect(hwnd, _poll_base(hwnd),
+                             budget_ms=int(_settle(450) * 1000))
         after = evidence(hwnd, "after")
         fp0 = _img_fp(before.get("文件") or "")
         fp1 = _img_fp(after.get("文件") or "")
@@ -2397,7 +2683,10 @@ def do_click(hwnd, name=None, xy=None, dry=False, force_coord=False, retry=0,
         while True:
             attempts += 1
             click_at(x, y)
-            time.sleep(_settle(450))
+            # ★ M7：动作后不再盲等 450 ms —— 轮询到「界面变了」就收工（连续 %d 帧）。
+            #   预算用 _settle(450) 换算（旋钮语义不变：AGENTCTL_SETTLE_MS 仍是上限）。
+            _eff = _wait_effect(hwnd, _poll_base(hwnd),
+                                 budget_ms=int(_settle(450) * 1000))
             after = evidence(hwnd, "after")
             fp1 = _img_fp(after.get("文件") or "")
             if fp0 is None or fp1 is None:
@@ -2409,7 +2698,8 @@ def do_click(hwnd, name=None, xy=None, dry=False, force_coord=False, retry=0,
             log(f"   ⚠ 第 {attempts} 次点击后页面〔无变化〕→ 自动重试")
             time.sleep(_settle(350))
     else:
-        time.sleep(_settle(450))
+        _eff = _wait_effect(hwnd, _poll_base(hwnd),
+                             budget_ms=int(_settle(450) * 1000))
         after = {} if dry else evidence(hwnd, "after")
         # ★ P0-3（2026-10-21；ZCode 评审逮到的真 bug）：**UIA.Invoke / SelectionItem
         #   这条路径原来从不计算 changed** ⇒ 末尾的 changed is True 恒不成立
