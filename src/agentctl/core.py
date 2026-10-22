@@ -3574,10 +3574,160 @@ def _xy(xy):
     return [int(parts[0]), int(parts[1])]
 
 
-def _eid_recheck(hwnd: int, feat: dict, walk: dict):
-    """身份复核：按**签发那次的遍历口径**重走一遍，看这个元素还在不在原位。
+_EID_FAST_UIA_MOD = None        # M18-a：comtypes UIAutomationCore 模块缓存（快路复用）
 
-    返回 (当前节点, 补充说明)；找不到 ⇒ (None, 原因)。
+
+def _eid_recheck(hwnd: int, feat: dict, walk: dict, need_keys: bool = False):
+    """身份复核（M18-a 起两段式）。
+
+    ★ 快路（默认）：provider 侧按「控件类型」精确定位候选集，客户端再做
+      「类型+名字+矩形」三重全等（`_text_of` 文本链与 roles 保留谓词逐字镜像，
+      见 `_eid_locate_fast`）—— 不再为一次复核扫全树（M17-B 实测全树 walk
+      129.9ms@110 节点，`docs\\实测_M17B_UIA与抓帧_20221022.md` §一）。
+    ★ need_keys=True（调用方给了 expect_uid，要 uid 对账）⇒ 必须走全树：
+      struct_key 是「签发口径的 walk 骨架」上的结构路径（`_screen_struct_keys`），
+      精确定位给不出全树骨架 ⇒ 这条路**语义优先**，照旧全走。
+    ★ 快路任何异常/不可用 ⇒ 回落全树（fail-closed，结论与改前同族）。
+      环境变量 AGENTCTL_EID_RECHECK_PRECISE=0 整体关掉快路（判据对照/回退用）。
+    ⛔ 「查不到」仍然只返回 (None, 原因) 由调用方落 code=12 —— **不许**写成「没变」。
+    """
+    if (not need_keys and not feat.get("ocr")
+            and os.environ.get("AGENTCTL_EID_RECHECK_PRECISE", "1") != "0"):
+        try:
+            hit = _eid_locate_fast(hwnd, feat, (walk or {}).get("roles") or ("all",))
+        except Exception:
+            hit = None                       # 快路炸了 = 没测出来 = 回落全树，不硬猜
+        if hit is not None:
+            if not hit:
+                return None, ("精确复核（M18a）：现在这扇窗里没有『类型 %s / 名字 %s / 矩形 %s』"
+                              "对得上的元素 —— 元素已不在原位"
+                              % (feat.get("type"), feat.get("name"),
+                                 [int(x) for x in (feat.get("rect") or ())])), None
+            node, note = hit[0]
+            roles = tuple((walk or {}).get("roles") or ("all",))
+            ctx = {"口径": {"roles": list(roles),
+                            "max_nodes": max(int((walk or {}).get("max_nodes") or 0),
+                                             uia_tree.FIND_MAX_NODES),
+                            "max_depth": int((walk or {}).get("max_depth") or uia_tree.DEFAULT_MAX_DEPTH),
+                            "include_offscreen": True,
+                            "通道": "precise(M18a)"},
+                   "struct_keys": None, "index": -1, "nodes": None}
+            return node, note, ctx
+    return _eid_recheck_by_walk(hwnd, feat, walk)
+
+
+def _eid_locate_fast(hwnd: int, feat: dict, roles):
+    """provider 侧精确定位（M18-a）。
+
+    返回 None=通道不可用（回落全树）；[]=确认无匹配；[(node, note)] = 命中。
+    与全树 walk 的**等价性口径**（逐字镜像 uia_tree.walk uia_tree.py:454-545）：
+      · 条件=ControlType 属性条件（provider 侧筛），**名字不进 provider 条件** ——
+        walk 的节点名字来自 `_text_of`（Name→Value→Text→LegacyIAccessible 四级链，
+        uia_tree.py:154-190），Name 属性为空但 Value 有字的元素旧口径**能**匹配上；
+        provider 只按 Name 筛会把它们漏掉 ⇒ 那才是真判词变弱。所以 marshaling 之后
+        客户端仍走同一条 `_text_of` 链做名字比对。
+      · 零矩形不收（:474）；浏览器外壳名不收（:498）；roles 保留谓词同款（:494-497）；
+        include_offscreen=True（复核超集口径，:3593-3597 原注释）⇒ 无视口过滤。
+    """
+    import comtypes                                       # noqa: PLC0415
+    import comtypes.client as _cc                         # noqa: PLC0415
+    import uiautomation as auto                           # noqa: PLC0415
+    global _EID_FAST_UIA_MOD
+    if _EID_FAST_UIA_MOD is None:
+        _EID_FAST_UIA_MOD = _cc.GetModule("UIAutomationCore.dll")
+    uia_mod = _EID_FAST_UIA_MOD
+    ctype_name = str(feat.get("type") or "")
+    ct_id = getattr(auto.ControlType, ctype_name, None)
+    if not isinstance(ct_id, int):
+        return None                    # 类型名不在库映射里 ⇒ 快路表达不了，回落全树
+    iuia = comtypes.CoCreateInstance(uia_mod.CUIAutomation._reg_clsid_,
+                                     interface=uia_mod.IUIAutomation,
+                                     clsctx=comtypes.CLSCTX_INPROC_SERVER)
+    el = iuia.ElementFromHandle(int(hwnd))
+    cond = iuia.CreatePropertyCondition(30003, ct_id)     # UIA_ControlTypePropertyId
+    arr = el.FindAll(7, cond)                             # TreeScope_Subtree：含根，镜像 walk 从根起
+    want_rect = [int(x) for x in (feat.get("rect") or ())]
+    want_name = (feat.get("name") or "")
+    want_all = "all" in roles
+    want_int = want_all or "interactive" in roles
+    want_txt = want_all or "text" in roles
+    hits = []
+    for i in range(arr.Length):
+        e = arr.GetElement(i)
+        try:
+            r = e.CurrentBoundingRectangle
+            rect = [int(r.left), int(r.top), int(r.right), int(r.bottom)]
+        except Exception:
+            continue
+        if (rect[2] <= rect[0]) or (rect[3] <= rect[1]):
+            continue
+        txt = _text_of_raw(e, uia_mod)
+        if txt.strip() in uia_tree.BROWSER_CHROME_NAMES:
+            continue
+        interactive = ctype_name in uia_tree.INTERACTIVE_TYPES
+        txt_ok = bool(txt.strip()) and len(txt.strip()) >= uia_tree.TEXT_MIN_LEN
+        keep = (want_all or (want_int and interactive)
+                or (want_txt and (txt_ok if uia_tree.TEXT_FALLBACK else bool(txt.strip()))))
+        if not keep:
+            continue
+        if txt[:120] != want_name:
+            continue
+        if rect != want_rect:
+            continue
+        try:
+            enabled = bool(e.CurrentIsEnabled)
+        except Exception:
+            enabled = None
+        node = {"type": ctype_name, "name": txt[:120], "rect": rect,
+                "center": [(rect[0] + rect[2]) // 2, (rect[1] + rect[3]) // 2],
+                "enabled": enabled}
+        hits.append((node, "（M18a 精确复核：provider 侧按类型定位，客户端类型+名字+矩形三重全等）"))
+    return hits
+
+
+def _text_of_raw(el, uia_mod):
+    """`uia_tree._text_of`（uia_tree.py:154-190）的**原始元素等价物**，顺序一字不差：
+    Name → ValuePattern.Value → TextPattern.DocumentRange.GetText → LegacyIAccessible.Value。
+    每级都 try：读不到就落下一级，全空返回 ""——与库版同款容错。
+    """
+    try:
+        n = el.CurrentName
+        if n and n.strip():
+            return n
+    except Exception:
+        pass
+    try:
+        p = el.GetCurrentPattern(10002).QueryInterface(uia_mod.IUIAutomationValuePattern)
+        v = p.CurrentValue
+        if v and str(v).strip():
+            return v
+    except Exception:
+        pass
+    try:
+        p = el.GetCurrentPattern(10014).QueryInterface(uia_mod.IUIAutomationTextPattern)
+        rng = p.DocumentRange
+        if rng is not None:
+            v = rng.GetText(-1)
+            if v and str(v).strip():
+                return v
+    except Exception:
+        pass
+    try:
+        p = el.GetCurrentPattern(10018).QueryInterface(
+            uia_mod.IUIAutomationLegacyIAccessiblePattern)
+        v = p.CurrentValue
+        if v and str(v).strip():
+            return v
+    except Exception:
+        pass
+    return ""
+
+
+def _eid_recheck_by_walk(hwnd: int, feat: dict, walk: dict):
+    """身份复核旧路：按**签发那次的遍历口径**重走全树（M18-a 前的唯一实现）。
+
+    什么时候还会走这里：①调用方给了 expect_uid（要全树结构键算 uid，语义优先）；
+    ②快路通道不可用/异常（fail-closed 回落）。语义与 M18-a 前一字不改。
 
     ★ 复核用「类型 + 名字 + 矩形」三重全等，**不用编号**：
       编号正是 D1 的病根，拿它复核等于「用错的尺子量错的布」。
@@ -4174,7 +4324,10 @@ def t_click(args: dict) -> dict:
         if feat.get("ocr"):
             cur, why, rctx = _ocr_word_recheck(hwnd, feat)
         else:
-            cur, why, rctx = _eid_recheck(hwnd, feat, (entry or {}).get("walk"))
+            # ★ M18-a：给了 expect_uid 才需要全树结构键（uid 对账口径一字不改）；
+            #   没给就走 provider 精确复核，不为一次复核扫全树（B 线实测 129.9ms/次）。
+            cur, why, rctx = _eid_recheck(hwnd, feat, (entry or {}).get("walk"),
+                                          need_keys=bool(str(args.get("expect_uid") or "").strip()))
         if cur is None:
             return env(code=gate.CODE_STALE_CAPTURE,
                        warning=("元素 %s『%s』已经不在原位了 —— %s。"

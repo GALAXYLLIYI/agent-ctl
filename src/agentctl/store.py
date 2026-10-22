@@ -52,6 +52,22 @@ LOCK_NAME = ".timeline-write.xlock"
 _LOCK_REGISTRY = {}
 _LOCK_REGISTRY_GUARD = threading.Lock()
 
+#: M18-b（2026-10-23）：**sqlite 连接复用**。
+#: ★ 病（M17-C2 地图 s4）：老写法**每条事件**都 `sqlite3.connect()` 一次，
+#:   并且每次都重设 `PRAGMA journal_mode=WAL` —— 连接建立 + 两次 PRAGMA 往返 × 事件数。
+#:   而 `journal_mode=WAL` 是**写进库文件头的持久设置** ⇒ 每条事件重设纯属多余往返。
+#: ★ 修法：**每线程一条长连接**（`threading.local`）。
+#:   为什么线程私有、不是「全局一条 + 一把锁」：sqlite3 连接默认 `check_same_thread=True`，
+#:   跨线程共用要么报错、要么把事务状态搅在一起；而读路径（`events()/frames()`）
+#:   **不在写锁里**，共用一条连接就得给读也加锁 ⇒ 引入新的锁竞争。
+#:   线程私有 = 零锁竞争，且每条连接仍由 sqlite 自己保证写原子（跨进程照旧靠 `CrossProcessLock`）。
+#: ★ 连接失效（显式 `close()`、跨 fork 的 pid 变了、`database is locked`）⇒ **丢弃重建成新连接**，
+#:   绝不把「没写成」吞成「写成了」（unknown 永不当成功）。
+#: ★ **不碰 fsync / 不做后台批量写**：这条刀只省「建连 + 重设 PRAGMA」，
+#:   `append()` 返回 = jsonl 已 fsync、索引已 commit（审计同步落盘语义一字不改）。
+_DB_LOCK_RETRIES = 3            #: 遇到 `database is locked` / `busy` 的最多重试次数（有上限，不无限等）
+_DB_LOCK_BACKOFF = 0.05         #: 第 n 次重试前 sleep n×0.05 秒
+
 
 class CrossProcessLock:
     """跨进程排他锁 —— **OS 级**锁，进程一死锁自动释放（不留死锁文件）。
@@ -215,6 +231,11 @@ class Store:
         self._xlock = CrossProcessLock(os.path.join(root, LOCK_NAME))
         self._fsync_every = max(1, fsync_every)
         self._since_fsync = 0
+        # ★ M18-b：每线程一条长连接（见模块顶部说明）。
+        self._conn_tl = threading.local()      # 本线程的连接句柄
+        self._conn_guard = threading.Lock()    # 只保护 _conn_owners 登记表
+        self._conn_owners = []                 # 本实例开过的所有连接（close() 统一收口）
+        self._conn_gen = 0                     # close() 后 +1 ⇒ 旧连接一律作废
         self._init_db()
         self._head = self._load_head()
         # ★ M8：当前纪元（epoch）。0 = 旧链（迁移前的老历史）；≥1 = 迁移后的新段。
@@ -227,10 +248,115 @@ class Store:
         return os.path.join(self.root, f"timeline-{_dt.date.today():%Y%m%d}.jsonl")
 
     def _conn(self) -> sqlite3.Connection:
-        c = sqlite3.connect(self.db_path, timeout=10)
-        c.execute("PRAGMA journal_mode=WAL")
-        c.execute("PRAGMA synchronous=NORMAL")   # §4.3：批量提交，不赌单条 fsync 的延迟
-        return c
+        """取**本线程**的长连接（没有/失效就建一条）。M18-b：不再每条事件新建。
+
+        ★ `journal_mode` / `synchronous` **只在建连时**设一次：
+          · `journal_mode=WAL` 是写进库文件头的**持久设置** ⇒ 每条事件重设 = 纯浪费；
+          · `synchronous` 是**每连接**的设置 ⇒ 建连时设对即可（§4.3 语义不变）。
+        ★ 连接的三条失效路径：① 被本实例 `close()` 关掉（gen 变了）
+          ② 跨 fork（pid 变了）③ 被 `_execute_write` 判为坏连接丢掉
+          ⇒ ①② 在这里立刻重建；③ 下一条事件重建。
+        ★ `check_same_thread=False` **不是**为了跨线程共用：（本类只用线程私有的那一条）
+          而是为了让 `close()/__del__` 能在别的线程里安全收口 —— 否则线程死了，
+          连接没人关 ⇒ **文件句柄泄漏**（本刀判据第 6 条要断言的正是句柄不增长）。
+        """
+        pid = os.getpid()
+        ent = getattr(self._conn_tl, "ent", None)
+        if ent is not None:
+            conn, gen, conn_pid = ent
+            if conn is not None and gen == self._conn_gen and conn_pid == pid:
+                return conn
+            self._conn_tl.ent = None            # 失效：摘掉（交给 _drop_conn 关）
+            self._drop_conn(conn)
+        conn = sqlite3.connect(self.db_path, timeout=10, check_same_thread=False)
+        conn.execute("PRAGMA journal_mode=WAL")     # ← 建连时一次（持久设置，不必每条事件重设）
+        conn.execute("PRAGMA synchronous=NORMAL")   # ← 每连接一次：批量提交，不赌单条 fsync 的延迟
+        self._conn_tl.ent = (conn, self._conn_gen, pid)
+        with self._conn_guard:
+            self._conn_owners.append(conn)
+        return conn
+
+    def _drop_conn(self, conn) -> None:
+        """把一条（可能已坏的）连接从登记表摘掉并关掉；下次 `_conn()` 自然重建。"""
+        if conn is None:
+            return
+        ent = getattr(self._conn_tl, "ent", None)
+        if ent is not None and ent[0] is conn:
+            self._conn_tl.ent = None
+        with self._conn_guard:
+            try:
+                self._conn_owners.remove(conn)
+            except ValueError:
+                pass
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+    def _execute_write(self, sql: str, params: tuple) -> None:
+        """写索引一条 —— **提交后才返回**（同步落盘；没有后台线程、没有批量刷）。
+
+        ★ 与老写法 `with self._conn() as c: c.execute(...)` **完全同口径**：
+          `with conn:` 成功即 commit、异常即 rollback ⇒ 「返回 = 此刻已可读」。
+        ★ 重试只针对**可恢复**的两种：`database is locked`/`busy`（别的进程正在提交）
+          与「连接已被关闭」（本实例 `close()` 或跨线程收口）。
+          其它 `sqlite3.Error` 一律原样抛出 —— unknown 永不当成功。
+        ★ 重试有上限（`_DB_LOCK_RETRIES`），且期间**持着跨进程写锁**，
+          不会出现「两个写者都以为对方会重试」的活锁。
+        """
+        last = None
+        for attempt in range(_DB_LOCK_RETRIES):
+            conn = self._conn()
+            try:
+                with conn:
+                    conn.execute(sql, params)
+                return
+            except sqlite3.OperationalError as e:
+                msg = str(e).lower()
+                if "locked" not in msg and "busy" not in msg:
+                    raise
+                last = e
+                if attempt + 1 >= _DB_LOCK_RETRIES:
+                    self._drop_conn(conn)   # 连接可能已坏 ⇒ 丢掉，下条事件重建
+                    raise
+                time.sleep(_DB_LOCK_BACKOFF * (attempt + 1))
+            except sqlite3.ProgrammingError as e:
+                if "closed" not in str(e).lower():
+                    raise
+                last = e
+                self._drop_conn(conn)
+                if attempt + 1 >= _DB_LOCK_RETRIES:
+                    raise
+        raise last      # pragma: no cover —— 循环内已 raise，兜底保持「不静默成功」
+
+    # ── M18-b：长连接的显式收口 ──
+    def close(self) -> None:
+        """关闭本实例开过的所有 sqlite 连接。
+
+        ★ 只在「没有别的线程正在写」时调用（`__del__` 除外）。
+        ★ 关掉之后本实例**仍可继续用**：`_conn()` 会重建新连接（gen+1 ⇒ 旧的全作废）。
+        ★ 长连接的代价就是**文件句柄常驻** ⇒ 谁创建谁收口：进程退出、测试收尾、
+          要删/搬 timeline 目录之前，都必须先 `close()`（Windows 上尤其：句柄没关删不掉）。
+        """
+        guard = getattr(self, "_conn_guard", None)
+        if guard is None:
+            return
+        with guard:
+            conns = self._conn_owners[:]
+            self._conn_owners.clear()
+            self._conn_gen += 1
+        for c in conns:
+            try:
+                c.close()
+            except Exception:
+                pass
+        self._conn_tl = threading.local()
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
 
     def _init_db(self):
         with self._conn() as c:
@@ -333,6 +459,85 @@ class Store:
         except sqlite3.Error:
             return False
 
+    #: M18-b 第二部分：从文件尾部倒读的**首块**大小（字节）。
+    #: 只决定「先读多少」；找不到完整行就把块大小翻倍，直到读全文件。
+    _TAIL_CHUNK = 64 * 1024
+
+    @staticmethod
+    def _last_record_fullscan(path: str):
+        """老实现的**逐行读全文**——M18-b 的**回退路径**，语义是 M8 的正确性保证。
+
+        ★ 只在倒读路径「读完全文件仍拿不到」或「半行里带非法 UTF-8」时才走这里。
+        ★ 与老 `_read_tail` 的每行处理**逐字一致**：strip → 空行跳过 → json.loads
+          失败跳过 → 取最后一条能解析的（不校验字段、不校验链）。
+        ★ 不许删：文件末尾没有换行、整份文件是一行超长坏行等极端情况下，
+          只有全量读才能给出与老实现完全相同的结果。
+        """
+        last = None
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    last = json.loads(line)
+                except Exception:
+                    continue            # 半行/坏行：跳过，落到上一条
+        return last
+
+    @classmethod
+    def _last_record_in_file(cls, path: str):
+        """取**文件顺序上的最后一条完整记录**（M18-b 第二部分：尾部倒读）。
+
+        与老 `_read_tail` 的逐行全读**语义逐字等价**，只改读法：
+          · 从 EOF 往前按 `_TAIL_CHUNK` 分块读，只解析尾部若干行 ⇒ 耗时不再随
+            「文件里有多少条历史记录」线性增长（写 N 条不再累计读 N 遍全文）。
+          · **完整性检查**：末尾可能是半行（进程被杀 / 写入被打断）⇒ 该行
+            `json.loads` 失败 ⇒ 跳过，落到**上一条完整记录**（绝不把半行当完整行）。
+          · **回退路径保留**：尾部一块都解析不出来 ⇒ 块大小翻倍直到覆盖全文；
+            读完全文仍没有 ⇒ `_last_record_fullscan` 全量再扫一遍；
+            半行带非法 UTF-8 ⇒ 也走 `_last_record_fullscan`（与老实现同样会抛错，
+            不静默把坏字节当成「没有记录」）。
+        """
+        try:
+            size = os.path.getsize(path)
+        except OSError:
+            return None
+        if size <= 0:
+            return None
+        limit = min(size, cls._TAIL_CHUNK)
+        while True:
+            try:
+                # read() 到 EOF（不是 read(limit)）：万一读的瞬间文件又长了，
+                # 多出来的尾巴也在 buf 里 ⇒ 与老实现「一直读到 EOF」同口径。
+                with open(path, "rb") as f:
+                    f.seek(size - limit)
+                    buf = f.read()
+            except OSError:
+                return None
+            # 老实现用文本模式（universal newlines）⇒ \r\n / \r 都算换行；这里等价替换。
+            lines = buf.replace(b"\r\n", b"\n").replace(b"\r", b"\n").split(b"\n")
+            if limit < size:
+                # 块是从文件中间切进来的 ⇒ 第一段是「半行」的尾巴，丢掉；
+                # 下一轮块翻倍后会重新从更靠前的位置读，不会漏行。
+                lines = lines[1:]
+            for raw in reversed(lines):
+                try:
+                    text = raw.decode("utf-8")
+                except UnicodeDecodeError:
+                    return cls._last_record_fullscan(path)
+                text = text.strip()
+                if not text:
+                    continue
+                try:
+                    return json.loads(text)
+                except Exception:
+                    continue            # 半行/坏行：跳过，落到上一条
+            if limit >= size:
+                # 整个文件倒读完了仍没有能解析的行 ⇒ 老实现兜底（逐字等价）。
+                return cls._last_record_fullscan(path)
+            limit = min(size, limit * 2)
+
     def _read_tail(self) -> tuple[int, str]:
         """读**文件顺序上的链尾**（不是 max(seq) 那一行）。
 
@@ -340,30 +545,20 @@ class Store:
           hash。一旦链分过叉（老链有 24 处断点），max(seq) 未必是文件里的最后一行
           ⇒ 真源会**从错误的位置续链**。
           这里按**文件顺序**取（最后一份文件里的最后一条有效记录）⇒ 才是链的真正尾巴。
+        ★ M18-b 第二部分：**不再每事件全量重读 JSONL** —— 每份文件只从尾部倒读，
+          找最后一条完整记录（见 `_last_record_in_file`）；跨文件回退、坏行/半行跳过、
+          非 dict / seq 不可转 int 时继续找更早的文件、`GENESIS` 兜底，全部保持原语义。
         ★ 这是**读**链尾；写入方必须在**锁内**调它（见 append）。
         """
         last_seq, last_hash = 0, GENESIS
-        files = sorted(self._jsonl_files())
-        for path in reversed(files):
-            last = None
-            try:
-                with open(path, encoding="utf-8") as f:
-                    for line in f:
-                        line = line.strip()
-                        if not line:
-                            continue
-                        try:
-                            r = json.loads(line)
-                        except Exception:
-                            continue        # 半行/坏行：跳过，落到上一条
-                        last = r
-            except OSError:
+        for path in reversed(sorted(self._jsonl_files())):
+            last = self._last_record_in_file(path)
+            if last is None:
                 continue
-            if last is not None:
-                try:
-                    return int(last.get("seq", 0)), str(last.get("hash", last_hash))
-                except Exception:
-                    continue
+            try:
+                return int(last.get("seq", 0)), str(last.get("hash", last_hash))
+            except Exception:
+                continue            # 末行不是 dict / seq 转不了 int ⇒ 找更早的文件（同老口径）
         return last_seq, last_hash
 
     def _load_head(self) -> tuple[int, str]:
@@ -443,14 +638,13 @@ class Store:
                     body["epoch"] = self._epoch      # ★ 纪元标记（旧记录没有 ⇒ 就是 epoch 0）
                 body["hash"] = compute_hash(prev, {k: v for k, v in body.items() if k != "hash"})
                 self._append_jsonl(body)
-                with self._conn() as c:
-                    # ★ INSERT OR IGNORE（**不是** OR REPLACE）⇒ 不覆盖已有行
-                    c.execute(
-                        "INSERT OR IGNORE INTO events(seq,kind,t_mono,t_wall,actor,tool,ok,code,"
-                        "payload,prev_hash,hash,session) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-                        (seq, kind, body["t_mono"], body["t_wall"], actor, tool,
-                         None if ok is None else int(ok), code,
-                         canonical(payload or {}), prev, body["hash"], session))
+                # ★ M18-b：复用长连接写索引（提交后才返回；见 _execute_write）
+                self._execute_write(
+                    "INSERT OR IGNORE INTO events(seq,kind,t_mono,t_wall,actor,tool,ok,code,"
+                    "payload,prev_hash,hash,session) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (seq, kind, body["t_mono"], body["t_wall"], actor, tool,
+                     None if ok is None else int(ok), code,
+                     canonical(payload or {}), prev, body["hash"], session))
                 self._head = (seq, body["hash"])
                 return body
 
@@ -485,12 +679,12 @@ class Store:
                     body["epoch"] = self._epoch
                 body["hash"] = compute_hash(prev, {k: v for k, v in body.items() if k != "hash"})
                 self._append_jsonl(body)
-                with self._conn() as c:
-                    # ★ 不覆盖（OR IGNORE），与 events 同口径
-                    c.execute("INSERT OR IGNORE INTO frames(seq,t_mono,t_wall,path,sha256,bytes,w,h,"
-                              "trigger,state,prev_hash,hash) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-                              (seq, body["t_mono"], body["t_wall"], body["path"], sha, nbytes, w, h,
-                               trigger, state, prev, body["hash"]))
+                # ★ M18-b：复用长连接写索引（不覆盖，与 events 同口径）
+                self._execute_write(
+                    "INSERT OR IGNORE INTO frames(seq,t_mono,t_wall,path,sha256,bytes,w,h,"
+                    "trigger,state,prev_hash,hash) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (seq, body["t_mono"], body["t_wall"], body["path"], sha, nbytes, w, h,
+                     trigger, state, prev, body["hash"]))
                 self._head = (seq, body["hash"])
                 return body
 
