@@ -491,6 +491,23 @@ def _legacy_env() -> dict:
       这才是 WorkBuddy 说的「双保险里有一半是瞎的」的真正修法。
     """
     env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
+    # ★ M12 阶段二：act 侧要 import agentctl.framecache（判差/退化**单一真源**）
+    #   ⇒ 把 agentctl 包的上一级（= <仓>/src）放进子进程的 PYTHONPATH。
+    #   ⇒ 顺带把本次动作的证据目录（AGENTCTL_SNAP_DIR）传下去：
+    #     act 把「第一帧变化」写到那儿，core 再读回（**帧与动作一一对应**）。
+    try:
+        _src_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        if os.path.isdir(os.path.join(_src_dir, "agentctl")):
+            env["PYTHONPATH"] = _src_dir + os.pathsep + env.get("PYTHONPATH", "")
+    except Exception:
+        pass
+    _snap = env.get("AGENTCTL_SNAP_DIR")
+    if _snap:
+        try:
+            os.makedirs(_snap, exist_ok=True)
+            env["AGENTCTL_SNAP_DIR"] = _snap
+        except Exception:
+            pass
     env["AGENTCTL_BRAKE_FLAG"] = gate.BRAKE_FLAG
     # ★ 2026-10-19 修「两本账」：把 core 认定的那本账**塞进子进程**，
     #   这样老线 gate（不管解析到哪份）读的都是同一个 auth_pass.json。
@@ -533,8 +550,16 @@ def _ask_timeout(args: dict) -> int:
                or (ASK_TIMEOUT_SEC_MCP if CHANNEL == "mcp" else ASK_TIMEOUT_SEC_CLI))
 
 
-def _legacy(name: str, args: list[str], timeout: int = 60) -> tuple[int, str, str]:
-    """调用现有脚本（它们自己会过闸门）。返回 (returncode, stdout, stderr)。"""
+def _legacy(name: str, args: list[str], timeout: int = 60,
+             extra_env: dict | None = None) -> tuple[int, str, str]:
+    """调用现有脚本（它们自己会过闸门）。返回 (returncode, stdout, stderr)。
+
+    ★ **M12 返工③**：`extra_env` 只**合并进这一次子进程**的 env
+      （`env={**_legacy_env(), **(extra_env or {})}`）——
+      **不许**改 `os.environ`：那是**进程级**的，而本机服务是多线程的
+      ⇒ 并发的两次动作会互相覆盖对方的 SNAP_DIR ⇒ 「帧与动作一一对应」这条
+      R1 防线在并发下被打破（正是要防的那件事）。
+    """
     if not LEGACY:
         # 老脚本目录没定位到：**说清楚为什么**，别只丢一句「找不到脚本」
         return 127, "", gate._missing_hint()
@@ -542,10 +567,12 @@ def _legacy(name: str, args: list[str], timeout: int = 60) -> tuple[int, str, st
     if not os.path.exists(p):
         return 127, "", f"找不到老脚本 {p}"
     try:
+        # ★ **M12 返工③**：`extra_env` 合并进**这一次**子进程的 env（**不改 os.environ**）
+        _env = {**_legacy_env(), **(extra_env or {})}
         r = subprocess.run(_py_argv(p, args),
                            capture_output=True, text=True, encoding="utf-8",
                            errors="replace", timeout=timeout, cwd=LEGACY,
-                           env=_legacy_env())
+                           env=_env)
         return r.returncode, r.stdout or "", r.stderr or ""
     except subprocess.TimeoutExpired:
         return 124, "", f"超时（{timeout}s）"
@@ -2248,6 +2275,41 @@ def _modal_reason(txt: str) -> str:
     return ""
 
 
+def _rm_snapdir(path):
+    """★ M12 返工②：删掉本次动作的**临时**证据目录（`ignore_errors`，异常路径也不炸）。
+
+    为什么必须删：这是**产品级泄漏**（每点一下留一个目录 + 一张 PNG），
+    踩「干完必须清场」铁律。**要留的证据落仓内证据目录**（work\_actions\…），
+    临时目录**只**做「帧从子进程回传给 core」的中转 ⇒ 读完即删。
+    """
+    if not path:
+        return
+    try:
+        import shutil as _sh
+        _sh.rmtree(path, ignore_errors=True)
+    except Exception:
+        pass
+
+
+def _parse_effect(out):
+    """★ M12 阶段二：从 act 的 stdout 里抽**那一行**回传 JSON（只取证据，不取结论）。
+
+    ★ 解析失败 ⇒ 返回 None ⇒ 调用方**一律回落** `wait_change`（绝不当作「没变」）。
+    """
+    try:
+        for line in str(out or "").splitlines():
+            s = line.strip()
+            if not s.startswith("{\"effect\""):
+                continue
+            obj = json.loads(s)
+            eff = obj.get("effect")
+            if isinstance(eff, dict):
+                return eff
+    except Exception:
+        pass
+    return None
+
+
 def _map_rc(rc: int, out: str, err: str) -> dict:
     """把老脚本的返回码映射成契约错误码。
 
@@ -2626,19 +2688,26 @@ def _act_diff_of(before, after, win_off=None, ignore=None) -> dict:
             "说明": _d.get("说明")}
 
 
-def _act_after(hwnd: int, before):
-    """动作**后**那一帧：轮询指纹，**变了就停**。
+def _act_after(hwnd: int, before, effect=None, t_spawn=None):
+    """动作**后**那一帧。
 
-    ★ 这不是「把固定 sleep 砍成 0」（派单补充 §1 明令禁止）。
-      固定等待（客户端 act.py 里的 `_settle(400~500)`）是**一刀切**：
-      界面早变了就白等，界面还没变就等不够。
-      这里改成「**等到真的变了**，最多等 budget_ms」：
-        · 界面已经变了 ⇒ **第 1 轮就命中** ⇒ 只多抓 **1** 次帧（而不是白等 450 ms）；
-        · 界面还没变 ⇒ 继续轮询，等它变（或到预算为止）。
-    ★ 关键：**第一轮抓的那张图就是「动作后」那一帧** ——
-      所以「变化即停」不会让动作多抓一次帧（对比：固定等待 = 等待 + 抓帧）。
-    ★ 拿不到「动作前」那一帧 ⇒ 没法判变没变 ⇒ 直接现抓一张（老口径）。
+    ★ **M12 阶段二（2026-10-22）**：优先用 **act 回传的证据帧**（act 只采样、只传帧；
+      **判定权留在 core**）—— 满足「帧 mtime 晚于注入/发起时刻」时直接用它；
+      **否则一律回落**下面那条 `wait_change` 老路（多等 300ms，但**绝不误判**）。
     """
+    if effect and effect.get("frame_ref"):
+        ref = str(effect.get("frame_ref") or "")
+        try:
+            if ref and os.path.isfile(ref):
+                mt = os.path.getmtime(ref)
+                if (t_spawn is None) or (mt >= float(t_spawn)):
+                    from PIL import Image
+                    with Image.open(ref) as im:
+                        im.load()
+                        return im.copy()
+        except Exception:
+            pass
+
     if before is None:
         return _act_grab(hwnd)
     try:
@@ -2871,8 +2940,25 @@ def _act(action: str, args: dict, argv: list[str], scope: str = "B") -> dict:
     global _ACT_REUSE_BEFORE
     _ACT_REUSE_BEFORE = _before_src.startswith("复用")
 
-    rc, out, e = _legacy("act.py", argv, timeout=int(args.get("timeout_sec") or ACT_TIMEOUT_SEC))
+    # ★ M12 阶段二：本次动作的证据目录（act 把「第一帧变化」写在这儿）
+    #   ⇒ 帧与本次动作**一一对应**（杜绝 R1/R3：观测帧/上一轮帧被误当动作后帧）。
+    _snapdir = ""
+    try:
+        import tempfile as _tf
+        _snapdir = _tf.mkdtemp(prefix="agentctl_effect_")
+    except Exception:
+        _snapdir = ""
+    t_spawn = time.time()          # ★ 墙钟：用来判「帧是否晚于动作发起时刻」
+    try:
+        # ★ **M12 返工③**：目录**只**通过 extra_env 传给**这一次**子进程（不改 os.environ）
+        rc, out, e = _legacy("act.py", argv, timeout=int(args.get("timeout_sec") or ACT_TIMEOUT_SEC),
+                             extra_env=({"AGENTCTL_SNAP_DIR": _snapdir} if _snapdir else None))
+    except Exception:
+        _rm_snapdir(_snapdir)      # ★ 返工②：异常路径也不许留目录
+        raise
     r = _map_rc(rc, out, e)
+    # ★ M12 阶段二：解析 act 回传的**证据**（解析不到 ⇒ 后面自动回落 wait_change）
+    _eff_info = _parse_effect(out)
     # ★ P0 神经层 · ①：归属前置闸「未判定」的那些一并如实交代（没看见 ≠ 没有）。
     if _oblind and isinstance(r, dict):
         r["blind_spots"] = list(r.get("blind_spots") or []) + list(_oblind)
@@ -2923,7 +3009,8 @@ def _act(action: str, args: dict, argv: list[str], scope: str = "B") -> dict:
     if not _need_diff:
         # ★ A2：没显式要 diff 的动作，**照样**留证据（求差 + 落盘 + 判词）。
         #   ⚠ 只产出证据，**不动 r["code"] / r["ok"]**（语义留给调用方判据看）。
-        _after = _act_after(hwnd, _before)
+        _after = _act_after(hwnd, _before, _eff_info, t_spawn)
+        _rm_snapdir(_snapdir)          # ★ 返工②：帧已进内存 ⇒ 临时目录立刻删
         _df = _act_diff_of(_before, _after, _before_off, _diff_ignore_cfg(args))
         _fid = "%s_%d" % (action, time.time_ns())
         # ★ 2026-10-20 修：这里原来写的是 `_ev_after`（**没有这个变量**）
@@ -2941,7 +3028,16 @@ def _act(action: str, args: dict, argv: list[str], scope: str = "B") -> dict:
                                 (_vd.get("verdict_evidence") or {}).get("channel_diag"),
                                 _vd.get("verdict_evidence"))
     if _need_diff:
-        _after = _act_after(hwnd, _before)
+        _after = _act_after(hwnd, _before, _eff_info, t_spawn)
+        _rm_snapdir(_snapdir)          # ★ 返工②：帧已进内存 ⇒ 临时目录立刻删
+        # ★ M12 阶段二：**退化 ⇒ unknown ⇒ code=5**（永不当成功；也不当「没变」）。
+        #   退化 = 采样时画面是空白/纯色（framecache.is_blank）⇒ **没测出来**，不是「没变」。
+        if _eff_info and _eff_info.get("degraded") is True:
+            r["ok"] = False
+            r["code"] = gate.CODE_UNSTABLE
+            r["warning"] = ("★ 动作后**采样到的是退化画面**（空白/纯色 ⇒ 没有画面）⇒ "
+                            "**没测出来**，不等于「画面没变化」⇒ 本次**不报成功**。")
+            r.setdefault("data", {})["退化"] = True
         _df = _act_diff_of(_before, _after, _before_off, _diff_ignore_cfg(args))
         # 没带 frame_id 的（focus 模式）用作用名+时间戳当目录名 —— 同一次动作仍落在同一个目录里。
         _fid = args.get("frame_id") or ("%s_%d" % (action, time.time_ns()))

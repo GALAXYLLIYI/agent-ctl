@@ -162,6 +162,15 @@ import sys
 import threading
 import time
 
+# ★ M12 阶段二（2026-10-22）：**消除双实现** —— 判差与退化检测统一用 agentctl.framecache
+#   （同仓同 PYTHONPATH；core 通过 _legacy_env() 把 src 传进子进程，见 core.py:_legacy_env）。
+#   ★ 取不到 framecache 时**不降级回自带实现**（那正是双实现的病根）⇒ 只采样、不判变化
+#     ⇒ core 侧拿不到「变化帧」⇒ **回落 wait_change**（多等，但不误判）。
+try:
+    from agentctl import framecache as _fc
+except Exception:            # pragma: no cover
+    _fc = None
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 ACTLOG = os.path.join(HERE, "_auth", "act.log")
 
@@ -1130,16 +1139,26 @@ def _poll_gray(img):
 
 
 def _img_diff(a, b):
-    """两幅小图求差 ⇒ {changed: True/False/None, ratio}。
+    """两幅图求差 ⇒ {changed: True/False/None, ratio}。
 
-    ★ 口径（与 agentctl/framecache.diff_images **同一套规则**，阈值按 1/POLL_SCALE 缩放）：
-        · 阈值 2/255（BOX 均值不会放大绝对差 ⇒ 仍是 2/255）
-        · **窄边 caret 滤除**：降采样后窄边上限 = 8/4 = 2 px，且**长宽比 ≥ 2** 才算光标
-          （只看窄边的老口径会把 8×8 的方块也丢掉 —— 见 M6 补充 §2）
-        · **最小面积**：24 px² / 16 = 1.5 px² ⇒ 取 2 px²
-      ⚠ **None = 没测出来**（图拿不到 / 尺寸对不上）—— 永不当 False。
-    ★ 连通块：逐行游程 + 并查集（与 core._act_diff_blocks 同一形状）。
+    ★ **M12 阶段二（2026-10-22）：本函数已不再自带实现** —— 口径统一到
+      `agentctl.framecache.diff_images`（阈值 2/255、caret 窄边 8px/长宽比 2.0、最小面积 24px²）。
+      改前这里是一份**缩放过的拷贝**（阈值按 1/POLL_SCALE 折算）⇒ 两份拷贝会漂移
+      （改了 framecache 忘了改这里就是 bug）⇒ 本单把双实现拆掉。
+    ⚠ 传入的必须是**同口径**的图（调用点已改成传全尺寸帧）。
+    ⚠ **None = 没测出来**（图拿不到 / 尺寸对不上 / framecache 不可用）—— 永不当 False。
     """
+    # ★ M12 阶段二：判差**转发**给 framecache（唯一真源）。
+    if _fc is None or a is None or b is None:
+        return {"changed": None, "ratio": 0.0}
+    try:
+        # ★ 参数名**照抄 framecache 的真签名**：diff_images(before, after, caret_px, min_area_px, step)
+        #   （caret 的长宽比在 framecache.is_caret_like 内部，**不是** diff_images 的参数）
+        d = _fc.diff_images(a, b, caret_px=_fc.DIFF_CARET_PX,
+                            min_area_px=_fc.DIFF_MIN_AREA)
+        return {"changed": d.get("changed"), "ratio": d.get("ratio")}
+    except Exception:
+        return {"changed": None, "ratio": 0.0}
     try:
         import numpy as np
     except Exception:
@@ -1259,11 +1278,12 @@ def _wait_ready(hwnd, base_img, budget_ms=POLL_BUDGET_MS, need=POLL_HYSTERESIS,
             return {"就绪": False, "轮次": rounds,
                     "耗时ms": (_t.perf_counter() - t0) * 1000.0}
         cur = grab(hwnd)
-        gc = _poll_gray(cur) if cur is not None else None
-        if gc is None:
+        # ★ M12 阶段二：判差用**全尺寸帧 + framecache 的尺子**（口径与 core 完全一致）。
+        #   `_poll_gray` 只当「图够不够大」的守卫，不再参与判差（它那份缩放阈值已删）。
+        if cur is None or _poll_gray(cur) is None:
             return {"就绪": None, "轮次": rounds,
                     "耗时ms": (_t.perf_counter() - t0) * 1000.0}
-        d = _img_diff(gb, gc)
+        d = _img_diff(base_img, cur)
         if d.get("changed") is False:
             streak += 1
         else:
@@ -1295,31 +1315,84 @@ def _wait_effect(hwnd, base_img, budget_ms=POLL_BUDGET_MS, need=POLL_HYSTERESIS,
     streak = 0
     rounds = 0
     last = None
+    degraded = False        # ★ M12：退化**只打标**，裁决权在 core
+    first_img = None       # ★ M12：第一次「变化」那一帧（回传给 core 当证据）
     deadline = t0 + max(0.0, float(budget_ms) / 1000.0)
     while True:
         rounds += 1
         # ★ 同上：预算检查在采样之前 ⇒ 总耗时 ≤ 预算（**永远不慢于改前的固定 sleep**）
         if _t.perf_counter() >= deadline:
             return {"生效": False, "轮次": rounds,
-                    "耗时ms": (_t.perf_counter() - t0) * 1000.0, "图": last}
+                    "耗时ms": (_t.perf_counter() - t0) * 1000.0, "图": last,
+                    "退化": degraded, "首变图": first_img}
         cur = grab(hwnd)
         if cur is None:
             return {"生效": None, "轮次": rounds,
-                    "耗时ms": (_t.perf_counter() - t0) * 1000.0, "图": last}
+                    "耗时ms": (_t.perf_counter() - t0) * 1000.0, "图": last,
+                    "退化": degraded, "首变图": first_img}
         last = cur
-        gc = _poll_gray(cur)
-        d = _img_diff(gb, gc)
+        # ★ M12：退化检测**只打标**（framecache.is_blank）—— act 不裁「变了没」。
+        if _fc is not None:
+            try:
+                if _fc.is_blank(cur):
+                    degraded = True
+            except Exception:
+                pass
+        d = _img_diff(base_img, cur)
         if d.get("changed") is True:
             streak += 1
+            if first_img is None:
+                first_img = cur
         else:
             streak = 0
         if streak >= max(1, int(need)):
             return {"生效": True, "轮次": rounds,
-                    "耗时ms": (_t.perf_counter() - t0) * 1000.0, "图": last}
+                    "耗时ms": (_t.perf_counter() - t0) * 1000.0, "图": last,
+                    "退化": degraded, "首变图": first_img}
         if _t.perf_counter() >= deadline:
             return {"生效": False, "轮次": rounds,
-                    "耗时ms": (_t.perf_counter() - t0) * 1000.0, "图": last}
+                    "耗时ms": (_t.perf_counter() - t0) * 1000.0, "图": last,
+                    "退化": degraded, "首变图": first_img}
         _t.sleep(POLL_INTERVAL_MS / 1000.0)
+
+
+def _emit_effect(eff, hwnd):
+    """★ M12 阶段二：把「证据」回传给 core —— **只传帧与原始量，不传结论**。
+
+    · 帧：第一次「变化」那一帧，存到 `AGENTCTL_SNAP_DIR/first.png`
+      （目录由 core 在调本进程**之前**建好 ⇒ 帧与本次动作**一一对应**，
+        杜绝「上一轮的帧被当本轮」）。
+    · 退化：每轮 `framecache.is_blank()` 的结果（**只打标**；裁决在 core）。
+    · 通道：stdout 多打一行 JSON（沿用本文件既有 `print(json.dumps(...))` 约定）⇒ **不新造通道**。
+    ⚠ 解析失败/没有帧 ⇒ core 一律**回落** wait_change（绝不当作「没变」）。
+    """
+    try:
+        payload = {"effect": {"rounds": int((eff or {}).get("轮次") or 0),
+                              "first_change_ms": round(float((eff or {}).get("耗时ms") or 0.0), 1),
+                              "degraded": bool((eff or {}).get("退化")),
+                              "frame_ref": None}}
+        # ★ M12 阶段二：**总有���帧可回传** ——
+        #   优先「第一次变化的那一帧」；没有（画面没变）就回传**最后采到的那一帧**。
+        #   ⇒ core 拿到帧后用**自己的尺子**判：变了⇒成功；没变⇒code=8
+        #     ⇒ 「画面没变」这一路也**不用再等第二遍**（那 300ms 才是真浪费）。
+        img = (eff or {}).get("首变图") or (eff or {}).get("图")
+        d = os.environ.get("AGENTCTL_SNAP_DIR") or ""
+        if img is not None and d:
+            os.makedirs(d, exist_ok=True)
+            p = os.path.join(d, "first.png")
+            try:
+                img.save(p)
+                payload["effect"]["frame_ref"] = p
+            except Exception:
+                payload["effect"]["frame_ref"] = None
+        print(json.dumps(payload, ensure_ascii=False), flush=True)
+    except Exception as e:
+        try:
+            print(json.dumps({"effect": {"frame_ref": None, "degraded": None,
+                                        "错误": "%s: %s" % (type(e).__name__, e)}},
+                             ensure_ascii=False), flush=True)
+        except Exception:
+            pass
 
 
 def log(msg):
@@ -2674,6 +2747,7 @@ def do_click(hwnd, name=None, xy=None, dry=False, force_coord=False, retry=0,
         attempts = 1
         _eff = _wait_effect(hwnd, _poll_base(hwnd),
                              budget_ms=int(_settle(450) * 1000))
+        _emit_effect(_eff, hwnd)          # ★ M12：回传证据帧（只传帧，不传结论）
         after = evidence(hwnd, "after")
         fp0 = _img_fp(before.get("文件") or "")
         fp1 = _img_fp(after.get("文件") or "")
@@ -2687,6 +2761,7 @@ def do_click(hwnd, name=None, xy=None, dry=False, force_coord=False, retry=0,
             #   预算用 _settle(450) 换算（旋钮语义不变：AGENTCTL_SETTLE_MS 仍是上限）。
             _eff = _wait_effect(hwnd, _poll_base(hwnd),
                                  budget_ms=int(_settle(450) * 1000))
+            _emit_effect(_eff, hwnd)      # ★ M12：回传证据帧（只传帧，不传结论）
             after = evidence(hwnd, "after")
             fp1 = _img_fp(after.get("文件") or "")
             if fp0 is None or fp1 is None:
@@ -2700,6 +2775,7 @@ def do_click(hwnd, name=None, xy=None, dry=False, force_coord=False, retry=0,
     else:
         _eff = _wait_effect(hwnd, _poll_base(hwnd),
                              budget_ms=int(_settle(450) * 1000))
+        _emit_effect(_eff, hwnd)          # ★ M12：回传证据帧（只传帧，不传结论）
         after = {} if dry else evidence(hwnd, "after")
         # ★ P0-3（2026-10-21；ZCode 评审逮到的真 bug）：**UIA.Invoke / SelectionItem
         #   这条路径原来从不计算 changed** ⇒ 末尾的 changed is True 恒不成立
