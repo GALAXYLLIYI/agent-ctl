@@ -59,7 +59,13 @@ r"""framecache.py —— 帧复用 + 变化即停 + 只 diff 变化区（治 D2/
 """
 from __future__ import annotations
 
+import re
 import time
+
+#: ★ M18-d（刀2 · numpy 轻量化）：一行里的**连续非零段**用正则一次扫出
+#: （`\x01-\xff` = 字节值 > 0，与旧实现 `np.asarray(mask) > 0` 的取值集合**完全相同**）。
+#: `re` 是标准库且**解释器启动时已在 sys.modules** ⇒ 引入它不产生任何新的导入成本。
+_RUN_RE = re.compile(rb"[\x01-\xff]+")
 
 # ── 判据口径常量（**唯一真相源**：core.py 的 `_act_diff_of` 与 act.py 的就绪轮询共用）──
 #
@@ -285,17 +291,13 @@ def tile_box(key, tile=TILE, scale=TILE_SCALE):
 
 
 # ── 全分辨率求差 + 分块（第二级：判「真变了」的精度闸）──────────────────
-def blocks_from_mask(mask, ox=0, oy=0):
-    """二值 mask（numpy bool）→ [(宽, 高, 面积, (x0,y0,x1,y1))]（**闭区间**）。
+def _runs_from_numpy_mask(mask):
+    """numpy bool mask → [[y, x0, x1], ...]（行内连续段，**闭区间**）。
 
-    ★ 纯 numpy + Python，**不引 scipy**（scipy 不在 requirements.txt 里，
-      进了产品就是给安装包加体积 —— 本单边界：不许引新依赖）。
-    ★ 行列都按**闭区间**（含末端像素），所以宽高要 +1 ——
-      与 core._act_diff_blocks 同一口径（那处是 K4b 实测踩出来的）。
+    ★ M18-d：这一段是**从旧实现逐字搬出来的**（口径不许动）——
+      旧代码在 `blocks_from_mask` 开头就是这几行。
     """
     import numpy as np
-    if mask is None or mask.size == 0:
-        return []
     H, W = mask.shape
     runs = []
     for y in range(H):
@@ -307,6 +309,51 @@ def blocks_from_mask(mask, ox=0, oy=0):
         ends = np.flatnonzero(d == -1)
         for s, e in zip(starts, ends):
             runs.append([y, int(s), int(e) - 1])
+    return runs
+
+
+def _runs_from_pil_mask(mask_img):
+    """PIL "L" mask → [[y, x0, x1], ...]（行内连续段，**闭区间**）—— **零 numpy**。
+
+    ★ M18-d（刀2）：这条路径让 **act 进程再也不 import numpy**
+      （旧实现里 numpy 是 `diff_images` 的**函数内 import** ⇒ 每个 act 进程
+      首次判差白付一次全量导入；A 线实测 +98.4ms，C1 实测落在等生效段的 140.6ms cpu 里）。
+
+    ★ 与 `_runs_from_numpy_mask` **逐位等价**，因为
+      旧：`d = np.diff(concat([0], row.astype(int8), [0]))`；
+          `starts = flatnonzero(d == 1)`、`ends = flatnonzero(d == -1)`；
+          `run = [y, int(s), int(e) - 1]`
+      ⇒ 语义就是「行内每段连续的非零像素」⇒ 这里用正则一次扫出。
+      （`np.asarray(mask) > 0` 的取值集合 = 字节 > 0 = 正则 `[\x01-\xff]`。）
+
+    ★ **只扫 bbox 覆盖的行**：bbox 外的行整行为零 ⇒ 旧实现里也会被
+      `if not row.any(): continue` 跳过 ⇒ 输出一致。
+    """
+    if mask_img.mode == "1":
+        mask_img = mask_img.convert("L")          # 「1」模式在 tobytes() 里是打包位
+    elif mask_img.mode != "L":
+        raise ValueError("只支持 L/1 模式的 mask（收到 %r）" % (mask_img.mode,))
+    W, H = mask_img.size
+    bb = mask_img.getbbox()
+    if not bb:
+        return []
+    gx0, gy0, gx1, gy1 = bb                        # PIL 的 bbox：右/下**开区间**
+    data = mask_img.tobytes()
+    runs = []
+    for y in range(gy0, gy1):
+        base = y * W
+        for mo in _RUN_RE.finditer(data[base + gx0:base + gx1]):
+            runs.append([y, gx0 + mo.start(), gx0 + mo.end() - 1])
+    return runs
+
+
+def _blocks_from_runs(runs, ox=0, oy=0):
+    """行内连续段 → [(宽, 高, 面积, (x0,y0,x1,y1))]（**闭区间**）。
+
+    ★ M18-d：这段是**从旧 `blocks_from_mask` 逐字搬出来的**（并查集 + 面积聚合），
+      **逻辑一行没改**（只改了缩进）⇒ 旧（numpy 取段）路径与新（纯 Python 取段）
+      路径的输出必然逐位一致。
+    """
     if not runs:
         return []
     parent = list(range(len(runs)))
@@ -352,6 +399,21 @@ def blocks_from_mask(mask, ox=0, oy=0):
             for _a in agg.values()]
 
 
+def blocks_from_mask(mask, ox=0, oy=0):
+    """二值 mask（numpy bool）→ [(宽, 高, 面积, (x0,y0,x1,y1))]（**闭区间**）。
+
+    ★ 纯 numpy + Python，**不引 scipy**（scipy 不在 requirements.txt 里，
+      进了产品就是给安装包加体积 —— 本单边界：不许引新依赖）。
+    ★ 行列都按**闭区间**（含末端像素），所以宽高要 +1 ——
+      与 core._act_diff_blocks 同一口径（那处是 K4b 实测踩出来的）。
+    ★ M18-d：取段/聚合已拆成 `_runs_from_numpy_mask` + `_blocks_from_runs`
+      （**聚合一字未改**）⇒ 主线 `diff_images` 改走**零 numpy** 的 `_runs_from_pil_mask`；
+      本函数**原样保留**给 `diff_images_tiled`（阶段二增强，不在主线上）。
+    """
+    import numpy as np
+    if mask is None or mask.size == 0:
+        return []
+    return _blocks_from_runs(_runs_from_numpy_mask(mask), ox, oy)
 def merge_blocks(blocks, gap=1):
     """把**跨瓦片边界**被切开的块接回去。
 
@@ -438,8 +500,15 @@ def diff_images(before, after, caret_px=DIFF_CARET_PX, min_area_px=DIFF_MIN_AREA
     返回 {changed, ratio, bbox, blocks, 说明}
       changed ∈ True / False / None（None = 没测出来，**永不当 False**）
       bbox    = **客户区像素**闭区间框 (x0, y0, x1, y1)；None = 没变
+
+    ★ M18-d（刀2 · numpy 轻量化）：**本函数不再 import numpy**。
+      旧写法是**函数内** `import numpy as np` ⇒ 每个 act 进程首次判差白付一次
+      全量导入（A 线实测 +98.4ms；C1 实测落在「等生效」段的 140.6ms cpu 里）。
+      现在取段走 `_runs_from_pil_mask`（纯 PIL + 标准库 `re`，**零新依赖**），
+      聚合仍走 `_blocks_from_runs`（**从旧实现逐字搬出来的并查集，一行没改**）
+      ⇒ **输出与旧实现逐位一致**（判据 `tests/_P3_M18d_numpy轻量化_判据.py` 逐条核对）。
+      ★ 阈值（step / caret_px / min_area_px / aspect）**一个都没动**。
     """
-    import numpy as np
     if before is None or after is None:
         return {"changed": None, "ratio": 0.0, "bbox": None, "blocks": [],
                 "说明": "取不到画面（窗口不可读 / 截图失败）⇒ 没测出来，不等于没变"}
@@ -458,8 +527,7 @@ def diff_images(before, after, caret_px=DIFF_CARET_PX, min_area_px=DIFF_MIN_AREA
     if not _mask.getbbox():
         return {"changed": False, "ratio": 0.0, "bbox": None, "blocks": [],
                 "说明": "逐像素比对无变化（阈值 %d/255）" % step}
-    m = np.asarray(_mask) > 0
-    blocks = blocks_from_mask(m)
+    blocks = _blocks_from_runs(_runs_from_pil_mask(_mask), 0, 0)
     live = [b for b in blocks if not is_caret_like(b[0], b[1], caret_px)]
     dropped = len(blocks) - len(live)
     total = sum(b[2] for b in live)
@@ -475,7 +543,7 @@ def diff_images(before, after, caret_px=DIFF_CARET_PX, min_area_px=DIFF_MIN_AREA
     y0 = min(b[3][1] for b in live)
     x1 = max(b[3][2] for b in live)
     y1 = max(b[3][3] for b in live)
-    return {"changed": True, "ratio": round(total / float(m.shape[0] * m.shape[1]), 6),
+    return {"changed": True, "ratio": round(total / float(_mask.size[0] * _mask.size[1]), 6),
             "bbox": (x0, y0, x1, y1), "blocks": blocks, "丢弃光标块": dropped,
             "说明": "变化区（客户区 %d,%d 起 %dx%d；%d 块合计 %d px2）"
                     % (x0, y0, x1 - x0 + 1, y1 - y0 + 1, len(live), total)}

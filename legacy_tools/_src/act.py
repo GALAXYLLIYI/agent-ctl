@@ -1276,99 +1276,10 @@ def _img_diff(a, b):
         return {"changed": d.get("changed"), "ratio": d.get("ratio")}
     except Exception:
         return {"changed": None, "ratio": 0.0}
-    try:
-        import numpy as np
-    except Exception:
-        return {"changed": None, "ratio": 0.0}
-    if a is None or b is None:
-        return {"changed": None, "ratio": 0.0}
-    try:
-        sa, sb = a.size, b.size
-    except Exception:
-        return {"changed": None, "ratio": 0.0}
-    if sa != sb:
-        return {"changed": None, "ratio": 0.0}
-    try:
-        A = np.asarray(a, dtype=np.int16)
-        B = np.asarray(b, dtype=np.int16)
-    except Exception:
-        return {"changed": None, "ratio": 0.0}
-    if A.shape != B.shape:
-        return {"changed": None, "ratio": 0.0}
-    try:
-        mask = np.abs(A - B) >= POLL_STEP
-        H, W = mask.shape
-        runs = []
-        for y in range(H):
-            xs = np.flatnonzero(mask[y])
-            if len(xs) == 0:
-                continue
-            start = prev = int(xs[0])
-            for x in xs[1:]:
-                x = int(x)
-                if x != prev + 1:
-                    runs.append([y, start, prev])
-                    start = x
-                prev = x
-            runs.append([y, start, prev])
-        if not runs:
-            return {"changed": False, "ratio": 0.0}
-        parent = list(range(len(runs)))
-
-        def _find(i):
-            while parent[i] != i:
-                parent[i] = parent[parent[i]]
-                i = parent[i]
-            return i
-
-        def _union(i, j):
-            ri, rj = _find(i), _find(j)
-            if ri != rj:
-                parent[rj] = ri
-
-        idx = 0
-        n = len(runs)
-        while idx < n:
-            y = runs[idx][0]
-            j = idx
-            while j < n and runs[j][0] == y:
-                j += 1
-            k = j
-            while k < n and runs[k][0] == y + 1:
-                k += 1
-            for ai in range(idx, j):
-                for bi in range(j, k):
-                    if runs[ai][1] <= runs[bi][2] and runs[bi][1] <= runs[ai][2]:
-                        _union(ai, bi)
-            idx = j
-        agg = {}
-        for i, (y, x0, x1) in enumerate(runs):
-            r = _find(i)
-            e = agg.get(r)
-            if e is None:
-                agg[r] = {"area": x1 - x0 + 1, "x0": x0, "x1": x1, "y0": y, "y1": y}
-            else:
-                e["area"] += x1 - x0 + 1
-                e["x0"] = min(e["x0"], x0)
-                e["x1"] = max(e["x1"], x1)
-                e["y1"] = max(e["y1"], y)
-        narrow_max = max(1, POLL_CARET_PX // POLL_SCALE)
-        min_area = max(1, int(round(POLL_MIN_AREA / float(POLL_SCALE * POLL_SCALE))))
-        live = 0
-        for v in agg.values():
-            w = v["x1"] - v["x0"] + 1
-            h = v["y1"] - v["y0"] + 1
-            narrow = min(w, h)
-            if narrow <= narrow_max and (max(w, h) / float(narrow)) >= POLL_CARET_ASPECT:
-                continue                      # 光标类 → 丢
-            live += v["area"]
-        if live <= 0:
-            return {"changed": False, "ratio": 0.0}
-        if live < min_area:
-            return {"changed": False, "ratio": 0.0}
-        return {"changed": True, "ratio": float(live) / float(mask.size)}
-    except Exception:
-        return {"changed": None, "ratio": 0.0}
+    # ★ M18-d（刀2 · numpy 轻量化）：下面那段**旧的 numpy 判差实现已删除** ——
+    #   自 M12 阶段二起它就是**死代码**（本函数在上面的 try/except 里必然 return）
+    #   ⇒ 它的 `import numpy as np` 从来没被执行过。删它是为了让 act 侧
+    #   **再也不可能**偷偷把 numpy 拖进来（那正是本刀要消灭的 ~98ms/进程）。
 def _wait_ready(hwnd, base_img, budget_ms=POLL_BUDGET_MS, need=POLL_HYSTERESIS,
                 capture=None):
     """**就绪轮询**：连续 `need` 帧都判「没变」⇒ 界面稳了，可以动手。
