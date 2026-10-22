@@ -361,7 +361,10 @@ def main() -> int:
             objs = [{"uid": "u1", "eid": "e1", "role": "TextControl",
                      "rect": [100, 100, 200, 200]}]
             hit_words = [{"t": "文件", "x": 120, "y": 100, "w": 80, "h": 100}]
-            miss_words = [{"t": "文件", "x": 500, "y": 500, "w": 80, "h": 100}]
+            # ★ 错的一例：**小但非零**的重叠（IoU≈0.125）。
+            #   故意不用「完全不相交」—— 那种情形 best=None，判不判命中与阈值无关，
+            #   阈值断言就成了摆设（注入时也红不了）。
+            miss_words = [{"t": "文件", "x": 180, "y": 100, "w": 80, "h": 100}]
             r_hit = core_mod._ocr_align_words(hit_words, (0, 0), objs, iou_min=iou_min)
             r_miss = core_mod._ocr_align_words(miss_words, (0, 0), objs, iou_min=iou_min)
             i_hit = float((r_hit[0] or {}).get("IoU") or 0.0)
