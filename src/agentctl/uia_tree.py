@@ -400,7 +400,7 @@ def _viewport_fields(in_view, scroll):
 
 def walk(handle, *, max_nodes=DEFAULT_MAX_NODES, max_depth=DEFAULT_MAX_DEPTH,
         roles=("interactive", "text"), detail=False, drop_browser_chrome=True,
-        include_offscreen=False, stats=None):
+        include_offscreen=False, stats=None, state=None):
     """遍历一棵窗口的元素树，返回 (节点列表, 是否截断)。
 
     ★ include_offscreen（F3 · 窗A2 · 2026-10-17，默认 False）= 是否连**视口外**的节点一起回。
@@ -408,6 +408,12 @@ def walk(handle, *, max_nodes=DEFAULT_MAX_NODES, max_depth=DEFAULT_MAX_DEPTH,
       **屏外节点不是坏节点，只是「现在看不见」**，要它得先滚动或显式要全量。
     ★ stats（可选 dict，出参）= 填「因上限丢弃 / 因视口丢弃」两个计数，
       让"丢在哪"成为可机读的数字，而不是只留一句 truncated。
+    ★ **state（可选 dict，入参）= 已经查好的窗口状态**（`window_state()` 的结果）。
+      ★ M16 派单 D2「window_state 双跑去重」：**调用方刚查过就别再查一遍** ——
+        `window_state` 里含一次 UIA COM 往返（`ControlFromHandle` + `BoundingRectangle`），
+        实测 **1.5ms/次**（偶发可达 130ms+）⇒ 白跑一趟就是白花。
+      ★ 口径**不变**：传进来的 state 与自己现查的是同一个函数的同一份结果；
+        窗口在这几毫秒内变了，两种写法都可能读到旧值 ⇒ **不是新引入的失真**。
     `roles` 决定收哪些：interactive=能点的、text=有字的、all=全要。
     **只读属性，不点不动。**
     """
@@ -421,7 +427,7 @@ def walk(handle, *, max_nodes=DEFAULT_MAX_NODES, max_depth=DEFAULT_MAX_DEPTH,
     #   子节点坐标是 [-31989,-32000] 这种负数，整棵树是塌的。
     #   此时遍历只会走出个位数节点 —— **看起来像断环逻辑有 bug，其实不是。**
     #   所以先判状态，把话说明白，别让 agent 拿着 3 个节点去推断整个界面。
-    st = window_state(int(handle))
+    st = state if isinstance(state, dict) and state else window_state(int(handle))
     if st["最小化"] or st["根矩形宽"] <= 0 or st["根矩形高"] <= 0:
         raise UiaUnavailable(
             "窗口 %s 不可读：%s。先把它叫醒（SW_RESTORE）再拉树。" % (handle, st["说明"]),
@@ -640,7 +646,7 @@ def render(nodes, truncated=False, *, width=64):
 
 
 def find(handle, query, *, max_nodes=FIND_MAX_NODES, max_depth=DEFAULT_MAX_DEPTH,
-         limit=40, detail=False, include_offscreen=True):
+         limit=40, detail=False, include_offscreen=True, state=None):
     """按文字/类型找元素。**这是最该先用的工具** —— 比拉全树省一个数量级。
 
     `query` 大小写不敏感，同时匹配名字和控件类型。
@@ -653,7 +659,7 @@ def find(handle, query, *, max_nodes=FIND_MAX_NODES, max_depth=DEFAULT_MAX_DEPTH
     st = {}
     nodes, truncated = walk(handle, max_nodes=max_nodes, max_depth=max_depth,
                            roles=("all",), detail=detail,
-                           include_offscreen=include_offscreen, stats=st)
+                           include_offscreen=include_offscreen, stats=st, state=state)
     q = (query or "").lower()
     hits = [
         n for n in nodes
@@ -684,7 +690,7 @@ def find(handle, query, *, max_nodes=FIND_MAX_NODES, max_depth=DEFAULT_MAX_DEPTH
 
 
 def tree(handle, *, max_nodes=DEFAULT_MAX_NODES, max_depth=DEFAULT_MAX_DEPTH,
-         detail=False, roles=("interactive", "text"), include_offscreen=False):
+         detail=False, roles=("interactive", "text"), include_offscreen=False, state=None):
     """拉整棵树，返回紧凑文本 + 结构化节点。
 
     ★ F3：include_offscreen 默认 **False**（只回这一屏看得见的）。
@@ -695,7 +701,7 @@ def tree(handle, *, max_nodes=DEFAULT_MAX_NODES, max_depth=DEFAULT_MAX_DEPTH,
     st = {}
     nodes, truncated = walk(handle, max_nodes=max_nodes, max_depth=max_depth,
                            roles=roles, detail=detail,
-                           include_offscreen=include_offscreen, stats=st)
+                           include_offscreen=include_offscreen, stats=st, state=state)
     return {
         "句柄": int(handle),
         "节点数": len(nodes),

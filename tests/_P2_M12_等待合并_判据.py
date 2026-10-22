@@ -116,6 +116,21 @@ def _plain_click(core_mod, meas, xy=None, spy=None):
         _args = {"hwnd": int(nh), "xy": [_x, _y]}
         if _cap:
             _args["from_capture"] = _cap
+        # ★ M16 阶段三（2026-10-22）：点击**前**再置一次前 + 显式放行「可以切前台」。
+        #   ⇒ 否则目标一旦不在前台，act.py 的 ensure_foreground 直接拒（rc=5
+        #   「坐标/前台/窗口稳定性拒绝」）⇒ 判词变成「前台不对」而不是画面结论。
+        #   ⚠ `allow_foreground=True` 是**生产形状**（core 侧要求显式放行才肯切前台，
+        #     放行会写一条 action_allow_foreground 事件留痕）⇒ 与真实 agent 调用一致。
+        try:
+            _fg = meas.bring_to_front(nh)
+        except Exception:
+            _fg = "**异常**"
+        if "失败" in str(_fg):
+            # ★ 前台被占（系统服务/用户抢焦点）⇒ act 的 ensure_foreground 会拒（rc=5）
+            #   ⇒ 这是**环境受阻**，不是产品缺陷 ⇒ 报「验不了」，不许读成红。
+            raise RuntimeError("环境受阻：靶场窗口置前失败（%s）⇒ act 会以 rc=5 拒，"
+                               "本次测不到画面结论" % _fg)
+        _args["allow_foreground"] = True
         _orig = core_mod._legacy
 
         def _s(name, args, timeout=60, extra_env=None):
@@ -138,12 +153,34 @@ def _plain_click(core_mod, meas, xy=None, spy=None):
             res = core_mod.dispatch("ctl_click", _args, actor="M11分段测量")
         finally:
             core_mod._legacy = _orig
-        return res or {}
-    finally:
+        # ★ M16 阶段三（2026-10-22）：**前台被抢 ⇒ 环境受阻，不是产品缺陷**。
+        #   act.py:3312「置前台失败 ⇒ rc=5」⇒ core 映射成 code=5 + 文案
+        #   「坐标/前台/窗口稳定性拒绝」⇒ 这次**没测到画面结论**（不是「画面没变」）。
+        #   ⇒ 判据铁律：环境红不许算产品红 ⇒ 这里抛出去让本条判**验不了**。
         try:
-            _np.kill()
+            _c = int((res or {}).get("code") or 0)
+            _w = str((res or {}).get("warning") or "")
+            if _c == 5 and ("前台" in _w or "稳定性" in _w):
+                raise RuntimeError("环境受阻：act 侧置前台失败（rc=5，%s）⇒ 焦点被别的窗口抢走，"
+                                   "本次测不到画面结论" % _w[:60])
+        except RuntimeError:
+            raise
         except Exception:
             pass
+        return res or {}
+    finally:
+        # ★ 靶场窗口用完即关（派单 M16 红线第 9 条 / 用户 12:58 当面提）：
+        #   ⚠ **不能只 `_np.kill()`** —— Win11 的 `notepad.exe` 是个**转发 stub**，
+        #   真正的窗口住在**另一个** `Notepad.exe /SESSION:xxx` 进程里
+        #   ⇒ 杀 stub 杀不掉窗口 ⇒ 桌面上就留下一个空记事本。
+        #   ⇒ 必须走 `close_own_notepad`（关窗 + 认领「不保存」弹框 + 只杀本次记录的 pid）。
+        try:
+            meas.close_own_notepad(nh, _np)
+        except Exception:
+            try:
+                _np.kill()
+            except Exception:
+                pass
 
 
 def _effect_from_out(out):
@@ -159,12 +196,49 @@ def _effect_from_out(out):
     return {}
 
 
+def _e_keys_case(act_mod, hwnd, refuse: bool):
+    """在 **act 层**真跑一次 `do_keys`，观测「到底有没有投递」。
+
+    ★ **不真发键**：把 `send_vk`（前台真按键）与 `_post_keys`（后台投递）
+      换成**间谍**（只记录「被调用了没」）⇒ 「有没有投递」这件事被**直接观测**，
+      不用去猜屏幕变没变（更不用拿用户的文件/文本当赌注）。
+    ★ 用例1（`refuse=True`）：把 `ensure_foreground` 打成「拒绝」
+      （= 窗口不满足稳定性条件）⇒ 断言 **一个投递函数都没被调用**（= 真的没发）。
+    ★ 用例2（`refuse=False`）：precheck 放行 ⇒ 断言 `send_vk` **被调用了**（= 真发了）。
+    ⇒ 返回 (rc, 投递调用列表)
+    """
+    _sent = []
+    _orig_ensure = act_mod.ensure_foreground
+    _orig_send = act_mod.send_vk
+    _orig_post = act_mod._post_keys
+    try:
+        act_mod.ensure_foreground = (lambda *a, **k: 5) if refuse else (lambda *a, **k: 0)
+        act_mod.send_vk = lambda vk, down, *a, **k: _sent.append(("send_vk", vk, down))
+        act_mod._post_keys = lambda *a, **k: (_sent.append(("post_keys",)) or True)
+        rc = act_mod.do_keys(int(hwnd), vk=0x2E, ctrl=False, times=1)
+    finally:
+        act_mod.ensure_foreground = _orig_ensure
+        act_mod.send_vk = _orig_send
+        act_mod._post_keys = _orig_post
+    return rc, _sent
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="M12 等待合并判据")
     ap.add_argument("--inject", action="store_true", help="造假账（端到端伪造成已合并）⇒ 必须红")
     ap.add_argument("--rounds", type=int, default=2)
     a = ap.parse_args()
 
+    # ★ 判据**自检**：本判据用到的 helper 必须在（缺了 ⇒ 明确报「判词自身不完整」，
+    #   而不是跑到一半炸 NameError ⇒ 验不了 ⇒ 容易被误判成「产品的问题」）。
+    _need = ('_e_keys_case',)
+    _miss = [_n for _n in _need if _n not in globals()]
+    if _miss:
+        rec("判据自检（依赖的 helper 齐全）", False,
+            "★ **判据自身不完整**：缺 " + repr(_miss) + " ⇒ 判词文件被改坏了（**不是产品的问题**）"
+            "；请从仓库取回本文件后再跑")
+        return finish()
+    rec("判据自检（依赖的 helper 齐全）", True, "helper：" + "、".join(_need))
     print("=" * 70, flush=True)
     print("判据 46：M12 等待合并验收", flush=True)
     print("=" * 70, flush=True)
@@ -226,9 +300,20 @@ def main() -> int:
         rec("⑤ unknown 不许被当成成功", False, "★ 环境受阻，未测量", skip=True)
 
     # ── A 组①：与基线对照 ──
+    # ★ M16 阶段三（2026-10-22）：M11 那条基线（1682~1718ms，10-22 上午定的）**已过期** ——
+    #   M12 阶段三 + M16 之后端到端实测 ≈1400ms ⇒ **比基线快 ~290ms**
+    #   ⇒ 原来「落在基线区间外 ⇒ 红」会把「**变快了**」判成红。
+    # ⇒ 本条改为：**不许比基线慢**（护栏，实质不放宽）＋ 落在区间/比基线快都算通过，
+    #   并在判词里**明写基线已过期**（不掩盖）。
     near = [e for e in ends if BASE_LO * 0.85 <= e <= BASE_HI * 1.15]
-    rec("① 测出当前端到端，并与 M11 基线 %.0f~%.0fms 对照" % (BASE_LO, BASE_HI),
-        bool(near), "各轮端到端=%s（基线区间外 ⇒ 环境变了，不是产品变了）" % ends)
+    _faster = [e for e in ends if e < BASE_LO * 0.85]
+    _not_slower_a1 = bool(ends) and max(ends) <= BASE_HI * 1.03
+    rec("① 测出当前端到端，并与 M11 基线 %.0f~%.0fms 对照（**不许比基线慢**；"
+        "基线为 10-22 上午的 M11 值，M12 阶段三后已变快 ⇒ 落在区间外不算错）"
+        % (BASE_LO, BASE_HI),
+        _not_slower_a1,
+        "各轮端到端=%s ｜ 落在基线区间=%s ｜ **比基线快**=%s ｜ 基线已过期，"
+        "本条以「不许比基线慢」为准" % (ends, bool(near), _faster))
 
     # ── B 组②：合并是否真的发生 ──
     best = min(ends) if ends else None
@@ -418,8 +503,24 @@ def main() -> int:
             rec(_nm, False, "★ 检查跑不起来：%s: %s" % (type(e).__name__, e), skip=True)
 
     # ── C 组：失败口径 ──
-    ok8 = all(c == 8 for c in codes)
-    rec("④ 画面没变 ⇒ 结果必须落 code=8（⛔ 不许当成功）", ok8, "各轮 code=%s" % codes)
+    # ★ M12 阶段三：用**每一轮自己的地面真值**核对（判据 45 的 truth）——
+    #   真值「没变」⇒ 必须 code=8；真值「变了」⇒ 必须 code=0；真值「判不出」⇒ 不许当成功。
+    #   （原来写的是 all(c == 8)，它**假设画面必定不变**；实测有一轮画面真变了 ⇒ code=0 是对的。）
+    _pairs = []
+    _bad = []
+    for _c in cases:
+        _code = (_c.get("结果") or {}).get("code")
+        _truth = _c.get("画面真变了没")
+        if _truth is False and _code != 8:
+            _bad.append("画面没变却 code=%r（应 8）" % _code)
+        elif _truth is True and _code != 0:
+            _bad.append("画面变了却 code=%r（应 0）" % _code)
+        elif _truth is None and _code in (0,):
+            _bad.append("真值判不出却 code=0（当成功了）")
+        _pairs.append((_truth, _code))
+    ok8 = not _bad
+    rec("④ 画面没变 ⇒ 结果必须落 code=8（⛔ 不许当成功）", ok8,
+        "各轮 (地面真值, code)=%s%s" % (_pairs, ("｜" + "；".join(_bad)) if _bad else ""))
     ok_unk = not any((c == 0 and ("没测出来" in w or "未知" in w)) for c, w in zip(codes, warns))
     rec("⑤ unknown（没测出来）不许被当成成功", ok_unk,
         "各轮 (code, warning 前 40 字)=%s" % [(c, w[:40]) for c, w in zip(codes, warns)])
@@ -525,8 +626,157 @@ def main() -> int:
                     "⑭ 一次普通 click 的 PNG 张数下降（≤2 张）"):
             rec(_nm, False, "★ 检查跑不起来：%s: %s" % (type(e).__name__, e), skip=True)
 
+    # ══════════════ M16 派单 §E · §2.9 ══════════════
+    # ⑧ 靶场窗口「用完即关」：**跑前可见 Notepad 窗口集合 ⇒ 跑后完全相同**
+    #    （派单 §2.9：用户 2026-10-22 12:58 当面提的 —— 判据一天开 185 个记事本不关；
+    #     主控 2026-10-22 18:0x 补：断言要比**集合**，不能只比**个数**
+    #     —— 关掉 A 又开出 B，个数相同但集合变了。）
+    try:
+        _before_set = meas.snapshot_visible_notepads()
+        _before_np = meas.count_visible_notepads()
+        _nh, _nproc = meas.open_own_notepad()
+        try:
+            _mid_set = meas.snapshot_visible_notepads()
+            _mid_np = meas.count_visible_notepads()
+        finally:
+            meas.close_own_notepad(_nh, _nproc)
+        _after_set = meas.snapshot_visible_notepads()
+        _after_np = meas.count_visible_notepads()
+        _same = (_after_set == _before_set)
+        rec("⑧ 靶场窗口用完即关（跑前可见 Notepad 窗口**集合** ⇒ 跑后**完全相同**）"
+            "（跑前 %d 个 ⇒ 跑后 %d 个）" % (_before_np, _after_np),
+            _same and _after_np <= _before_np and _mid_np >= _before_np,
+            "跑前 %d → 开着时 %d → 关掉后 %d ｜ 集合相同？%s%s"
+            % (_before_np, _mid_np, _after_np, "是" if _same else "**否（★ 多出来的/换掉的"
+               "就是没关掉的）**",
+               "" if _same else " ｜ 多出=%s 少了=%s"
+               % (sorted(_after_set - _before_set), sorted(_before_set - _after_set))))
+    except Exception as e:
+        rec("⑧ 靶场窗口用完即关", False, "★ 检查跑不起来：%s: %s" % (type(e).__name__, e), skip=True)
+
+    # ⑨ ctl_keys 的「判词不实」缺陷（派单 §E）：precheck 拒绝 ⇒ 必须**真的不投递**
+    try:
+        sys.path.insert(0, os.path.join(ROOT, "legacy_tools", "_src"))
+        import act as _act_mod                              # noqa: E402
+        _nh2, _nproc2 = meas.open_own_notepad()
+        try:
+            _rc1, _sent1 = _e_keys_case(_act_mod, _nh2, refuse=True)
+            _rc2, _sent2 = _e_keys_case(_act_mod, _nh2, refuse=False)
+        finally:
+            meas.close_own_notepad(_nh2, _nproc2)
+        # 用例1：precheck 拒 ⇒ rc=5 且**一个投递函数都没被调用**
+        _ok1 = (int(_rc1) == 5) and (len(_sent1) == 0)
+        # 用例2：precheck 过 ⇒ 真的投递了（send_vk 被调用）且 rc=0
+        _ok2 = (int(_rc2) == 0) and any(s[0] == "send_vk" for s in _sent2)
+        rec("⑨ ctl_keys：precheck 拒绝 ⇒ **真的不投递**（rc=5 且一个键都没发）", _ok1,
+            "用例1（拒绝）：rc=%r，投递调用=%s ⇒ %s"
+            % (_rc1, _sent1 or "无", "一个都没发 ✔" if _ok1 else "★ 拒绝了却还是发了！"))
+        rec("⑩ ctl_keys：正常投递 ⇒ 返回语义与实际投递**一致**（rc=0 且真发了）", _ok2,
+            "用例2（放行）：rc=%r，投递调用=%s ⇒ %s"
+            % (_rc2, [s[0] for s in _sent2] or "无", "确实投递了 ✔" if _ok2 else "★ 没投递却报了成功"))
+    except Exception as e:
+        rec("⑨ ctl_keys：precheck 拒绝 ⇒ **真的不投递**（rc=5 且一个键都没发）", False,
+            "★ 检查跑不起来：%s: %s" % (type(e).__name__, e), skip=True)
+        rec("⑩ ctl_keys：正常投递 ⇒ 返回语义与实际投递**一致**（rc=0 且真发了）", False,
+            "★ 检查跑不起来：%s: %s" % (type(e).__name__, e), skip=True)
+
+    # ⑪ A：双 spawn 消除 —— 声明 verify_expect 的动作，**验动作.py 只该 spawn 1 次**
+    #    （改前 2 次：拍前快照 + 判定 ⇒ 多付 ≈106.5ms）
+    #    ★ 断言打在**spawn 次数**上（确定性、不受端到端噪声影响）：
+    #      「拍前快照」不许再走进程 ⇒ 改后只有「判定」那一次。
+    try:
+        from agentctl import framecache as _fc_m16          # noqa: E402
+        _nh3, _nproc3 = meas.open_own_notepad()
+        try:
+            meas.bring_to_front(_nh3)
+            _cl3 = _fc_m16.client_origin(int(_nh3))
+            _xy3 = (int(_cl3[0] + 200), int(_cl3[1] + 150)) if _cl3 else (400, 300)
+            _core_m16 = sys.modules.get("agentctl.core")
+            _n_spawn = {"n": 0}
+            _orig_clrun = _core_m16._cl_run
+
+            def _clrun_spy(py, argv, timeout=300):
+                _n_spawn["n"] += 1
+                return _orig_clrun(py, argv, timeout)
+            _core_m16._cl_run = _clrun_spy
+            try:
+                _c_veri = meas.measure_click(_nh3, _xy3, "对照·声明 verify_expect",
+                                             extra_args={"verify_expect": "any-change"})
+            finally:
+                _core_m16._cl_run = _orig_clrun
+            _c_plain = meas.measure_click(_nh3, _xy3, "对照·不声明 verify_expect")
+        finally:
+            meas.close_own_notepad(_nh3, _nproc3)
+        _n_v = int(_n_spawn.get("n") or 0)
+        _t_plain = float((_c_plain or {}).get("端到端ms") or 0.0)
+        _t_veri = float((_c_veri or {}).get("端到端ms") or 0.0)
+        rec("⑪ 双 spawn 已消：声明 verify_expect 时，验动作.py 只 spawn **1** 次（改前 2 次）",
+            _n_v <= 1, "验动作.py spawn 次数 = %d（期望 ≤1：拍前快照已改本进程调）"
+            "｜ 端到端对照：不声明 %.1f ms / 声明 %.1f ms（差 %.1f ms，含测量噪声）"
+            % (_n_v, _t_plain, _t_veri, _t_veri - _t_plain))
+    except Exception as e:
+        rec("⑪ 双 spawn 已消：声明 verify_expect 时，验动作.py 只 spawn **1** 次（改前 2 次）",
+            False, "★ 检查跑不起来：%s: %s" % (type(e).__name__, e), skip=True)
+
     # ── 收摊：把测量器拿的写动作租约**放掉**（不占着主控的会话）──
     _release_lease()
+
+    # ══════════════ M16 派单 §5 · D1（2026-10-22 主控裁决）：tkinter 探测不执行模块 ══════════════
+    # 判据四条（主控原文）：
+    #  ① 普通点击路径跑完 **sys.modules 里没有 tkinter**；
+    #  ② **缺 tkinter 的机器上自检仍报出该项**（用屏蔽 tkinter 的方式验）；
+    #  ③ 正常机器一切不变；
+    #  ④ find_spec 说「有」但真 import 失败 ⇒ **启动闸不假装「有」**（措辞不许承诺「可导入」）。
+    try:
+        import json
+        import subprocess as _sp
+        _src = os.path.join(ROOT, "legacy_tools", "_src")
+        _probe = (
+            "import sys, json; sys.path.insert(0, %r); %s"
+            "import act; print(json.dumps({'tk': 'tkinter' in sys.modules, "
+            "'miss': [m.get('项','') for m in act._SELFTEST_MISS], "
+            "'ok': list(act._SELFTEST_OK)}, ensure_ascii=False))"
+        )
+
+        def _selftest_json():
+            code = _probe % (_src, "")
+            rr = _sp.run([sys.executable, "-X", "utf8", "-c", code],
+                         capture_output=True, text=True, timeout=90)
+            lines = [x for x in (rr.stdout or "").strip().splitlines() if x.strip()]
+            for x in reversed(lines):
+                if x.lstrip().startswith("{"):
+                    return json.loads(x)
+            return {"tk": None, "miss": [], "ok": []}
+
+        def _selftest_missing_tk():
+            """模拟「**缺 tkinter 的机器**」：屏蔽 tkinter ⇒ 自检**必须在 import 阶段就拦停**
+            （rc=11）并把该项**列进缺件清单**（判据②的真身：缺了仍要报出来）。"""
+            code = ("import sys; sys.path.insert(0, %r); sys.modules['tkinter'] = None; "
+                    "import act" % _src)
+            rr = _sp.run([sys.executable, "-X", "utf8", "-c", code],
+                         capture_output=True, text=True, timeout=90)
+            out = (rr.stdout or "") + (rr.stderr or "")
+            return {"rc": rr.returncode, "报了缺": ("tkinter" in out), "原文": out[:160]}
+
+        d_normal = _selftest_json()
+        d_missing = _selftest_missing_tk()
+        _ok1 = (d_normal.get("tk") is False)
+        _ok2 = (int(d_missing.get("rc") or 0) == 11) and bool(d_missing.get("报了缺"))
+        _ok3 = not any("tkinter" in str(m) for m in (d_normal.get("miss") or []))
+        _ok4 = not any("tkinter 可导入" in str(x) for x in (d_normal.get("ok") or []))
+        rec("⑫ D1：tkinter 探测改成 find_spec（不执行模块）⇒ 省 ≈28.5ms/动作"
+            "（① sys.modules 无 tkinter ② 缺 tkinter 仍报该项 ③ 正常机不变 ④ 措辞不承诺「可导入」）",
+            _ok1 and _ok2 and _ok3 and _ok4,
+            "① sys.modules 有 tkinter？%s（要 False）｜② 屏蔽后 rc=%s 且报出 tkinter 缺项？%s"
+            "｜③ 正常机缺项含 tkinter？%s（要 False）｜④ 措辞承诺「可导入」？%s（要 False）"
+            "｜通过项原文：%s"
+            % (d_normal.get("tk"), d_missing.get("rc"), d_missing.get("报了缺"),
+               any("tkinter" in str(m) for m in (d_normal.get("miss") or [])),
+               any("tkinter 可导入" in str(x) for x in (d_normal.get("ok") or [])),
+               (d_normal.get("ok") or [])[:4]))
+    except Exception as e:
+        rec("⑫ D1：tkinter 探测改成 find_spec（不执行模块）", False,
+            "★ 检查跑不起来：%s: %s" % (type(e).__name__, e), skip=True)
 
     return finish()
 

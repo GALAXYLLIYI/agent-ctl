@@ -29,12 +29,29 @@ def _is_managed_python(executable=None):
     return any(m.replace("/", _os.sep).lower() in p for m in _MANAGED_MARKERS)
 
 
-def _probe_import(name):
-    """只探测「能否导入」，**不留下副作用**（探测后把已导入的模块名删掉，保持 sys.modules 干净）。"""
+def _probe_import(name, execute=True):
+    """只探测「能否导入」，**不留下副作用**。
+
+    ★ `execute=False`（M16 派单 §5 · D1，2026-10-22 主控裁决）：
+      **只问「在不在」，不执行模块**（`importlib.util.find_spec`）⇒
+      探 tkinter 这种**只在别的进程里才用得到**的模块时，
+      **不用每次启动都真 import 一遍**（实测真 import tkinter = **28.5ms**，
+      而 act.py 自己**从不**用 tkinter —— 它是授权弹窗 `auth_popup.py` 的依赖）。
+      ⇒ 省 ≈28.5ms/动作。
+      ⚠ **口径不变**：缺件清单照旧报出该项（`find_spec` 找不到 ⇒ 报「找不到模块」）。
+      ⚠ **不假装「有」**：`find_spec` 只证明**文件在**，不证明**能 import**
+        （残缺安装：Tcl/Tk 坏掉时 `import tkinter` 会炸）⇒
+        通过项的措辞**只说「在」**，不承诺「可导入」；
+        真要用它的那条路（授权弹窗）**自己会报真错**。
+      ⚠ `execute=True`（默认）仍**真导入** —— win32gui/win32api 反正后面就要 import
+        （模块已进 sys.modules ⇒ 第二次免费）⇒ 那一路**不花钱、也不改变行为**。
+    """
     import importlib.util as _ilu
     try:
         if _ilu.find_spec(name) is None:
             return False, "找不到模块"
+        if not execute:
+            return True, ""          # ★ 只证「在」，**不执行**
         __import__(name)
         return True, ""
     except Exception as e:
@@ -88,9 +105,16 @@ def _collect_selftest():
                       "      装完直接重跑本命令即可（不需要重启终端）。" % py,
         })
 
-    good, why = _probe_import("tkinter")
+    # ★ M16 派单 §5 · D1（2026-10-22 主控裁决）：tkinter **只问「在不在」**（find_spec），
+    #   **不执行模块** ⇒ 每次启动省 ≈28.5ms（act.py 自己从不用 tkinter，它只是
+    #   授权弹窗 auth_popup.py 的依赖 ⇒ 真要用它的那条路会自己报真错）。
+    #   ⚠ 缺件清单语义**不变**：找不到 ⇒ 照旧报出该项（下面这条）。
+    good, why = _probe_import("tkinter", execute=False)
     if good:
-        ok.append("tkinter 可导入")
+        # ⚠ 措辞**不承诺「可导入」**：find_spec 只证明文件在，不证明能 import
+        #   （残缺安装时 `import tkinter` 会炸）⇒ 真错由授权弹窗那条路报。
+        ok.append("tkinter 在（**未执行导入验证**；真正需要它的授权弹窗 auth_popup.py "
+                  "那条路会自己报真错）")
     else:
         miss.append({
             "项": "tkinter（授权弹窗 auth_popup.py 依赖）",
@@ -2486,44 +2510,42 @@ def do_keys(hwnd, vk=0x41, ctrl=False, times=1, dry=False, wait=0.06, scan_code=
         gate.require(gate.C, f"按键 vk=0x{vk:X} ctrl={ctrl} ×{times}")
     except gate.GateDenied as e:
         return _gate_denied(e, hwnd, gate.C, "按键")
-    # ★ 路线 P（2026-10-17 F2）：先不碰前台，PostMessage 按键试一次
-    #
-    # ★★ 2026-10-19 修（Codex 实跑「把分镜脚本发到微信群」踩出）：
-    #   **ctrl 组合不走这条路**（组合即 Ctrl+V/Ctrl+A/…，vk 本身是被修饰的那个键）。
-    #
-    #   病根不是「PostMessage 不可靠」，是**不可靠得没法判**：
+    # ★ 路线 P（2026-10-17 F2）曾在这里「先不碰前台，PostMessage 按键试一次」。
+    #   ★★ M16 派单 §E 已把那条**整条废掉**（原因见下面那段）——
+    #   这里保留它的**背景**存档，因为它解释的是「**为什么组合键不能走后台**」：
     #     _post_keys 把「Ctrl down」和「V down」分成两条 WM_KEYDOWN 投过去，
     #     目标若按 wParam 直接合成字符（**Qt / Electron / 自绘控件都是这一类**），
     #     Ctrl 那个修饰位压根没参与 ⇒ 结果是打出一个**字面量 v**。
-    #     而「打出一个字面量 v」**同样会让画面变化** ⇒ 下面那段像素判据把它读成
-    #     「后台按键生效」并**直接 return 0** ——
-    #     ★ **失败与成功在证据上不可区分**，前台兜底那条真正正确的路压根走不到。
+    #     而「打出一个字面量 v」**同样会让画面变化** ⇒ 失败与成功在像素上不可区分。
     #     真跑记录（2026-10-19 微信 Qt 窗口）：输入框里出现 `vvaaav`，
     #     日志逐行写着「✔ 后台按键生效（像素证据有变化）」—— 字面量 v 本身
     #     就是它引以为傲的那份「证据」。
-    #
-    #   为什么只砍组合键、不砍普通键：
-    #     路线 P 的收益是「不抢前台」，而这个收益**只在没有修饰语义的输入上成立**
-    #     （滚轮、普通功能键）。组合键一旦走错，错法是「静默地做错事」而不是
-    #     「什么都没做」—— 后者至少还能被像素判据逮住。
     #     按项目自己的口径（§㊾ ZCode：「输入/事件通道层是独立失败源」）：
     #     **点没点中属输入通道，不属感知通道**；同理，「组合键有没有带上修饰位」
     #     也归输入通道，而输入通道的失败**不能交给像素去裁**。
-    if not dry and not ctrl:
-        _kb = evidence(hwnd, "post_keys_before")
-        if _post_keys(hwnd, vk, ctrl, times, info=info):
-            time.sleep(_settle(400))
-            _ka = evidence(hwnd, "post_keys_after")
-            _k0, _k1 = _img_fp(_kb.get("文件") or ""), _img_fp(_ka.get("文件") or "")
-            _kch = None if (_k0 is None or _k1 is None) else (_k1 != _k0)
-            # ★ 2026-10-19（判据 32①）：**画面有变化 ≠ 按键生效**。
-            #   「多打出一个字面量字符」同样会让画面变化（病根见本函数
-            #   上方注释），而本文件自己也写着「投递成功 ≠ 生效…判不出来报未验」。
-            #   ⇒ 像素真值这一档**不许当成功**，一律落回前台兜底那条真正正确的路。
-            log("   ⚠ 后台按键投递了但画面%s ⇒ 落回前台兜底"
-                % ("变了也**不能证明生效**（字面量字符同样会让画面变）"
-                   if _kch else ("判不了（unknown）" if _kch is None else "没变")))
-    # ★ ③ 动作前自动置前（不再因"不在前台"直接拒绝）
+    # ★★★ M16 派单 §E（主控 2026-10-22 12:36 实测三次复现的**「判词不实」级缺陷**）：
+    #   改前的顺序是「**先**后台 PostMessage（= 真投递）→ **再**置前 precheck →
+    #   precheck 拒了就回 rc=5」⇒ 契约文案明写「本次**一个键都没发**」，
+    #   **但键照送**（主控实测：ctl_keys Delete 把文件删了，回执却说「没发」）。
+    #   ⇒ 改法：**precheck 提到投递之前** ⇒ 它拒 ⇒ **真的一个键都没发**（判词与事实一致）。
+    #
+    #   ⇒ 顺带废掉的那条「先投一次、400ms 后看像素、再无条件落回前台」的探路，
+    #     它本来就有四个毛病：
+    #       ① 在 precheck **之前**投递 ⇒ 判词不实（本缺陷的病根）；
+    #       ② 必然**双投递**（探路投一次 + 前台兜底再投一次）；
+    #       ③ 白等 `_settle(400)`；
+    #       ④ 白拍两张证据图（post_keys_before/after）。
+    #     ⇒ 代价：**按键会置前**（改前非 ctrl 键走后台不抢焦点）——
+    #       取舍是「**判词真实 > 不抢焦点**」（判词不实比慢更危险）。
+    #
+    #   ★ 原「路线 P」的背景保留在案（它解释的是**为什么组合键不走后台**）：
+    #     PostMessage 把「Ctrl down」和「V down」分成两条 WM_KEYDOWN 投过去，
+    #     目标若按 wParam 直接合成字符（Qt / Electron / 自绘控件），
+    #     Ctrl 那个修饰位压根没参与 ⇒ 结果是打出一个**字面量 v**，
+    #     而「打出一个字面量 v」**同样会让画面变化** ⇒ 失败与成功在像素上不可区分。
+    #     （这条理由对**组合键**依然成立；改后组合键与普通键都走前台真按键。）
+    #
+    # ★ ③ 动作前自动置前（不再因"不在前台"直接拒绝）——**必须在任何投递之前**
     _fg = ensure_foreground(hwnd, "按键", dry=dry)
     if _fg:
         return _fg

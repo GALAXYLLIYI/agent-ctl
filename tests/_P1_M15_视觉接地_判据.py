@@ -116,27 +116,129 @@ def _gt_cases():
 
 
 def _open_own_notepad():
-    """开**自己的**记事本（不碰用户正在用的窗口），返回 (proc, hwnd, prev_foreground)。"""
-    import win32gui
-    prev_fg = win32gui.GetForegroundWindow()
-    p = subprocess.Popen(["notepad.exe"])
-    hwnd = 0
-    for _ in range(40):
-        time.sleep(0.25)
-        found = []
+    """开**自己的**记事本（不碰用户正在用的窗口），返回 (proc, hwnd, prev_foreground)。
 
-        def _cb(h, _l, out=found):
-            if win32gui.IsWindowVisible(h) and win32gui.GetClassName(h) == "Notepad":
-                out.append(h)
-            return True
+    ★ 收摊**统一走 `_M11_分段测量`**（本文件不再写第二份开窗/收摊逻辑 ⇒ 不会漂移）：
+      · `open_own_notepad()`  ⇒ 顺带把记事本的 **TabState 暂存**起来
+        （★ 治本：不开这个开关，一次开窗就会把上次的 N 个历史 tab 恢复成 N 个可见窗口
+          —— 判据只关自己那一个 ⇒ 每跑一次留 N 个 ⇒ 一天堆到 185 个。
+          用户 2026-10-22 12:58 当面提的问题，根因就在这里。）
+      · `close_own_notepad()`  ⇒ 关附属弹框 → 关主窗 → 认领「不保存」弹框 →
+        **只杀本次记录的 pid**（用户 7:48 开的那个不在记录里 ⇒ 绝不碰）→ **还原 TabState**。
+    """
+    import win32gui
+    sys.path.insert(0, HERE)
+    import _M11_分段测量 as _meas
+    prev_fg = win32gui.GetForegroundWindow()
+    # ★ content="MM"：**靶场要有字**。TabState 暂存治本之后记事本是空的
+    #   ⇒ A②「两条抓图路径比同一块**有字的**区域」就没字可读 ⇒ 只能自己写点。
+    #   （这是把靶场备好，**不是**改判据口径。）
+    hwnd, proc = _meas.open_own_notepad(content="MM")
+    return proc, hwnd, prev_fg
+
+
+def _pid_of(hwnd):
+    """窗口的宿主进程 pid（取不到返回 0）。"""
+    try:
+        import win32process
+        return int(win32process.GetWindowThreadProcessId(int(hwnd))[1])
+    except Exception:
+        return 0
+
+
+def _enum_visible_windows():
+    """当前可见的顶层窗口集合（用于「新出现」的差集认亲）。"""
+    import win32gui
+    out = set()
+
+    def _cb(h, _l):
+        try:
+            if win32gui.IsWindowVisible(h):
+                out.add(int(h))
+        except Exception:
+            pass
+        return True
+    try:
         win32gui.EnumWindows(_cb, None)
-        if found:
-            hwnd = found[0]
-            break
-    return p, hwnd, prev_fg
+    except Exception:
+        pass
+    return out
+
+
+#: 本次开窗**新出现**的附属窗口（收摊时关掉）
+_OPEN_EXTRA = []
+#: ★ 本次开窗**新出现**的窗口各自的 pid（收摊时**只杀这些** ⇒ 用户的进程绝不被碰）。
+#:   实测：Win11 记事本**每个窗口一个独立进程**（`Notepad.exe /SESSION:xxx`）
+#:   ⇒ 杀「我这次记录下来的 pid」是安全的；按进程名批量杀会连用户的 7:48 那个一起杀 ⇒ ⛔。
+_OPEN_PIDS = []
+
+#: 本判据**开跑前**可见的 Notepad 窗口数（收摊后要回到这个数）
+_NP_BEFORE = 0
+#: 本判据**开跑前**可见的 Notepad 窗口**集合** {(hwnd, 标题)}
+#:   ★ 主控 2026-10-22 18:0x：断言要比**集合**（只比个数抓不住「关掉 A 又开出 B」）。
+_NP_BEFORE_SET = set()
+
+
+def _count_visible_notepads() -> int:
+    """当前**可见**的 Notepad 窗口数（靶场窗口收摊的验收口径）。"""
+    import win32gui
+    n = 0
+
+    def _cb(h, _l):
+        nonlocal n
+        try:
+            if win32gui.IsWindowVisible(h) and win32gui.GetClassName(h) == "Notepad":
+                n += 1
+        except Exception:
+            pass
+        return True
+    try:
+        win32gui.EnumWindows(_cb, None)
+    except Exception:
+        pass
+    return n
+
+
+def _snapshot_visible_notepads():
+    """当前**可见**的 Notepad 窗口快照集合：``{(hwnd, 标题), ...}``。
+
+    ★ 主控 2026-10-22 18:0x 要求的断言口径：「跑前可见 Notepad 窗口**集合**
+      ⇒ 跑后**完全相同**」—— 只比个数抓不住「关掉 A 又开出 B」。
+    """
+    out = set()
+    import win32gui
+    def _cb(h, _l):
+        try:
+            if win32gui.IsWindowVisible(h) and win32gui.GetClassName(h) == "Notepad":
+                out.add((int(h), win32gui.GetWindowText(h) or ""))
+        except Exception:
+            pass
+        return True
+    try:
+        win32gui.EnumWindows(_cb, None)
+    except Exception:
+        pass
+    return out
 
 
 def main() -> int:
+    global _NP_BEFORE
+    # ★ 收摊要用**模块级**的 _OPEN_EXTRA / _OPEN_PIDS（记录「本次开的窗/进程」）。
+    #   不写这行 ⇒ 下面 `finally` 里的赋值会让 Python 把它们当**局部**变量
+    #   ⇒ 读取时 UnboundLocalError（实测炸在收摊最后一步，窗口就留在桌上了）。
+    global _OPEN_EXTRA, _OPEN_PIDS
+    # ★ 靶场窗口收摊的**基线**：开跑前可见 Notepad 窗口的**集合**
+    #   （派单 M16 红线第 9 条 / 用户 2026-10-22 12:58 当面提；
+    #     主控 2026-10-22 18:0x：要比集合，不能只比个数）。
+    global _NP_BEFORE_SET
+    try:
+        _NP_BEFORE_SET = _snapshot_visible_notepads()
+    except Exception:
+        _NP_BEFORE_SET = set()
+    try:
+        _NP_BEFORE = _count_visible_notepads()
+    except Exception:
+        _NP_BEFORE = 0
     global INJECT
     ap = argparse.ArgumentParser(description="M15 视觉接地判据")
     ap.add_argument("--inject", action="store_true",
@@ -144,6 +246,16 @@ def main() -> int:
     a = ap.parse_args()
     INJECT = a.inject
 
+    # ★ 判据**自检**：本判据用到的 helper 必须在（缺了 ⇒ 明确报「判词自身不完整」，
+    #   而不是跑到一半炸 NameError ⇒ 验不了 ⇒ 容易被误判成「产品的问题」）。
+    _need = ('_any_key_down', '_force_foreground')
+    _miss = [_n for _n in _need if _n not in globals()]
+    if _miss:
+        rec("判据自检（依赖的 helper 齐全）", False,
+            "★ **判据自身不完整**：缺 " + repr(_miss) + " ⇒ 判词文件被改坏了（**不是产品的问题**）"
+            "；请从仓库取回本文件后再跑")
+        return finish()
+    rec("判据自检（依赖的 helper 齐全）", True, "helper：" + "、".join(_need))
     print("=" * 70, flush=True)
     print("判据 47：M15 视觉接地（OCR 词框 → 词）", flush=True)
     print("=" * 70, flush=True)
@@ -325,15 +437,25 @@ def main() -> int:
                     except Exception:
                         continue
                     if mad <= 12.0:
-                        patch = (cx, cy, cw, ch, mad)
+                        # ★ 这块**必须有字**：空白区域两条路径当然一致（mad≈0），
+                        #   拿它去比「词的坐标」是**比不出东西**的
+                        #   （实测踩到：挑到一块空白 ⇒ 两条路径都 0 词 ⇒ 白跑一趟验不了）。
+                        try:
+                            _nw = len(ocr_mod.recognize_image(
+                                img_pw.crop((cx, cy, cx + cw, cy + ch))).get("words") or [])
+                        except Exception:
+                            _nw = 0
+                        if not _nw:
+                            continue
+                        patch = (cx, cy, cw, ch, mad, _nw)
                         break
                 if patch is None:
                     rec("A② 两条抓图路径同区域坐标差 ≤ 1px", False,
-                        "★ 验不了：整块客户区都被别的窗口挡住了（试了 %d 块候选区域，"
-                        "屏幕上显示的都不是这个窗口）⇒ 两条路径拿不到同一块画面，没法比坐标"
+                        "★ 验不了：整块客户区都被别的窗口挡住了，或**可见但没有字**"
+                        "（试了 %d 块候选区域）⇒ 两条路径拿不到同一块「有字的」画面，没法比坐标"
                         % len(cands), skip=True)
                 else:
-                    cx, cy, cw, ch, mad = patch
+                    cx, cy, cw, ch, mad, _nw = patch
                     rec_pw = ocr_mod.recognize_image(img_pw.crop((cx, cy, cx + cw, cy + ch)))
                     rec_ig = ocr_mod.recognize_image(img_ig.crop((cx, cy, cx + cw, cy + ch)))
                     wp = [(w["t"], w["x"], w["y"]) for w in rec_pw.get("words") or []]
@@ -484,6 +606,7 @@ def main() -> int:
         #   ⇒ **真点一次**，并验「点完画面确实变了」。
         #   ★ 主控立的教训（M12 判据 ⑧ 的教训）：**不许只在函数层打桩** ——
         #   这一条必须真的走「ctl_screen → objects[] → ctl_click --eid → 画面变了」。
+        _sess = ""
         try:
             import tempfile
             from agentctl import framecache as _fcmod
@@ -588,6 +711,12 @@ def main() -> int:
         except Exception as e:
             rec("C⑤ R3 命中 ⇒ objects[] 出现带 eid 的词元素 ⇒ **真能点中**", False,
                 "★ 跑不起来：%s: %s" % (type(e).__name__, e), skip=True)
+        finally:
+            # ★ 收摊：旁表临时文件**必须删**（异常路径也不许留 ⇒ 19 个残留就是这么来的）
+            try:
+                os.remove(_sess)
+            except Exception:
+                pass
 
         # ── C⑤b「UIA 瞎了」那条路：真词 + 空 UIA ⇒ 必须造出带 eid 的词元素 ──
         try:
@@ -633,6 +762,17 @@ def main() -> int:
         except Exception as e:
             rec("C⑤b UIA 瞎了 ⇒ 造出带 eid 的词元素并能定位", False,
                 "★ 跑不起来：%s: %s" % (type(e).__name__, e), skip=True)
+        finally:
+            # ★ 收摊：这一块也往旁表里写过（`_eid_sessions_put`）⇒ **同样必须删**，
+            #   否则 C⑤b 跑完又把临时旁表文件写回来了（实测残留就是这么来的）。
+            try:
+                os.remove(_sess)
+            except Exception:
+                pass
+            try:
+                os.environ.pop("AGENTCTL_EID_SESSIONS", None)
+            except Exception:
+                pass
 
         # ── C⑤c 窗口代际**第二道闸**：代际对不上 ⇒ 拒（一个像素都不点）──
         try:
@@ -647,6 +787,57 @@ def main() -> int:
             rec("C⑤c 窗口代际第二道闸：代际对不上 ⇒ code=12 拒", False,
                 "★ 跑不起来：%s: %s" % (type(e).__name__, e), skip=True)
     finally:
+        # ★ M16 红线第 9 条 / 用户 2026-10-22 12:58 当面提：**靶场窗口用完即关**。
+        #   ⇒ 复用 `_M11_分段测量` 的**同一份**收摊实现（不写第二份，避免漂移）：
+        #     ① 先关本次开窗**新出现**的附属弹框（README 信任弹框之类）；
+        #     ② 再按**窗口**关主窗口（⛔ 不按进程杀 —— 记事本是单进程多窗口，
+        #        杀进程会连**用户自己**开的那个一起关掉）；
+        #     ③ 弹了「是否保存」⇒ 只认「**新出现**的」那个弹框 ⇒ 点「不保存」。
+        try:
+            import win32gui
+            for _h in list(_OPEN_EXTRA or []):
+                try:
+                    if win32gui.IsWindow(int(_h)) and win32gui.IsWindowVisible(int(_h)):
+                        win32gui.PostMessage(int(_h), 0x0010, 0, 0)
+                except Exception:
+                    pass
+            _OPEN_EXTRA = []
+        except Exception:
+            pass
+        try:
+            sys.path.insert(0, HERE)
+            import _M11_分段测量 as _meas
+            _meas.close_own_notepad(hwnd, proc)
+        except Exception:
+            try:
+                if hwnd and win32gui.IsWindow(int(hwnd)):
+                    win32gui.PostMessage(int(hwnd), 0x0010, 0, 0)
+            except Exception:
+                pass
+        # ⚠⚠ **先把前台还回去，再杀记事本**（2026-10-22 16:2x 实测踩过）：
+        #   杀掉「正在前台的记事本」⇒ 桌面当场失去前台 ⇒ 系统把前台判给一个
+        #   **隐形的系统服务窗**（GameInputServiceWindow）⇒ 之后谁都抢不到前台
+        #   （UIPI 更高权限）⇒ 所有需要真实点击的验收全灭。
+        try:
+            if prev_fg and win32gui.IsWindow(prev_fg):
+                win32gui.SetForegroundWindow(prev_fg)      # 把前台还给用户
+                time.sleep(0.15)
+        except Exception:
+            pass
+        # ★ 最后手段：**只杀我这次开的那次进程**（每个记事本窗口一个独立进程 ⇒ 杀自己的安全；
+        #   用户 7:48 开的那个 pid 不在我的记录里 ⇒ 绝不被碰）。
+        #   ⚠ 整段包 try ⇒ 收摊里任何一步出错都**不许**炸穿 finally
+        #   （炸穿 ⇒ 后面的「跑前 N ⇒ 跑后 N」断言根本执行不到 ⇒ 桌面上留下窗口）。
+        try:
+            for _pid in list(_OPEN_PIDS or []):
+                try:
+                    if _pid and _pid != os.getpid():
+                        os.kill(_pid, 9)      # SIGKILL：Windows 上 = TerminateProcess
+                except Exception:
+                    pass
+            _OPEN_PIDS = []
+        except Exception:
+            pass
         try:
             if proc is not None:
                 proc.kill()
@@ -668,6 +859,25 @@ def main() -> int:
     except Exception as e:
         rec("A③ 返回值带 coord_space 声明（= client_physical）", False,
             "★ 跑不起来：%s: %s" % (type(e).__name__, e), skip=True)
+
+    # ★ M16 红线第 9 条 / 用户 2026-10-22 12:58 当面提：**靶场窗口用完即关**。
+    #   断言：「跑前**可见 Notepad 窗口集合** ⇒ 跑后**完全相同**」
+    #   （主控 2026-10-22 18:0x 补：要比**集合**，不能只比**个数**
+    #    —— 关掉 A 又开出 B，个数相同但集合变了 ⇒ 比集合才抓得住。）
+    try:
+        _after_set = _snapshot_visible_notepads()
+        _after_np = len(_after_set)
+        _same = (_after_set == _NP_BEFORE_SET)
+        rec("靶场窗口用完即关（跑前可见 Notepad 窗口**集合** ⇒ 跑后**完全相同**）"
+            "（跑前 %d 个 ⇒ 跑后 %d 个）" % (len(_NP_BEFORE_SET), _after_np),
+            _same and _after_np <= len(_NP_BEFORE_SET),
+            "跑前 %d → 跑后 %d ｜ 集合相同？%s%s"
+            % (len(_NP_BEFORE_SET), _after_np, "是" if _same else "**否**",
+               "" if _same else "　★ 多出=%s 少了=%s"
+               % (sorted(_after_set - _NP_BEFORE_SET), sorted(_NP_BEFORE_SET - _after_set))))
+    except Exception as e:
+        rec("靶场窗口用完即关（跑前集合 ⇒ 跑后集合相同）", False,
+            "★ 检查跑不起来：%s: %s" % (type(e).__name__, e), skip=True)
 
     return finish()
 

@@ -1663,6 +1663,100 @@ def _ownership_precheck(args: dict, hwnd: int, tool: str = "ctl_click"):
     return None, blind
 
 
+# ══════════════════════════════════════════════════════════════════════
+# ★ M16 派单 §1.C · K2（ctl_tree / ctl_find 的 UIA 树缓存）——**本单只埋点，不建缓存**
+# ══════════════════════════════════════════════════════════════════════
+# ★ 裁决（docs\意见\裁决_加速方向_20221022.md §二）：K2「有条件立项，降级到第 3 位」，
+#   本单**只做埋点**：给 ctl_tree / ctl_find 加**命中计数器**，跑 ≥30 次典型调用序列，
+#   报命中率。**命中率 < 50% ⇒ 本单就此结案（只留埋点，不建缓存）**；≥50% ⇒ 另开一单。
+#   ⇒ 本单**不许直接建缓存**。
+#
+# ★ 四条禁令（即使将来建缓存也照抄，这里先钉在埋点里）：
+#   ① **永不签 capture、永不产坐标** —— 埋点只数次数，不留任何可点的信息；
+#   ② 失效键 = hwnd + 代际 + 秒级 TTL + 焦点，**遮挡不进键**；
+#   ③ **禁出「页面上没有它」这种否定结论**（埋点不做任何判定，只计数）；
+#   ④ **volatile 元素不入缓存**（埋点连元素都不留 ⇒ 自动满足）。
+#
+# ★ 收益口径纠正（主控核过）：ctl_tree 全树扫描 = **51ms**（不是 191ms —— 191ms 是
+#   `_screen_build` 的整屏重建）⇒ 命中一次省 51ms，别按 191 算。
+#
+# ★ 「命中」的定义（**不是**缓存命中，是「**同一键在 TTL 内被重复读**」）：
+#   这正是「建了缓存能省掉的那部分」的上界估计 ⇒ 命中率就是这个缓存的**价值上界**。
+K2_PROBE_STATS = {}          # {hwnd: {"读": n, "命中": n, "最近": [(key, ts), ...]}}
+K2_PROBE_TTL_SEC = 5.0       # 秒级 TTL（裁决：「秒级 TTL」）
+K2_PROBE_MAX_KEYS = 8        # 每窗只留最近 8 个键（**不存任何元素内容**）
+K2_PROBE_LAST_WRITE = [0.0]  # 最近一次「写动作真的发出去了」的时刻（进程内）
+
+
+def _k2_mark_write():
+    """记一笔：刚刚有个**写动作**真的发出去了 ⇒ 树可能已变 ⇒ 之后的读不算命中。"""
+    try:
+        import time as _t
+        K2_PROBE_LAST_WRITE[0] = _t.time()
+    except Exception:
+        pass
+
+
+def _k2_probe_key(hwnd: int) -> tuple:
+    """K2 的失效键：hwnd + 代际 + 焦点（+ TTL 由「最近」列表里的时刻管）。"""
+    fg = 0
+    try:
+        import ctypes
+        fg = int(ctypes.windll.user32.GetForegroundWindow() or 0)
+    except Exception:
+        fg = 0
+    return (int(hwnd), int(WIN_GEN.get("n") or 0), fg)
+
+
+def _k2_probe(env_result: dict, hwnd: int, tool: str):
+    """ctl_tree / ctl_find 读完之后**记一笔**（只计数，不缓存任何东西）。"""
+    try:
+        if not env_result or not env_result.get("ok"):
+            return                      # 读失败的**不算**（失败不是「读过了」）
+        import time as _t
+        now = _t.time()
+        key = _k2_probe_key(hwnd)
+        st = K2_PROBE_STATS.setdefault(int(hwnd),
+                                       {"读": 0, "命中": 0, "最近": [], "工具": {}})
+        st["读"] = int(st.get("读") or 0) + 1
+        st["工具"][tool] = int(st["工具"].get(tool) or 0) + 1
+        hit = False
+        for k, ts in list(st.get("最近") or []):
+            if (now - float(ts)) <= K2_PROBE_TTL_SEC and k == key:
+                # ★ 上次读之后**发生过写动作** ⇒ 那棵树已经过期 ⇒ 不算命中
+                #   （K2 缓存真要用，也必须在这一刻作废 ⇒ 命中率必须如实扣掉它）。
+                if float(ts) > float(K2_PROBE_LAST_WRITE[0] or 0.0):
+                    hit = True
+                break
+        if hit:
+            st["命中"] = int(st.get("命中") or 0) + 1
+        rec = list(st.get("最近") or [])
+        rec.append((key, now))
+        st["最近"] = rec[-K2_PROBE_MAX_KEYS:]
+    except Exception:
+        pass                              # 埋点**永远不许**把业务带崩
+
+
+def _k2_probe_report() -> dict:
+    """埋点报告（给探针/判据读）：命中率 + 逐窗计数。"""
+    tot_read = tot_hit = 0
+    per = {}
+    for hwnd, st in (K2_PROBE_STATS or {}).items():
+        r = int(st.get("读") or 0)
+        h = int(st.get("命中") or 0)
+        tot_read += r
+        tot_hit += h
+        per[str(hwnd)] = {"读": r, "命中": h, "命中率": round(h / r, 4) if r else 0.0,
+                          "工具": st.get("工具") or {}}
+    return {"总读": tot_read, "总命中": tot_hit,
+            "命中率": round(tot_hit / tot_read, 4) if tot_read else 0.0,
+            "TTL秒": K2_PROBE_TTL_SEC, "逐窗": per,
+            "口径": ("命中 = **同一键**（hwnd+代际+焦点）在 TTL 内被重复读，"
+                     "**且**这中间**没有发生过写动作**（写了 ⇒ 树已变 ⇒ 那棵树作废）；"
+                     "这是「建缓存能省掉的那部分」的**价值上界**。"
+                     "★ 本单只埋点、**不建缓存**（命中率 <50% 即结案）。")}
+
+
 def t_windows(args: dict) -> dict:
     """窗口清单（**同步原子快照 + 代际**）。
 
@@ -1718,13 +1812,16 @@ def t_tree(args: dict) -> dict:
     ★ 每个可操作元素带 eid（e0、e1...），下一步用 ctl_click 的 eid 直接点，
       不用自己算坐标 —— 坐标算错就是点错按钮。
     """
-    return _uia_gate(args, "ctl_tree", lambda h: uia_tree.tree(
+    r = _uia_gate(args, "ctl_tree", lambda h, st=None: uia_tree.tree(
         h,
         max_nodes=int(args.get("max_nodes") or uia_tree.DEFAULT_MAX_NODES),
         max_depth=int(args.get("max_depth") or uia_tree.DEFAULT_MAX_DEPTH),
         detail=bool(args.get("detail")),
         roles=tuple(args.get("roles") or ("interactive", "text")),
+        state=st,
     ))
+    _k2_probe(r, int(args.get("hwnd") or 0), "ctl_tree")
+    return r
 
 
 def t_find(args: dict) -> dict:
@@ -1733,16 +1830,25 @@ def t_find(args: dict) -> dict:
     实测本机 Edge：find("订阅") → 扫 534 节点、命中 7、558 ms，带 eid 和坐标。
     比拉全树省一个数量级的输出。
     """
-    return _uia_gate(args, "ctl_find", lambda h: uia_tree.find(
+    r = _uia_gate(args, "ctl_find", lambda h, st=None: uia_tree.find(
         h, args.get("query") or "",
         max_nodes=int(args.get("max_nodes") or uia_tree.FIND_MAX_NODES),
         limit=int(args.get("limit") or 40),
         detail=bool(args.get("detail")),
+        state=st,
     ))
+    _k2_probe(r, int(args.get("hwnd") or 0), "ctl_find")
+    return r
 
 
 def _uia_gate(args: dict, tool: str, fn, walk_override: dict | None = None):
-    """UIA 读取走 A 级闸门（只读感知），进程内，不 spawn。"""
+    """UIA 读取走 A 级闸门（只读感知），进程内，不 spawn。
+
+    ★ M16 派单 D2（window_state 双跑去重）：本函数**刚查过** `window_state`，
+      紧接着 `fn` 里那一趟遍历**还会再查一遍** ⇒ 白跑一次 UIA COM 往返
+      （实测 1.5ms/次，偶发 130ms+）⇒ 把已查好的 state 递下去，别让遍历再查。
+      口径不变：同一份事实，只是**不重复取**。
+    """
     h = int(args.get("hwnd") or 0)
     if not h:
         return env(code=gate.CODE_NO_CTRL, warning=tool + " 缺 hwnd")
@@ -1759,7 +1865,7 @@ def _uia_gate(args: dict, tool: str, fn, walk_override: dict | None = None):
                        warning=tool + " 读不了这个窗口：" + str(st["说明"]),
                        blind_spots=["拿不到元素树时**不能**据此说界面上没有这个东西 —— "
                                     "换个窗口状态（叫醒/切前台）再试，或退回 ctl_shot"])
-        res = fn(h)
+        res = fn(h, st)
     except uia_tree.UiaUnavailable as e:
         return env(code=gate.CODE_INTERNAL, warning=str(e),
                    blind_spots=["UIA 不可用 ≠ 界面上没有；Canvas/游戏/Electron 本来就瞎"])
@@ -2441,6 +2547,62 @@ def _cl_run(py: str, argv: list, timeout: int = 300):
     return p.returncode, (p.stdout or "") + (p.stderr or "")
 
 
+#: 验动作.py 的**进程内**模块缓存（M16 派单 A：消掉「双 spawn」的一遍）
+_VERIFY_MOD = {"m": None, "tried": False}
+
+
+def _verify_module(py: str):
+    """**进程内**加载验动作.py（只加载一次，缓存在模块级）。加载不了就返回 None。
+
+    ★ M16 派单 A：声明了 `verify_expect` 的动作**要 spawn 两次**验动作.py
+      （前拍一次基准、后判一次）⇒ 实测每次 spawn ≈ **106.5ms** ⇒ 多付 ≈200ms。
+      ⇒ 「**拍前快照**」只是采一份基准，**不需要独立进程** ⇒ 改成在本进程里调
+        **同一份** `do_snap`（同一份代码、同一份快照格式、写同一个文件）。
+        实测：spawn 106.5ms ｜ 本进程 import 41.7ms + 干活 12.0ms = 53.7ms
+        ｜ **第二次起 import 已缓存 ⇒ 只剩 3.3ms** ⇒ 每个动作省 ≈ **100ms**。
+    ⚠ **判定（check）仍然留在独立进程** —— 契约明写「由**独立进程**判定」，
+      那是防「自己判自己」的独立性保障，**不许**为了省一次 spawn 就内联判定。
+    ⚠ 它的顶层有 psutil 检查，缺了会 `sys.exit(3)` ⇒ 加载**必须**兜住 SystemExit
+      （**不许**把服务带下线）。
+    """
+    if _VERIFY_MOD.get("tried"):
+        return _VERIFY_MOD.get("m")
+    _VERIFY_MOD["tried"] = True
+    try:
+        import importlib.util as _ilu
+        _spec = _ilu.spec_from_file_location("agentctl_verify_action", str(py))
+        if _spec is None or _spec.loader is None:
+            return None
+        _m = _ilu.module_from_spec(_spec)
+        _spec.loader.exec_module(_m)          # 顶层可能 SystemExit ⇒ 下面兜
+        _VERIFY_MOD["m"] = _m
+    except SystemExit:
+        _VERIFY_MOD["m"] = None              # ★ 缺 psutil 之类 ⇒ 用不了就回老路
+    except Exception:
+        _VERIFY_MOD["m"] = None
+    return _VERIFY_MOD.get("m")
+
+
+def _cl_snap(py: str, tag: str, paths: str, expect: str, timeout: int = 300):
+    """**在本进程**拍「前快照」；跑不了就回落到 spawn（老路）。返回 (rc, 输出)。"""
+    try:
+        _m = _verify_module(py)
+        if _m is not None and hasattr(_m, "do_snap"):
+            import contextlib
+            import io
+            _a = type("_VerifyArgs", (), {})()
+            _a.tag, _a.paths, _a.expect = str(tag), str(paths or ""), str(expect or "")
+            _buf = io.StringIO()
+            with contextlib.redirect_stdout(_buf):     # 它的 print 不许污染我们的 stdout
+                _rc = _m.do_snap(_a)
+            return int(_rc or 0), _buf.getvalue()
+    except Exception as e:
+        # ★ 留痕：回落时把原因记下来（不然「为什么又 spawn 了」查不出来）
+        _VERIFY_MOD["err"] = "%s: %s" % (type(e).__name__, e)
+    return _cl_run(py, ["snap", "--tag", str(tag), "--paths", str(paths or ""),
+                        "--expect", str(expect or "")], timeout=timeout)
+
+
 # ════════════════════════════════════════════════════════
 # 动作信封 · after.diff（P0-A · 2026-10-18）
 # ════════════════════════════════════════════════════
@@ -2966,8 +3128,9 @@ def _act(action: str, args: dict, argv: list[str], scope: str = "B") -> dict:
                                "可用环境变量 AGENTCTL_VERIFY_PY 指定路径，或去掉 verify_expect。")
         _tagbase = "cl_%d_%d" % (os.getpid(), time.time_ns())
         _cl = {"py": _vy, "before": _tagbase + "_b", "after": _tagbase + "_a"}
-        _rcv, _outv = _cl_run(_vy, ["snap", "--tag", _cl["before"],
-                                    "--paths", watch, "--expect", exp])
+        # ★ M16 派单 A：**「拍前快照」不再 spawn**（本进程调同一份 do_snap）⇒ 省 ≈100ms；
+        #   「判定（check）」**仍然独立进程**（契约的「独立进程判定」不许内联）。
+        _rcv, _outv = _cl_snap(_vy, _cl["before"], watch, exp)
         if _rcv != 0:
             return env(code=gate.CODE_UNSTABLE, data={"raw": _outv[-800:]},
                        warning="动作【前】快照失败 ⇒ 拒绝执行（没拍到「前」，事后无法归因）")
@@ -3075,6 +3238,11 @@ def _act(action: str, args: dict, argv: list[str], scope: str = "B") -> dict:
             _env["AGENTCTL_BASELINE_META"] = json.dumps(_bl_meta, ensure_ascii=False)
         rc, out, e = _legacy("act.py", argv, timeout=int(args.get("timeout_sec") or ACT_TIMEOUT_SEC),
                              extra_env=(_env or None))
+        # ★ M16 §1.C 埋点：动作**真的发出去了**（act 的 rc=0 = 输入送到了，M12 阶段三口径）
+        #   ⇒ **树可能已经变了** ⇒ 此后的「读」**不许**再算命中
+        #   （否则命中率虚高：拿旧树当新树用 = K2 缓存最典型的错 ⇒ 这正是裁决禁令 ②③ 要防的）。
+        if rc == 0:
+            _k2_mark_write()
     except Exception:
         _rm_snapdir(_snapdir)      # ★ 返工②：异常路径也不许留目录
         raise
@@ -3228,7 +3396,10 @@ def _act(action: str, args: dict, argv: list[str], scope: str = "B") -> dict:
     #   ③ 动作自身的 rc 与判定 verdict **两个都报**，互不掩盖
     #   ④ expect 必须在动作前声明（见上面 _cl）
     if _cl:
-        _rcv, _outv = _cl_run(_cl["py"], ["snap", "--tag", _cl["after"], "--paths", watch])
+        # ★ M16 派单 A：**「拍后快照」也不再 spawn**（本进程调同一份 do_snap）。
+        #   ⇒ 声明 verify_expect 的动作从 **3 次 spawn**（前 snap + 后 snap + check）
+        #     降到 **1 次**（只剩「判定」那一次 —— 契约要求判定必须是**独立进程**）。
+        _rcv, _outv = _cl_snap(_cl["py"], _cl["after"], watch, "")
         if _rcv != 0:
             verdict = "unknown"
             _vdetail = {"snap_error": _outv[-500:]}
@@ -4561,6 +4732,18 @@ def t_keys(args: dict) -> dict:
     if err:
         return err
     r = _act("keys", args, argv, scope="C")
+    # ★ M16 派单 §E（主控 2026-10-22 12:36 实测三次复现的**判词不实**缺陷）：
+    #   改前 act 的顺序是「**先**后台 PostMessage（= 真投递）→ **再**置前 precheck →
+    #   precheck 拒了就回 rc=5」⇒ 契约文案说「本次**一个键都没发**」，**但键照送**
+    #   （主控实测：ctl_keys Delete 把文件删了，回执却说「没发」）。
+    #   ⇒ act 侧已把 precheck 提到**投递之前**（act.py do_keys）⇒ 现在 rc=5 时
+    #     **这次真的一个键都没发** ⇒ 这句话是**真话**，而且与「已投递但画面没变」
+    #     （code=8）**分得开**（调用方能分辨「没动」与「动了但没反应」）。
+    if (not r.get("ok")) and int((r.get("data") or {}).get("rc") or 0) == 5:
+        r["warning"] = ("%s（★ 本次**一个键都没发** —— precheck 拒绝 ⇒ **不投递**；"
+                        "这与「已投递但画面没变」（code=8）是两回事，别混）"
+                        % str(r.get("warning") or ""))
+        r.setdefault("data", {})["投递状态"] = "未投递（precheck 拒绝）"
     # ★ 接线单 §二-3：真源 resolve_vk 认不出键名时走 rc=2（act.py:3043）。
     #   改前这个码不在 core 的表里 ⇒ 落到「未知返回码」一支，报 code=5（UNSTABLE）。
     #   而 code=5 的处方是「重新观测」 —— 对「键名写错了」这件事没任何意义 ⇒ 跟着转圈。
@@ -6248,8 +6431,12 @@ def _screen_min_probes(*, warmup, is_web, first_scan) -> int:
     return 2 if (warmup and is_web and first_scan) else 1
 
 
-def _screen_build(hwnd: int, args: dict) -> dict:
-    """语义屏本体。**只读**：不发点击、不 Invoke、不改窗口。"""
+def _screen_build(hwnd: int, args: dict, state=None) -> dict:
+    """语义屏本体。**只读**：不发点击、不 Invoke、不改窗口。
+
+    ★ M16 派单 D2：`state` = 调用方**已经查好**的窗口状态 ⇒ 遍历里别再查一遍
+      （`window_state` 含一次 UIA COM 往返，实测 1.5ms/次）。口径不变。
+    """
     import hashlib as _hl
 
     hwnd = int(hwnd)
@@ -6325,7 +6512,8 @@ def _screen_build(hwnd: int, args: dict) -> dict:
         st = {}
         t_walk = time.time()
         walked, _trunc = uia_tree.walk(hwnd, max_nodes=max_nodes, max_depth=max_depth,
-                                      roles=("all",), include_offscreen=True, stats=st)
+                                      roles=("all",), include_offscreen=True, stats=st,
+                                      state=state)
         walk_ms = (time.time() - t_walk) * 1000.0
         attempts += 1
         n_tries_log.append(len(walked))
@@ -6812,7 +7000,7 @@ def t_screen(args: dict) -> dict:
                                          "pending": []}},
                    blind_spots=["watch_text 声明没生效 ⇒ 这一屏「要盯的文本」没被兑现；"
                                 "别拿这一屏的 objects 当作声明已兑现"])
-    r = _uia_gate(args, "ctl_screen", lambda h: _screen_build(h, args),
+    r = _uia_gate(args, "ctl_screen", lambda h, st=None: _screen_build(h, args, state=st),
                   walk_override={"tool": "ctl_screen", "roles": ["all"],
                                  "include_offscreen": True,
                                  "max_nodes": max_nodes, "max_depth": max_depth})
