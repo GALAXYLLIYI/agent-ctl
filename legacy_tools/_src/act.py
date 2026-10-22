@@ -1092,11 +1092,92 @@ POLL_BUDGET_MS = 800        # 点击的总预算（超时 ⇒ 没测出来）
 POLL_BUDGET_MS_FILL = 1500  # 填字段的总预算
 
 
+#: 轮询采样口径（"" = 整窗 PrintWindow；"client" = 客户区 PrintWindow flag=3）。
+#: ★ M12 阶段三（B）：**基线由 core 下发**（`AGENTCTL_BASELINE` + `AGENTCTL_BASELINE_META`），
+#:   core 的基线是**客户区**帧 ⇒ 采样口径必须跟着它走，否则两帧不可比。
+_POLL_SCOPE = ""
+
+
+def _baseline_from_env():
+    """取 core 下发的**基线**（M12 阶段三 B）⇒ `(图, 口径)`。
+
+    ★ 为什么基线要由 core 下发：以前是 act 在**注入之后**现抓一帧当基线
+      （`_poll_base(hwnd)` 是实参 ⇒ 求值在注入之后）⇒ 目标重绘快于一次
+      PrintWindow 时，**基线里已经含了变化 ⇒ 首变被吞** ⇒ 只能等满预算。
+    ★ 口径（w/h/origin/dpi_scale/来源）随帧一起给 ⇒ core 侧能核对
+      （不一致就**回落 wait_change**，不"现取 origin"补救）。
+    ★ 取不到就返回 `(None, {})` ⇒ 调用方回落「现抓一帧」（老路，**并在回执里标明**）。
+    """
+    meta = {}
+    try:
+        meta = json.loads(os.environ.get("AGENTCTL_BASELINE_META") or "{}")
+        if not isinstance(meta, dict):
+            meta = {}
+    except Exception:
+        meta = {}
+    p = os.environ.get("AGENTCTL_BASELINE") or ""
+    if not p or not os.path.isfile(p):
+        return None, meta
+    try:
+        from PIL import Image
+        with Image.open(p) as im:
+            im.load()
+            return im.copy(), meta
+    except Exception:
+        return None, meta
+
+
+def _too_small(img):
+    """图够不够大 —— `_poll_gray` 的**唯一**用途。
+
+    ★ M12 阶段三（D）：`_poll_gray` 每轮跑一次（实测 **6.3ms/轮**）只为判这个，
+      而 `img.size` 就够 ⇒ 降采样那一步（convert+resize）纯属纯税。
+    """
+    try:
+        w, h = img.size
+        return bool(w < POLL_SCALE * 4 or h < POLL_SCALE * 4)
+    except Exception:
+        return True
+
+
+def _frame_scope(img):
+    """这一帧的**尺寸口径**（`w`/`h`）—— 随帧回传，core 侧据此核对可比性。
+
+    ★ M12 阶段三（B）：口径必须**随帧回传** ⇒ core 侧发现对不上就
+      **回落 `wait_change`（fail-closed）**，不许"现取 origin"补救（窗口会动）。
+    """
+    try:
+        w, h = img.size
+        return {"w": int(w), "h": int(h)}
+    except Exception:
+        return {}
+
+
+def _is_degraded(img):
+    """退化打标（**只打标**，裁决权在 core）。
+
+    ★ M12 阶段三（D）：改前每轮都跑 `framecache.is_blank`（实测 **5.7ms/轮**），
+      但退化只是打标 ⇒ **每轮打一次和最后一帧打一次结论完全一样**
+      ⇒ 只在**要返回的那一帧**上判一次。
+    """
+    if _fc is None or img is None:
+        return False
+    try:
+        return bool(_fc.is_blank(img))
+    except Exception:
+        return False
+
+
 def _poll_base(hwnd):
     """取「动作前」那一帧（内存内）—— 轮询的基线。
 
     ★ 不落盘：轮询基线只是一张小图，不需要变成证据文件。
+    ★ M12 阶段三（B）：**优先用 core 下发的基线**（在注入之前就拍好了），
+      没有才现抓（老路，回执里标明来源）。
     """
+    img, meta = _baseline_from_env()
+    if img is not None:
+        return img
     return _poll_sample(hwnd)
 
 
@@ -1110,6 +1191,18 @@ def _poll_sample(hwnd):
     ★ 拿不到就返回 None（调用方按「没测出来」处理，**不假装没变**）。
     """
     try:
+        if _POLL_SCOPE == "client":
+            # ★ M12 阶段三（B）：基线是 core 下发的**客户区**帧 ⇒ 采样也必须是客户区，
+            #   否则两帧尺寸不同 ⇒ 判差必然 None（"没测出来"）。
+            #   用 `digest._capture_client_rgb`（framecache 的**同一个来源**），
+            #   且**不**用 `framecache.capture_client`（它把退化帧丢成 None，
+            #   那样就分不出「退化」与「抓不到」了）。
+            try:
+                from agentctl import digest as _dg
+                img = _dg._capture_client_rgb(int(hwnd))
+            except Exception:
+                return None
+            return img if img is not None else None
         import perceive
         img, ok = perceive._print_window(int(hwnd))
         if img is None or not ok:
@@ -1264,8 +1357,8 @@ def _wait_ready(hwnd, base_img, budget_ms=POLL_BUDGET_MS, need=POLL_HYSTERESIS,
     import time as _t
     t0 = _t.perf_counter()
     grab = capture or _poll_sample
-    gb = _poll_gray(base_img)
-    if gb is None:
+    # ★ M12 阶段三（D）：`_poll_gray` 每轮 6.3ms 只为判「图够不够大」⇒ 改用 `img.size`。
+    if base_img is None or _too_small(base_img):
         return {"就绪": None, "轮次": 0, "耗时ms": 0.0}
     streak = 0
     rounds = 0
@@ -1280,7 +1373,8 @@ def _wait_ready(hwnd, base_img, budget_ms=POLL_BUDGET_MS, need=POLL_HYSTERESIS,
         cur = grab(hwnd)
         # ★ M12 阶段二：判差用**全尺寸帧 + framecache 的尺子**（口径与 core 完全一致）。
         #   `_poll_gray` 只当「图够不够大」的守卫，不再参与判差（它那份缩放阈值已删）。
-        if cur is None or _poll_gray(cur) is None:
+        # ★ M12 阶段三（D）：那个守卫也换成 `img.size`（省 6.3ms/轮）。
+        if cur is None or _too_small(cur):
             return {"就绪": None, "轮次": rounds,
                     "耗时ms": (_t.perf_counter() - t0) * 1000.0}
         d = _img_diff(base_img, cur)
@@ -1309,13 +1403,13 @@ def _wait_effect(hwnd, base_img, budget_ms=POLL_BUDGET_MS, need=POLL_HYSTERESIS,
     import time as _t
     t0 = _t.perf_counter()
     grab = capture or _poll_sample
-    gb = _poll_gray(base_img)
-    if gb is None:
-        return {"生效": None, "轮次": 0, "耗时ms": 0.0, "图": None}
+    # ★ M12 阶段三（D）：`_poll_gray` 只为判「图够不够大」⇒ 改用 `img.size`（省 6.3ms/轮）。
+    if base_img is None or _too_small(base_img):
+        return {"生效": None, "轮次": 0, "耗时ms": 0.0, "图": None,
+                "退化": False, "首变图": None, "口径": _frame_scope(base_img)}
     streak = 0
     rounds = 0
     last = None
-    degraded = False        # ★ M12：退化**只打标**，裁决权在 core
     first_img = None       # ★ M12：第一次「变化」那一帧（回传给 core 当证据）
     deadline = t0 + max(0.0, float(budget_ms) / 1000.0)
     while True:
@@ -1324,20 +1418,15 @@ def _wait_effect(hwnd, base_img, budget_ms=POLL_BUDGET_MS, need=POLL_HYSTERESIS,
         if _t.perf_counter() >= deadline:
             return {"生效": False, "轮次": rounds,
                     "耗时ms": (_t.perf_counter() - t0) * 1000.0, "图": last,
-                    "退化": degraded, "首变图": first_img}
+                    "退化": _is_degraded(last), "首变图": first_img,
+                    "口径": _frame_scope(last or base_img)}
         cur = grab(hwnd)
-        if cur is None:
+        if cur is None or _too_small(cur):
             return {"生效": None, "轮次": rounds,
                     "耗时ms": (_t.perf_counter() - t0) * 1000.0, "图": last,
-                    "退化": degraded, "首变图": first_img}
+                    "退化": _is_degraded(last), "首变图": first_img,
+                    "口径": _frame_scope(last or base_img)}
         last = cur
-        # ★ M12：退化检测**只打标**（framecache.is_blank）—— act 不裁「变了没」。
-        if _fc is not None:
-            try:
-                if _fc.is_blank(cur):
-                    degraded = True
-            except Exception:
-                pass
         d = _img_diff(base_img, cur)
         if d.get("changed") is True:
             streak += 1
@@ -1348,11 +1437,13 @@ def _wait_effect(hwnd, base_img, budget_ms=POLL_BUDGET_MS, need=POLL_HYSTERESIS,
         if streak >= max(1, int(need)):
             return {"生效": True, "轮次": rounds,
                     "耗时ms": (_t.perf_counter() - t0) * 1000.0, "图": last,
-                    "退化": degraded, "首变图": first_img}
+                    "退化": _is_degraded(cur), "首变图": first_img,
+                    "口径": _frame_scope(cur)}
         if _t.perf_counter() >= deadline:
             return {"生效": False, "轮次": rounds,
                     "耗时ms": (_t.perf_counter() - t0) * 1000.0, "图": last,
-                    "退化": degraded, "首变图": first_img}
+                    "退化": _is_degraded(last), "首变图": first_img,
+                    "口径": _frame_scope(last or base_img)}
         _t.sleep(POLL_INTERVAL_MS / 1000.0)
 
 
@@ -1367,10 +1458,21 @@ def _emit_effect(eff, hwnd):
     ⚠ 解析失败/没有帧 ⇒ core 一律**回落** wait_change（绝不当作「没变」）。
     """
     try:
+        _base_img, _base_meta = _baseline_from_env()
         payload = {"effect": {"rounds": int((eff or {}).get("轮次") or 0),
                               "first_change_ms": round(float((eff or {}).get("耗时ms") or 0.0), 1),
                               "degraded": bool((eff or {}).get("退化")),
-                              "frame_ref": None}}
+                              "frame_ref": None,
+                              # ★ M12 阶段三（B）：**口径随帧回传** ——
+                              #   core 侧拿它跟自己的基线核对；对不上就**回落 wait_change**
+                              #   （fail-closed），**不许**"现取 origin"补救（窗口会动）。
+                              "口径": dict((eff or {}).get("口径") or {}),
+                              "origin": list(_base_meta.get("origin") or []) or None,
+                              "dpi_scale": _base_meta.get("dpi_scale"),
+                              "来源": str(_base_meta.get("来源") or ""),
+                              "基线": str(_base_meta.get("基线来源")
+                                          or ("core下发" if _base_img is not None else "现抓(旧路)")),
+                              "判据版本": str(_base_meta.get("判据版本") or "")}}
         # ★ M12 阶段二：**总有���帧可回传** ——
         #   优先「第一次变化的那一帧」；没有（画面没变）就回传**最后采到的那一帧**。
         #   ⇒ core 拿到帧后用**自己的尺子**判：变了⇒成功；没变⇒code=8
@@ -1379,9 +1481,11 @@ def _emit_effect(eff, hwnd):
         d = os.environ.get("AGENTCTL_SNAP_DIR") or ""
         if img is not None and d:
             os.makedirs(d, exist_ok=True)
-            p = os.path.join(d, "first.png")
+            p = os.path.join(d, "first.bmp")
             try:
-                img.save(p)
+                # ★ M12 阶段三（C④）：**内部交接**改 BMP（PNG save 29.9ms/张 → BMP 5.3ms/张）。
+                #   这张是**内部**帧（给 core 判差用）；**证据图另存 PNG**（给人看）。
+                img.save(p, format="BMP")
                 payload["effect"]["frame_ref"] = p
             except Exception:
                 payload["effect"]["frame_ref"] = None
@@ -2596,12 +2700,15 @@ def do_click(hwnd, name=None, xy=None, dry=False, force_coord=False, retry=0,
     except gate.GateDenied as e:
         return _gate_denied(e, hwnd, gate.B, "点击")
 
-    before = {} if dry else evidence(hwnd, "before")
     method, detail = None, {}
-    # 后台投递：只有"这次真的要走坐标"时才需要判定，所以判定放在两条坐标路径里，
-    # 由 _try_post() 统一决定「投递」还是「回退」，回退原因当场打出来（不静默）。
     _post_mode = bool(post or post_force)
     use_post = False
+    # ★ M12 阶段三（C①）：**before 只拍一次** ——
+    #   改前这里无条件拍一张，随后正常路径在「还原后」**又拍一张**覆盖它
+    #   ⇒ 一次整窗抓帧 + 一次 PNG 编码 + 一张多余 PNG（小窗 ~43ms / 大窗 ~78ms）纯浪费。
+    #   现在：只有**后台投递路**（不会走到下面的「还原后重拍」）在这里拍；
+    #   正常路用下面那张（还原后那张，不是最小化哨兵垃圾）。
+    before = {} if dry else (evidence(hwnd, "before") if _post_mode else {})
 
     # ★ ③ 动作前自动置前 —— **必须放在任何几何/坐标校验之前**。
     #   2026-10-10 实测踩到的坑：窗口**最小化**时 GetWindowRect 返回哨兵矩形
@@ -2620,6 +2727,22 @@ def do_click(hwnd, name=None, xy=None, dry=False, force_coord=False, retry=0,
         if _fg:
             return _fg
         before = evidence(hwnd, "before")     # 还原后重新取证（还原前的图是哨兵垃圾像素）
+
+    # ★ M12 阶段三（B）：**基线由 core 下发**（core 在注入之前就拍好了）。
+    #   改前是 `_wait_effect(hwnd, _poll_base(hwnd), …)` —— `_poll_base(hwnd)` 是**实参**
+    #   ⇒ 在**注入之后**才求值 ⇒ 目标重绘快于一次 PrintWindow 时，
+    #   **基线里已经含了变化 ⇒ 首变被吞** ⇒ 只能等满预算。
+    #   口径（w/h/origin/dpi_scale/来源）随基线一起给 ⇒ core 侧能核对。
+    global _POLL_SCOPE
+    _base_img, _base_meta = _baseline_from_env()
+    if _base_img is None:
+        _base_img = _poll_base(hwnd)        # 旧路兜底（回执里标明来源）
+        _base_src = "现抓(旧路)"
+    else:
+        _base_src = "core下发"
+    # 采样口径跟着基线走：基线是**客户区**帧 ⇒ 采样也必须是客户区，否则两帧不可比。
+    _POLL_SCOPE = "client" if str(_base_meta.get("来源") or "") == "客户区" else ""
+    detail["基线"] = _base_src
 
     def _try_post():
         ok, why = resolve_post(info, post_force)
@@ -2687,7 +2810,7 @@ def do_click(hwnd, name=None, xy=None, dry=False, force_coord=False, retry=0,
                 # ★ M7：反竞态的「等 250 ms」换成「**就绪轮询**」——
                 #   连续 %d 帧都判「没变」才动手（稳了就走，不必等满）。
                 #   ⛔ 不是把等待砍成 0：轮询有预算上限，没稳就照旧按「矩形不稳定」拒。
-                _rdy = _wait_ready(hwnd, _poll_base(hwnd),
+                _rdy = _wait_ready(hwnd, _base_img,
                                    budget_ms=int(_settle(250) * 1000))
                 c2 = find_control(hwnd, c.Name) or c
                 x, y, r2, ok2 = _center(c2)
@@ -2745,47 +2868,38 @@ def do_click(hwnd, name=None, xy=None, dry=False, force_coord=False, retry=0,
         # ⚠ 这个信号只是**提示**：WinUI3 这类界面刚还原时有渲染残留，前后图会差几个像素。
         #   判定"吃不吃投递"要以**功能性判据**（菜单有没有开、标签有没有切）为准。
         attempts = 1
-        _eff = _wait_effect(hwnd, _poll_base(hwnd),
+        _eff = _wait_effect(hwnd, _base_img,
                              budget_ms=int(_settle(450) * 1000))
         _emit_effect(_eff, hwnd)          # ★ M12：回传证据帧（只传帧，不传结论）
-        after = evidence(hwnd, "after")
-        fp0 = _img_fp(before.get("文件") or "")
-        fp1 = _img_fp(after.get("文件") or "")
-        changed = None if (fp0 is None or fp1 is None) else (fp1 != fp0)
+        after = evidence(hwnd, "after")    # ★ 审计图留一张（不再拿它算 md5）
+        # ★ M12 阶段三（A）：「变了没」**不再由 md5 判**（那是第二把尺子），
+        #   改用**对基线的差分**（与 core 同源）⇒ 只供**重试**用，不进退出码。
+        changed = _eff.get("生效")
     elif not dry and method.startswith("SendInput"):
-        fp0 = _img_fp(before.get("文件") or "")
         while True:
             attempts += 1
             click_at(x, y)
             # ★ M7：动作后不再盲等 450 ms —— 轮询到「界面变了」就收工（连续 %d 帧）。
             #   预算用 _settle(450) 换算（旋钮语义不变：AGENTCTL_SETTLE_MS 仍是上限）。
-            _eff = _wait_effect(hwnd, _poll_base(hwnd),
+            _eff = _wait_effect(hwnd, _base_img,
                                  budget_ms=int(_settle(450) * 1000))
             _emit_effect(_eff, hwnd)      # ★ M12：回传证据帧（只传帧，不传结论）
-            after = evidence(hwnd, "after")
-            fp1 = _img_fp(after.get("文件") or "")
-            if fp0 is None or fp1 is None:
-                changed = None
-                break
-            changed = (fp1 != fp0)
-            if changed or attempts > retry:
+            after = evidence(hwnd, "after")    # ★ 审计图留一张（不再算 md5）
+            # ★ M12 阶段三（A）：重试判定**仍然拿得到**「变了没」（`_eff["生效"]`），
+            #   但它**不进退出码** —— 画面结论由 core 判。
+            changed = _eff.get("生效")
+            if changed is True or attempts > retry:
                 break
             log(f"   ⚠ 第 {attempts} 次点击后页面〔无变化〕→ 自动重试")
             time.sleep(_settle(350))
     else:
-        _eff = _wait_effect(hwnd, _poll_base(hwnd),
+        _eff = _wait_effect(hwnd, _base_img,
                              budget_ms=int(_settle(450) * 1000))
         _emit_effect(_eff, hwnd)          # ★ M12：回传证据帧（只传帧，不传结论）
         after = {} if dry else evidence(hwnd, "after")
-        # ★ P0-3（2026-10-21；ZCode 评审逮到的真 bug）：**UIA.Invoke / SelectionItem
-        #   这条路径原来从不计算 changed** ⇒ 末尾的 changed is True 恒不成立
-        #   ⇒ 这条路径**恒返回 rc=8**：name 点击即便 Invoke 成功、界面真的变了，
-        #   回执也只说「画面没变化」。桌面窗口的 name 点击路径实际上一直不可用。
-        #   修法：与另两条路径**同口径**比对前后整窗指纹（_img_fp）。
-        if not dry:
-            fp0 = _img_fp(before.get("文件") or "")
-            fp1 = _img_fp(after.get("文件") or "")
-            changed = None if (fp0 is None or fp1 is None) else (fp1 != fp0)
+        # ★ M12 阶段三（A）：UIA.Invoke / SelectionItem 这条路**同样**不再用 md5 判
+        #   （改前它自己算 md5，而 before 常常拿不到 ⇒ changed 恒 None ⇒ 这条路**恒返回 rc=8**）。
+        changed = _eff.get("生效")
     ev = "" if dry else ("　前图=%s 后图=%s" % (before.get("文件") or "无", after.get("文件") or "无"))
     if not dry and ("拒绝" in before or "拒绝" in after):
         ev += "　⚠ 本次证据不完整"
@@ -2803,7 +2917,16 @@ def do_click(hwnd, name=None, xy=None, dry=False, force_coord=False, retry=0,
     if attempts > 1:
         detail["重试次数"] = attempts - 1
     log(f"{'（演练）' if dry else ''}🖱 点击 [{method}] 窗口「{info['title']}」 {json.dumps(detail, ensure_ascii=False)}" + ev)
-    return 0 if (dry or changed is True) else 8
+    # ★ M12 阶段三（A）：**act 的 rc 只表示「输入送没送到」** ——
+    #   「画面变了没」**不再承载在退出码里** ⇒ 由 core 用**自己的尺子**判：
+    #     变了 ⇒ code=0；**确认没变** ⇒ code=8；**没测出来/退化** ⇒ code=5。
+    #   ⚠ 重试判定仍然拿得到「变了没」（`_eff["生效"]`，同一把尺子），
+    #     但它**只管要不要再点一次**，不体现在 rc 上 ——
+    #     这正是「判定权留 core」与「重试仍可用」唯一能同时成立的位置。
+    #   ⚠ 改前这里是 `return 0 if (dry or changed is True) else 8`
+    #     ⇒ 普通 click 的 code 由 act 的**文件 md5** 裁决（第二把尺子），
+    #        且 `degraded` 被丢掉（不会落 code=5）—— M12 阶段三要补的正是这两条。
+    return 0
 
 
 def scroll_pct(hwnd):

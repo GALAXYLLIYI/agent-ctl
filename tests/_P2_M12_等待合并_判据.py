@@ -50,9 +50,16 @@ MERGE_SAVE_MIN = 200.0
 CORE_SECOND_PASS_MAX_MS = 343.0
 
 GREEN, RED, SKIP = [], [], []
+#: 写租约被别的 actor 占着 ⇒ 那些"红"其实是**环境受阻** ⇒ 一律改判「验不了」
+#: （铁律：环境红不许算产品红，验不了也不许读成绿）。
+LEASE_BLOCKED = False
 
 
 def rec(name, ok, detail="", skip=False):
+    global LEASE_BLOCKED
+    if LEASE_BLOCKED and not ok and not skip:
+        skip = True
+        detail = "★ **环境受阻**（写租约被别人占着 ⇒ 动作没跑成）⇒ " + detail
     print("[%s] %s —— %s" % ("验不了" if skip else ("绿" if ok else "红"), name, detail), flush=True)
     (SKIP if skip else (GREEN if ok else RED)).append(name)
 
@@ -78,6 +85,78 @@ def _release_lease():
                     actor="M11分段测量")
     except Exception:
         pass
+
+
+def _plain_click(core_mod, meas, xy=None, spy=None):
+    """**普通 click 路**（★ **不带 frame_id**）点一下**自己开的**记事本。
+
+    ★ 为什么必须不带 frame_id：带了就 `_need_diff=True` ⇒ 走 core 的另一个分支
+      ⇒ 测不到「普通 agent 真正调用的那条路」（M12 阶段三 的核心缺口就在那条路上）。
+    ★ 点**状态栏空白处**（不会改画面）⇒ core 自己的尺子应判「确认没变」⇒ code=8。
+    ★ spy（可选）：捕获 act 的 **rc**、**基线路径/口径/时刻**、以及回传里的 frame_ref 后缀。
+    """
+    import time as _t
+    nh, _np = meas.open_own_notepad()
+    try:
+        try:
+            meas.bring_to_front(nh)
+        except Exception:
+            pass
+        _x, _y = xy or (1200, 1495)
+        # ★ 坐标点击**必须带凭据**（契约：走坐标的动作要带 from_capture）⇒
+        #   先 ctl_screen 拿一个 capture_id。⚠ 这**不是** frame_id ——
+        #   `_need_diff = frame_id or _need_diff` ⇒ 不带 frame_id 就是**普通路**。
+        _cap = ""
+        try:
+            _sc = core_mod.dispatch("ctl_screen", {"hwnd": int(nh)}, actor="M11分段测量")
+            _sd = (_sc or {}).get("data") or {}
+            _cap = ((_sd.get("结果") or _sd).get("capture_id") or "")
+        except Exception:
+            _cap = ""
+        _args = {"hwnd": int(nh), "xy": [_x, _y]}
+        if _cap:
+            _args["from_capture"] = _cap
+        _orig = core_mod._legacy
+
+        def _s(name, args, timeout=60, extra_env=None):
+            r = _orig(name, args, timeout, extra_env=extra_env)
+            if spy is not None and name == "act.py":
+                spy["rc"] = r[0]
+                spy["out"] = r[1]
+                if extra_env and extra_env.get("AGENTCTL_BASELINE"):
+                    spy["baseline"] = extra_env.get("AGENTCTL_BASELINE")
+                    spy["meta"] = extra_env.get("AGENTCTL_BASELINE_META")
+                    try:
+                        spy["baseline_mtime"] = os.path.getmtime(spy["baseline"])
+                    except Exception:
+                        pass
+                    spy["spawn_at"] = _t.time()
+            return r
+
+        core_mod._legacy = _s
+        try:
+            res = core_mod.dispatch("ctl_click", _args, actor="M11分段测量")
+        finally:
+            core_mod._legacy = _orig
+        return res or {}
+    finally:
+        try:
+            _np.kill()
+        except Exception:
+            pass
+
+
+def _effect_from_out(out):
+    """从 act 的 stdout 里取出那行 effect JSON（M12 阶段二既有约定）。"""
+    try:
+        for line in str(out or "").splitlines():
+            line = line.strip()
+            if line.startswith("{") and '"effect"' in line:
+                import json as _j
+                return (_j.loads(line) or {}).get("effect") or {}
+    except Exception:
+        pass
+    return {}
 
 
 def main() -> int:
@@ -133,7 +212,11 @@ def main() -> int:
     warns = [(c.get("结果") or {}).get("warning") or "" for c in cases]
 
     # ── 租约被别人占（code=10）⇒ 环境受阻 ⇒ 验不了（**不许拿「没跑成」当测量结果**）──
+    global LEASE_BLOCKED
+    _lease_blocked = False
     if any(c == 10 for c in codes):
+        _lease_blocked = True
+        LEASE_BLOCKED = True
         rec("① 测出当前端到端并与基线对照", False,
             "★ **环境受阻**：写动作租约被别的 actor 持有（code=10）⇒ 点击跑不成 ⇒ 本次无法测量",
             skip=True)
@@ -141,7 +224,6 @@ def main() -> int:
         rec("② 合并是否真的发生了", False, "★ 环境受阻，未测量", skip=True)
         rec("④ 画面没变 ⇒ 结果必须落 code=8", False, "★ 环境受阻，未测量", skip=True)
         rec("⑤ unknown 不许被当成成功", False, "★ 环境受阻，未测量", skip=True)
-        return finish()
 
     # ── A 组①：与基线对照 ──
     near = [e for e in ends if BASE_LO * 0.85 <= e <= BASE_HI * 1.15]
@@ -240,23 +322,30 @@ def main() -> int:
         rec("⑦ 退化检测存在且有效（framecache.is_blank：全黑图 ⇒ True）", _is_blank,
             "is_blank(全黑)=%s" % _is_blank)
 
-        # ③ 退化 ⇒ 落 code=5（不是 0、也不是 8）：让 core 收到 degraded=true 的回传
+        # ③ 退化 ⇒ 落 code=5（不是 0、也不是 8）
+        # ★ M12 阶段三：**⑧ 必须在「普通 click 路」（**不带 frame_id**）上验** ——
+        #   改前这条走的是测量器的 ctl_click，而它**传了 frame_id: sv**
+        #   ⇒ `_need_diff=True` ⇒ 测的是「带 frame_id 的路」，不是普通 agent 真正调用的那条。
+        #   ★ 改前的普通路上这条**是红的**：退化被丢掉（不会落 code=5）。
         _orig_parse = _core._parse_effect
         _core._parse_effect = lambda out: {"frame_ref": None, "degraded": True,
                                             "rounds": 1, "first_change_ms": 1.0}
         try:
-            _led2, _ = meas.run_all(1, None)
-            _codes2 = [(c.get("结果") or {}).get("code") for c in (_led2.get("用例") or [])]
-            _c2 = _codes2[0] if _codes2 else None
-            _ok_deg = (_c2 == 5)
-            _why2 = ("回传 degraded=true ⇒ 结果 code=%r（期望 5：退化=**没测出来**，"
-                     "不是「没变」(8)、也不是成功(0)）" % _c2)
-            if _c2 == 10:
-                _why2 = "★ 环境受阻：租约被占（code=10）⇒ 本条验不了"
-                _ok_deg = None
-            rec("⑧ 退化 ⇒ 必须落 code=5（永不当成功、也不当「没变」）",
-                bool(_ok_deg) if _ok_deg is not None else False,
-                _why2, skip=(_ok_deg is None))
+            if _lease_blocked:
+                rec("⑧ 退化 ⇒ 必须落 code=5（**普通 click 路**，永不当成功、也不当「没变」）",
+                    False, "★ **环境受阻**：写租约被别的 actor 持有（code=10）⇒ 本次验不了", skip=True)
+            else:
+                _r8 = _plain_click(_core, meas)
+                _c2 = _r8.get("code")
+                _ok_deg = (_c2 == 5)
+                _why2 = ("**普通 click 路**（不带 frame_id）回传 degraded=true ⇒ 结果 code=%r"
+                         "（期望 5：退化=**没测出来**，不是「没变」(8)、也不是成功(0)）" % _c2)
+                if _c2 == 10:
+                    _why2 = "★ 环境受阻：租约被占（code=10）⇒ 本条验不了"
+                    _ok_deg = None
+                rec("⑧ 退化 ⇒ 必须落 code=5（**普通 click 路**，永不当成功、也不当「没变」）",
+                    bool(_ok_deg) if _ok_deg is not None else False,
+                    _why2, skip=(_ok_deg is None))
         finally:
             _core._parse_effect = _orig_parse
     except Exception as e:
@@ -334,6 +423,107 @@ def main() -> int:
     ok_unk = not any((c == 0 and ("没测出来" in w or "未知" in w)) for c, w in zip(codes, warns))
     rec("⑤ unknown（没测出来）不许被当成成功", ok_unk,
         "各轮 (code, warning 前 40 字)=%s" % [(c, w[:40]) for c, w in zip(codes, warns)])
+
+    # ── M12 阶段三 新增：⑫⑬⑭（普通 click 路）──
+    # ★ **不依赖租约**的一条：三态判定的**单测**（直接调 core 的那一份实现）。
+    #   ⇒ 就算写租约被别人占（code=10），这条也能验。
+    try:
+        import agentctl.core as _core
+        _pv = _core._picture_verdict
+        _r_ok = _pv({"ok": True, "code": 0, "data": {}}, {"changed": True})
+        _r_no = _pv({"ok": True, "code": 0, "data": {}}, {"changed": False})
+        _r_un = _pv({"ok": True, "code": 0, "data": {}}, {"changed": None})
+        _r_deg = _pv({"ok": True, "code": 0, "data": {}}, {"changed": False}, degraded=True)
+        _codes = {"变了": _r_ok.get("code"), "确认没变": _r_no.get("code"),
+                  "没测出来": _r_un.get("code"), "退化": _r_deg.get("code")}
+        _ok_u = (_codes["变了"] == 0 and _codes["确认没变"] == 8
+                 and _codes["没测出来"] == 5 and _codes["退化"] == 5)
+        rec("⑫a 三态判定（core 那一份实现）：变了⇒0 / 确认没变⇒8 / 没测出来⇒5 / 退化⇒5",
+            _ok_u, "实测 %s（期望 {'变了': 0, '确认没变': 8, '没测出来': 5, '退化': 5}）" % _codes)
+    except Exception as e:
+        rec("⑫a 三态判定（core 那一份实现）", False,
+            "★ 跑不起来：%s: %s" % (type(e).__name__, e), skip=True)
+
+    try:
+        import glob as _g
+        import agentctl.core as _core
+        import perceive as _pv2
+
+        _spy = {}
+        if _lease_blocked:
+            for _nm in ("⑫ act 的 rc 不承载画面结论（act rc 恒为 0「输入送到了」⇒ code 由 core 判）",
+                        "⑬ 基线早于注入时刻（core 下发基线 + 口径随帧回传）",
+                        "⑭ 一次普通 click 的 PNG 张数下降（≤2 张）"):
+                rec(_nm, False, "★ **环境受阻**：写动作租约被别的 actor 持有（code=10）"
+                                "⇒ 本次点击没跑成 ⇒ 验不了（**不是产品红**）", skip=True)
+        else:
+            _p0 = set(_g.glob(os.path.join(_pv2.SHOTDIR, "*.png")))
+            _r12 = _plain_click(_core, meas, spy=_spy)
+            _p1 = set(_g.glob(os.path.join(_pv2.SHOTDIR, "*.png")))
+            _new_png = sorted(os.path.basename(x) for x in (_p1 - _p0))
+            _arc = _spy.get("rc")
+            _ccode = _r12.get("code")
+            _warn = str(_r12.get("warning") or "")
+
+            # ★ **环境受阻**（code=10：写租约被别人占）⇒ 验不了，**不许当红、也不许当绿**。
+            if _ccode == 10:
+                for _nm in ("⑫ act 的 rc 不承载画面结论（act rc 恒为 0「输入送到了」⇒ code 由 core 判）",
+                            "⑬ 基线早于注入时刻（core 下发基线 + 口径随帧回传）",
+                            "⑭ 一次普通 click 的 PNG 张数下降（≤2 张）"):
+                    rec(_nm, False, "★ **环境受阻**：写动作租约被别的 actor 持有（code=10）"
+                                    "⇒ 本次点击没跑成 ⇒ 验不了（**不是产品红**）", skip=True)
+            else:
+                # ⑫ act 的 rc **不承载画面结论**
+                #   ★ 决定性判据：act 的 rc 恒为 **0**（只表示「输入送没送到」）。
+                #   改前：画面没变时 act 返 **8** ⇒ core 的 code 就是 act 的 md5 翻出来的
+                #        （第二把尺子）⇒ 改后必须是 act 返 0、code 由 core 自己的尺子给。
+                _ok12 = (_arc == 0)
+                _why12 = ("act 的 rc=%r（改前：画面没变时 act 返 8 ⇒ code 由 act 的 md5 裁决）"
+                          "｜ core 给的 code=%r｜ warning 前 70 字=%r" % (_arc, _ccode, _warn[:70]))
+                if _ok12 and _ccode == 8:
+                    _ok12 = ("core" in _warn)
+                    _why12 += ("｜ code=8 的文案**必须**写明是 core 判的（%s）"
+                               % ("写明了 ✔" if _ok12 else "★没写明"))
+                rec("⑫ act 的 rc 不承载画面结论（act rc 恒为 0「输入送到了」⇒ code 由 core 判）",
+                    bool(_ok12), _why12)
+
+                # ⑬ 基线**早于注入时刻**（core 下发，不是 act 注入后现抓）
+                _ok13 = False
+                _why13 = "★ 没抓到基线下发（extra_env 里没有 AGENTCTL_BASELINE）"
+                if _spy.get("baseline") and _spy.get("baseline_mtime") is not None:
+                    _ok13 = float(_spy["baseline_mtime"]) <= float(_spy.get("spawn_at") or 0)
+                    _why13 = ("基线文件 %s：mtime %.3f ≤ 子进程起动 %.3f（早 %.1f ms）"
+                              "⇒ **基线早于注入**（act 拿到的基线是 core 在注入前拍的）"
+                              % (os.path.basename(str(_spy.get("baseline"))),
+                                 float(_spy["baseline_mtime"]), float(_spy.get("spawn_at") or 0),
+                                 (float(_spy.get("spawn_at") or 0) - float(_spy["baseline_mtime"])) * 1000))
+                    _meta = {}
+                    try:
+                        import json as _j
+                        _meta = _j.loads(_spy.get("meta") or "{}")
+                    except Exception:
+                        _meta = {}
+                    _why13 += "｜ 口径=%s" % {k: _meta.get(k) for k in ("w", "h", "来源", "基线来源")}
+                rec("⑬ 基线早于注入时刻（core 下发基线 + 口径随帧回传）", bool(_ok13), _why13)
+
+                # ⑭ 一次普通 click 的**整窗抓帧/PNG 张数**下降
+                _eff12 = _effect_from_out(_spy.get("out"))
+                _ref = str(_eff12.get("frame_ref") or "")
+                if _arc is None:
+                    rec("⑭ 一次普通 click 的 PNG 张数下降（≤2 张；改前 4 张：before×2 + after + first.png）",
+                        False, "★ 这次点击**没跑成**（act 的 rc=%r）⇒ 没测出来，不等于「没少」"
+                        % _arc, skip=True)
+                else:
+                    _ok14 = (len(_new_png) <= 2)
+                    rec("⑭ 一次普通 click 的 PNG 张数下降（≤2 张；改前 4 张：before×2 + after + first.png）",
+                        _ok14,
+                        "新增 PNG %d 张：%s ｜ 内部交接帧=%s（★ 改 BMP ⇒ 内部不再写 PNG）"
+                        % (len(_new_png), _new_png, os.path.basename(_ref) or "（无）"))
+    except Exception as e:
+        for _nm in ("⑫ act 的 rc 不承载画面结论（act rc 恒为 0「输入送到了」⇒ code 由 core 判）",
+                    "⑬ 基线早于注入时刻（core 下发基线 + 口径随帧回传）",
+                    "⑭ 一次普通 click 的 PNG 张数下降（≤2 张）"):
+            rec(_nm, False, "★ 检查跑不起来：%s: %s" % (type(e).__name__, e), skip=True)
 
     # ── 收摊：把测量器拿的写动作租约**放掉**（不占着主控的会话）──
     _release_lease()

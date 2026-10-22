@@ -2294,11 +2294,13 @@ def _modal_reason(txt: str) -> str:
 
 
 def _rm_snapdir(path):
-    """★ M12 返工②：删掉本次动作的**临时**证据目录（`ignore_errors`，异常路径也不炸）。
+    r"""★ M12 返工②：删掉本次动作的**临时**证据目录（`ignore_errors`，异常路径也不炸）。
 
     为什么必须删：这是**产品级泄漏**（每点一下留一个目录 + 一张 PNG），
     踩「干完必须清场」铁律。**要留的证据落仓内证据目录**（work\_actions\…），
     临时目录**只**做「帧从子进程回传给 core」的中转 ⇒ 读完即删。
+    ★ M12 阶段三：docstring 改成**原始字符串**（前面那个 r）—— 原来那个反斜杠
+      是非法转义，Python 3.12 每次 import 都告警（噪声且是隐患）。
     """
     if not path:
         return
@@ -2706,6 +2708,63 @@ def _act_diff_of(before, after, win_off=None, ignore=None) -> dict:
             "说明": _d.get("说明")}
 
 
+def _picture_verdict(r: dict, df: dict, degraded: bool = False, what: str = "动作"):
+    """★ M12 阶段三（A）：**画面结论一律由 core 给**（三态）⇒ 返回（可能替换的）信封。
+
+    · **变了**（`changed is True`）⇒ 原样返回（成功）
+    · **确认没变**（`changed is False`）⇒ `code=8`（CODE_NO_CHANGE）
+    · **没测出来**（`changed is None`）或**退化** ⇒ `code=5`（CODE_UNSTABLE）
+
+    ★ **不看 act 的 rc**：act 的 rc 只表示「输入送没送到」（M12 阶段三 A）。
+    ★ 「没测出来」与「没变」必须**分开**（铁律：unknown 永不当成功，也不当「没变」）。
+    ⚠ 只在 **act 真的把动作送出去了**（`r["ok"]` 为真）时才应用 ——
+      act 前置拒绝（rc=4/5/7/9）时，动作压根没发生，code 保持 act 的原样。
+    """
+    if not (r or {}).get("ok"):
+        return r
+    if degraded:
+        rr = env(code=gate.CODE_UNSTABLE, data=r.get("data"),
+                 warning=("★ 动作后**采样到的是退化画面**（空白/纯色 ⇒ 没有画面）⇒ "
+                          "**没测出来**，不等于「画面没变化」⇒ 本次**不报成功**。"))
+        rr.setdefault("data", {})["退化"] = True
+        return rr
+    ch = (df or {}).get("changed")
+    if ch is True:
+        return r
+    if ch is False:
+        return env(code=gate.CODE_NO_CHANGE, data=r.get("data"),
+                   warning=("★ %s发出去了，但**动作前后画面逐像素比对没变**（阈值 %d/255）。"
+                            "本次**不报成功** —— 「输入送到了」不等于「界面响应了」。"
+                            "（画面结论由 **core** 判；act 的 rc 只表示「输入送没送到」。）"
+                            % (what, ACT_DIFF_STEP)))
+    return env(code=gate.CODE_UNSTABLE, data=r.get("data"),
+               warning=("★ %s发出去了，但**没能比对画面**（%s）。"
+                        "本次不报成功 —— 不能把「我没看见」写成「我看见了没变」。"
+                        "（画面结论由 **core** 判；act 的 rc 只表示「输入送没送到」。）"
+                        % (what, (df or {}).get("说明", ""))))
+
+
+def _effect_scope_ok(effect: dict, before) -> bool:
+    """act 回传的帧**口径**与 core 自己的基线对得上吗（M12 阶段三 B）。
+
+    ★ 对不上 ⇒ core **回落 `wait_change`（fail-closed）**，**不许**「现取 origin」补救
+      （窗口会动 ⇒ 现取的原点会把帧对到另一个位置上去）。
+    ★ 口径**没随帧回传**（老版 act）⇒ **不拦**（拦了就是静默降级），
+      但这一路本来就是「回落 wait_change」的兼容路径。
+    """
+    try:
+        sc = (effect or {}).get("口径") or {}
+        if not sc:
+            return True                     # 没带口径 ⇒ 无法核对 ⇒ 不拦（但也没有对齐保证）
+        if before is not None:
+            bw, bh = before.size
+            if int(sc.get("w") or 0) != int(bw) or int(sc.get("h") or 0) != int(bh):
+                return False
+        return True
+    except Exception:
+        return True
+
+
 def _act_after(hwnd: int, before, effect=None, t_spawn=None):
     """动作**后**那一帧。
 
@@ -2719,10 +2778,14 @@ def _act_after(hwnd: int, before, effect=None, t_spawn=None):
             if ref and os.path.isfile(ref):
                 mt = os.path.getmtime(ref)
                 if (t_spawn is None) or (mt >= float(t_spawn)):
-                    from PIL import Image
-                    with Image.open(ref) as im:
-                        im.load()
-                        return im.copy()
+                    # ★ M12 阶段三（B）：**口径对不上就不许用这一帧** ⇒ 回落 wait_change。
+                    if not _effect_scope_ok(effect, before):
+                        pass
+                    else:
+                        from PIL import Image
+                        with Image.open(ref) as im:
+                            im.load()
+                            return im.copy()
         except Exception:
             pass
 
@@ -2758,7 +2821,7 @@ def _act_diff_store(fid, before, after, diff) -> dict:
       留哪一张：变了 ⇒ 落 **crop.png**（「变了的那块直接看」）；
       没变 ⇒ 落 **after.png**（「动作后就是这样，没变」也是证据）。
       非复用路径**保持原样**（before/after/crop 三张），避免改变既有产物。
-    ⚠ **签名不许动**（4 个位置参数）：现役判据 `tests\_语义屏判据.py` 用
+    ⚠ **签名不许动**（4 个位置参数）：现役判据 `tests\\_语义屏判据.py` 用
       `lambda fid, b, a, d: {}` 把它整个换掉 —— 加参数会让那条判据当场 TypeError
       （那是「注入把被测代码搞崩了」，不是「注入跑红了」）。
       ⇒ 「这次是不是复用」走模块级标记 `_ACT_REUSE_BEFORE`，不走参数。
@@ -2967,10 +3030,51 @@ def _act(action: str, args: dict, argv: list[str], scope: str = "B") -> dict:
     except Exception:
         _snapdir = ""
     t_spawn = time.time()          # ★ 墙钟：用来判「帧是否晚于动作发起时刻」
+    # ★ M12 阶段三（B）：**把基线下发**给 act ——
+    #   基线必须**早于注入**（改前 act 在**注入之后**才现抓一帧当基线
+    #   ⇒ 目标重绘快于一次 PrintWindow 时**首变被吞** ⇒ 只能等满预算）。
+    #   连同**口径**（w/h/origin/dpi_scale/来源/判据版本）一起给 ⇒
+    #   core 侧能核对（对不上 ⇒ **回落 wait_change**，fail-closed）。
+    _bl_path = ""
+    _bl_meta = {}
+    if _snapdir and _before is not None:
+        try:
+            _bw, _bh = _before.size
+            _bl_path = os.path.join(_snapdir, "baseline.bmp")
+            # ★ 内部交接用 **BMP**（PNG save 29.9ms/张 → BMP 5.3ms/张）：这是给 act 读的那张。
+            _before.save(_bl_path, format="BMP")
+            _is_client = True
+            try:
+                import win32gui                                  # noqa: PLC0415
+                _l, _t, _r, _b = win32gui.GetClientRect(int(hwnd))
+                _is_client = ((_r - _l, _b - _t) == (_bw, _bh))
+            except Exception:
+                _is_client = True
+            _dpi = None
+            try:
+                import ctypes                                   # noqa: PLC0415
+                _dpi = int(ctypes.windll.user32.GetDpiForWindow(
+                    ctypes.c_void_p(int(hwnd))))
+            except Exception:
+                _dpi = None
+            _bl_meta = {"w": int(_bw), "h": int(_bh),
+                        "origin": list(_before_off) if _before_off else None,
+                        "dpi_scale": (round(_dpi / 96.0, 4) if _dpi else None),
+                        "来源": "客户区" if _is_client else "整窗",
+                        "基线来源": _before_src,
+                        "判据版本": "framecache-diff-v1"}
+        except Exception:
+            _bl_path = ""
+            _bl_meta = {}
     try:
         # ★ **M12 返工③**：目录**只**通过 extra_env 传给**这一次**子进程（不改 os.environ）
+        # ★ M12 阶段三（B）：基线也走 extra_env（**同一个子进程**，不进 os.environ）。
+        _env = {"AGENTCTL_SNAP_DIR": _snapdir} if _snapdir else {}
+        if _bl_path:
+            _env["AGENTCTL_BASELINE"] = _bl_path
+            _env["AGENTCTL_BASELINE_META"] = json.dumps(_bl_meta, ensure_ascii=False)
         rc, out, e = _legacy("act.py", argv, timeout=int(args.get("timeout_sec") or ACT_TIMEOUT_SEC),
-                             extra_env=({"AGENTCTL_SNAP_DIR": _snapdir} if _snapdir else None))
+                             extra_env=(_env or None))
     except Exception:
         _rm_snapdir(_snapdir)      # ★ 返工②：异常路径也不许留目录
         raise
@@ -3026,7 +3130,8 @@ def _act(action: str, args: dict, argv: list[str], scope: str = "B") -> dict:
     #   data.after 里（窗G3），覆盖会把那个证据抹掉。
     if not _need_diff:
         # ★ A2：没显式要 diff 的动作，**照样**留证据（求差 + 落盘 + 判词）。
-        #   ⚠ 只产出证据，**不动 r["code"] / r["ok"]**（语义留给调用方判据看）。
+        #   ⚠ M12 阶段三（A）：**不再只产出证据** —— 画面结论（变了/没变/没测出来）
+        #   现在**也由 core 给**（下面那行 `_picture_verdict`）。
         _after = _act_after(hwnd, _before, _eff_info, t_spawn)
         _rm_snapdir(_snapdir)          # ★ 返工②：帧已进内存 ⇒ 临时目录立刻删
         _df = _act_diff_of(_before, _after, _before_off, _diff_ignore_cfg(args))
@@ -3045,6 +3150,21 @@ def _act(action: str, args: dict, argv: list[str], scope: str = "B") -> dict:
         _canon = _canon_verdict(_vd.get("verdict"), "causal",
                                 (_vd.get("verdict_evidence") or {}).get("channel_diag"),
                                 _vd.get("verdict_evidence"))
+        # ★ M12 阶段三（A）：**普通路也由 core 给画面结论**（三态）——
+        #   改前这两个分支是**分开的**：只有 `_need_diff`（带 frame_id）那条才落
+        #   code=8 / code=5 ⇒ **普通 ctl_click（不带 frame_id）走不到** ⇒
+        #   普通 click 的 code 仍由 **act 的 rc** 裁决（第二把尺子），degraded 也被丢掉。
+        r = _picture_verdict(r, _df,
+                             degraded=bool(_eff_info and _eff_info.get("degraded") is True))
+        # ★ 零成本接上 rounds / first_change_ms（裁决 §三）：agent 能分清
+        #   「对方一直没反应」与「反应了但超预算」（改前两者都只看到 code=8）。
+        _d0p = r.get("data") or {}
+        _a0p = _d0p.get("after") or {}
+        r["data"] = {**_d0p, "after": {**_a0p, "diff": _pub, **_vd,
+                                        "轮次": int((_eff_info or {}).get("rounds") or 0),
+                                        "首变ms": (round(float((_eff_info or {}).get("first_change_ms")), 1)
+                                                   if (_eff_info or {}).get("first_change_ms") is not None
+                                                   else None)}}
     if _need_diff:
         _after = _act_after(hwnd, _before, _eff_info, t_spawn)
         _rm_snapdir(_snapdir)          # ★ 返工②：帧已进内存 ⇒ 临时目录立刻删
@@ -3074,28 +3194,20 @@ def _act(action: str, args: dict, argv: list[str], scope: str = "B") -> dict:
         _canon = _canon_verdict(_vd.get("verdict"), "causal",
                                 (_vd.get("verdict_evidence") or {}).get("channel_diag"),
                                 _vd.get("verdict_evidence"))
-        r["data"] = {**_d0, "after": {**_a0, "diff": _pub, **_vd}}
+        r["data"] = {**_d0, "after": {**_a0, "diff": _pub, **_vd,
+                                        "轮次": int((_eff_info or {}).get("rounds") or 0),
+                                        "首变ms": (round(float((_eff_info or {}).get("first_change_ms")), 1)
+                                                   if (_eff_info or {}).get("first_change_ms") is not None
+                                                   else None)}}
 
         # ★ 契约 §二 · mode=focus 的第二种失败：「发了但画面没变 ⇒ code=8」。
         #   ⛔ **绝不当成功**。因为这一款就是「不要用「动作发出去了」冒充
         #   「事情发生了」」的最后一道护栏，放过它就等于把该红的那部分白白赊了。
         #   分三态：False=确认没变→ code=8；None=没测出来→ code=5（不冒充「没变」，
         #   也不报成功；True=真变了→ 就是成功。
-        if r.get("ok") and args.get("_need_diff") and _df.get("changed") is not True:
-            if _df.get("changed") is False:
-                _w8 = ("★ 字符已发出来，但**动作前后画面逐像素比对没变**（阈值 %d/255）。"
-                       "本次**不报成功** —— 「键发出去了」不等于「字边确实出现了」。"
-                       "可能原因：焦点不在目标窗、目标窗不在前台、对方拒收输入、或字段不可编辑。"
-                       "先确认前台与焦点（ctl_windows 看当前前台），再重试。" % ACT_DIFF_STEP)
-                r = env(code=gate.CODE_NO_CHANGE,
-                        data=r.get("data"),
-                        warning=_w8)
-            else:
-                r = env(code=gate.CODE_UNSTABLE,
-                        data=r.get("data"),
-                        warning=("★ 字符已发出来，但**没能比对画面**（%s）。"
-                                 "本次不报成功 —— 不能把「我没看见」写成「我看见了没变」。"
-                                 "请把目标窗到前台后重试，并用 ctl_screen 目测确认。" % _df.get("说明", "")))
+        # ★ M12 阶段三（A）：**三态判定统一走 core 的一份实现**（`_picture_verdict`）——
+        #   普通 click 路与 frame_id 路**同一把尺子**（改前是两套：普通路走 act 的 md5）。
+        r = _picture_verdict(r, _df, what="字符")
 
         # ★ P0 神经层 · ②（窗Z）：变化**全在判定区之外** ⇒ changed_outside_target。
         #   「世界自己动了」（别的窗在动/桌面在动）**不许报成功** —— 这正是
