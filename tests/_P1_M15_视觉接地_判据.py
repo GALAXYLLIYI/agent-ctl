@@ -168,6 +168,25 @@ def main() -> int:
         rec("A①c 「文+件」必须合成一框（gap=0、Δh=6%）", _joined,
             "合并结果=%s" % [(o.get("t"), o.get("x"), o.get("y"), o.get("w"), o.get("h")) for o in _o])
 
+        # ★ A①d **多行交错**：另一行的字 x 夹在两个字中间
+        #   （本机真机实测：记事本状态栏的「行」x=34 夹在「文」x=21 与「件」x=42 之间
+        #   ⇒ 旧的「按 x 排序 + 单一开放组」把「文件」拆成了两个词框）。
+        #   期望：「文」「件」仍然合成「文件」；「行」**自己一组**。
+        _mw = [{"t": "文", "x": 21, "y": 76, "w": 21, "h": 20, "conf": 0.55},
+               {"t": "行", "x": 34, "y": 1488, "w": 18, "h": 18, "conf": 0.55},
+               {"t": "件", "x": 42, "y": 78, "w": 21, "h": 20, "conf": 0.55}]
+        _mo = merge(list(_mw))
+        if INJECT:
+            _mo = list(_mw)
+        _wf = next((o for o in _mo if o.get("t") == "文件"), None)
+        _hang = next((o for o in _mo if o.get("t") == "行"), None)
+        _d_ok = (_wf is not None and _hang is not None
+                 and abs(int(_wf.get("x")) - 21) <= 1
+                 and abs(int(_wf.get("w")) - 42) <= 1)
+        rec("A①d 多行交错时仍能合成「文件」（另一行的字夹在中间）", _d_ok,
+            "合并结果=%s" % [(o.get("t"), o.get("x"), o.get("y"), o.get("w"), o.get("h"))
+                             for o in _mo])
+
     # ── A② / A④ / A⑤：真机（自己开的记事本）──
     proc = None
     hwnd = 0
@@ -336,12 +355,15 @@ def main() -> int:
 
         # ── B④-a 合成一例：阈值**对错各一例**（确定性，不依赖 GUI/OCR）──
         try:
+            # ★ 注入：把对齐阈值改成 0.0 ⇒ 「错的一例」也会被判命中 ⇒ B④/B④b 必须红
+            #   （证明这两条**不是恒真**）。
+            iou_min = 0.0 if INJECT else core_mod.SCREEN_OCR_IOU_MIN
             objs = [{"uid": "u1", "eid": "e1", "role": "TextControl",
                      "rect": [100, 100, 200, 200]}]
             hit_words = [{"t": "文件", "x": 120, "y": 100, "w": 80, "h": 100}]
             miss_words = [{"t": "文件", "x": 500, "y": 500, "w": 80, "h": 100}]
-            r_hit = core_mod._ocr_align_words(hit_words, (0, 0), objs)
-            r_miss = core_mod._ocr_align_words(miss_words, (0, 0), objs)
+            r_hit = core_mod._ocr_align_words(hit_words, (0, 0), objs, iou_min=iou_min)
+            r_miss = core_mod._ocr_align_words(miss_words, (0, 0), objs, iou_min=iou_min)
             i_hit = float((r_hit[0] or {}).get("IoU") or 0.0)
             i_miss = float((r_miss[0] or {}).get("IoU") or 0.0)
             ok_hit = bool((r_hit[0] or {}).get("命中UIA")) and i_hit >= 0.6
@@ -349,7 +371,7 @@ def main() -> int:
             rec("B④ 对齐：命中对的 IoU ≥ 0.6、错的 < 0.6", ok_hit and ok_miss,
                 "对的一例 IoU=%.3f 判命中=%s ｜ 错的一例 IoU=%.3f 判命中=%s（阈值 %.2f）"
                 % (i_hit, (r_hit[0] or {}).get("命中UIA"), i_miss,
-                   (r_miss[0] or {}).get("命中UIA"), core_mod.SCREEN_OCR_IOU_MIN))
+                   (r_miss[0] or {}).get("命中UIA"), iou_min))
         except Exception as e:
             rec("B④ 对齐：命中对的 IoU ≥ 0.6、错的 < 0.6", False,
                 "★ 跑不起来：%s: %s" % (type(e).__name__, e), skip=True)
@@ -369,7 +391,9 @@ def main() -> int:
                     % (cg.get("口径可靠"), cg.get("画面稳定")), skip=True)
             else:
                 rows = core_mod._ocr_align_words(r.get("词框") or [],
-                                                 (cg.get("left"), cg.get("top")), uobjs)
+                                                 (cg.get("left"), cg.get("top")), uobjs,
+                                                 iou_min=(0.0 if INJECT
+                                                          else core_mod.SCREEN_OCR_IOU_MIN))
                 hits = [x for x in rows if x.get("命中UIA")]
                 best = max([float(x.get("IoU") or 0) for x in rows] or [0.0])
                 # 命中数不是硬指标（OCR 认出的字未必都有 UIA 对应物），
@@ -437,6 +461,64 @@ def main() -> int:
                 pass
         except Exception as e:
             rec("C⑤ R3 命中 ⇒ objects[] 出现带 eid 的词元素", False,
+                "★ 跑不起来：%s: %s" % (type(e).__name__, e), skip=True)
+
+        # ── C⑤b「UIA 瞎了」那条路：真词 + 空 UIA ⇒ 必须造出带 eid 的词元素 ──
+        try:
+            r = ocr_mod.ocr_window(int(hwnd))
+            cg = r.get("客户区") or {}
+            boxes = r.get("词框") or []
+            tgt = next((b for b in boxes if str(b.get("t") or "") == "文件"), None)
+            if tgt is None or not (cg.get("口径可靠") and cg.get("画面稳定")):
+                rec("C⑤b UIA 瞎了 ⇒ 造出带 eid 的词元素并能定位", False,
+                    "★ 这一屏没认出「文件」或 origin 不可靠 ⇒ 这条验不了", skip=True)
+            else:
+                fake = {"hit": True, "origin": (int(cg.get("left")), int(cg.get("top"))),
+                        "词框": [dict(tgt)], "res": {}}
+                objs2, nodes2, note2 = core_mod._screen_ocr_word_objects(
+                    fake, [], "文件")          # ← cands 传空 = 假装 UIA 什么都没认出来
+                if not objs2:
+                    rec("C⑤b UIA 瞎了 ⇒ 造出带 eid 的词元素并能定位", False,
+                        "★ 没造出词元素（说明=%s 命中词=%s）" % (note2.get("原因"),
+                                                          note2.get("命中词")))
+                else:
+                    w = objs2[0]
+                    _tok = "m15-test-%d" % os.getpid()
+                    core_mod._eid_sessions_put(_tok, int(hwnd), nodes2, {"tool": "m15"})
+                    feat, entry, how = core_mod._eid_lookup(_tok, w.get("eid"))
+                    if feat is None:
+                        rec("C⑤b UIA 瞎了 ⇒ 造出带 eid 的词元素并能定位", False,
+                            "★ 旁表取不回 eid=%s（how=%s）" % (w.get("eid"), how))
+                    else:
+                        cur, why, rctx = core_mod._ocr_word_recheck(int(hwnd), feat)
+                        if cur is None:
+                            rec("C⑤b UIA 瞎了 ⇒ 造出带 eid 的词元素并能定位", False,
+                                "★ OCR 复核失败（%s）" % why)
+                        else:
+                            cx, cy = cur.get("center") or (0, 0)
+                            rct = w.get("rect") or []
+                            inside = (len(rct) == 4 and rct[0] <= cx <= rct[2]
+                                      and rct[1] <= cy <= rct[3])
+                            rec("C⑤b UIA 瞎了 ⇒ 造出带 eid 的词元素并能定位",
+                                bool(inside) and bool(feat.get("ocr")),
+                                "词元素 label=%r eid=%s uid=%s rect=%s ⇒ 复核后点击点=(%s,%s)%s"
+                                % (w.get("label"), w.get("eid"), w.get("uid"), rct, cx, cy,
+                                   "（落在框内）" if inside else "★不在框内"))
+        except Exception as e:
+            rec("C⑤b UIA 瞎了 ⇒ 造出带 eid 的词元素并能定位", False,
+                "★ 跑不起来：%s: %s" % (type(e).__name__, e), skip=True)
+
+        # ── C⑤c 窗口代际**第二道闸**：代际对不上 ⇒ 拒（一个像素都不点）──
+        try:
+            err, blind = core_mod._ownership_precheck({"window_gen": "999999"},
+                                                       int(hwnd), "ctl_click")
+            bad_ok = (err is not None) and int((err or {}).get("code") or 0) == 12
+            rec("C⑤c 窗口代际第二道闸：代际对不上 ⇒ code=12 拒", bad_ok,
+                "代际给 999999 ⇒ %s" % (("code=%s 拒：%s" % ((err or {}).get("code"),
+                                                            str((err or {}).get("warning"))[:90]))
+                                        if err else "★没拒"))
+        except Exception as e:
+            rec("C⑤c 窗口代际第二道闸：代际对不上 ⇒ code=12 拒", False,
                 "★ 跑不起来：%s: %s" % (type(e).__name__, e), skip=True)
     finally:
         try:

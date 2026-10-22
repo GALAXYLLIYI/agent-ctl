@@ -164,10 +164,16 @@ def _eid_sessions_put(tok: str, hwnd: int, nodes: list, walk: dict | None,
         e = n.get("eid")
         if e is None:
             continue
-        eids[str(e)] = {"type": n.get("type"), "name": n.get("name"),
-                        "rect": list(n.get("rect") or ()),
-                        "center": list(n.get("center") or ()),
-                        "enabled": n.get("enabled", None)}
+        rec = {"type": n.get("type"), "name": n.get("name"),
+               "rect": list(n.get("rect") or ()),
+               "center": list(n.get("center") or ()),
+               "enabled": n.get("enabled", None)}
+        # ★ M15 C 批：词元素（`w<n>`）带一条 `ocr` 标记 ——
+        #   它的复核**不能**靠重走元素树（UIA 树里根本没有它），
+        #   得改成「重跑一次 OCR，找同样的词」（见 `_ocr_word_recheck`）。
+        if n.get("ocr"):
+            rec["ocr"] = dict(n.get("ocr"))
+        eids[str(e)] = rec
     if not eids and not 无明细:
         return False
     try:
@@ -839,13 +845,18 @@ def t_witness(args: dict) -> dict:
 
 # ── 屏控类：包壳调用老脚本（老脚本自己会过闸门）──
 def _issue_capture_from_tree(hwnd: int, raw_out: str,
-                             walk: dict | None = None) -> str | None:
+                             walk: dict | None = None,
+                             extra_nodes: list | None = None) -> str | None:
     """从元素树签发 capture_id（2026-10-07 新增）。
 
     元素树**就是一次观测**，不比截图差 —— 而且指纹更准：
     截图哈希只能告诉你「画面变了」，元素指纹能告诉你「哪个按钮没了/多了」。
     没有截图文件，所以图像哈希留空（闸门会跳过图像比对，只校验 rect/前台/TTL），
     **但元素指纹照算，不许假装没有。**
+
+    ★ M15 C 批：`extra_nodes` = **词元素**（`w<n>`，来自 OCR 词框）。
+      它们只进**旁表**（`--eid w0` 要取得到），**不进树指纹**
+      （树指纹只描述 UIA 结构；把像素证据塞进去会让指纹失去意义）。
     """
     # ★ T15（2026-10-09）：这个函数以前被下面那个截图版**同名覆盖**成死代码，
     #   于是元素指纹 capture 从 10-07 起从未生效。现在分流命名，两个版本各归各位：
@@ -854,6 +865,8 @@ def _issue_capture_from_tree(hwnd: int, raw_out: str,
     import hashlib as _hl2
     try:
         nodes = raw_out.get("节点") or raw_out.get("命中") or []
+        extra = list(extra_nodes or [])          # ★ M15 C 批：词元素（只进旁表）
+        all_nodes = list(nodes) + extra
         if not nodes:
             # ⚠ 不可直接 return None —— 那是**削弱**不是收紧。
             #   ctl_tree 默认不带 --detail 时 uia_tree.tree() 的「节点」就是空列表
@@ -871,7 +884,11 @@ def _issue_capture_from_tree(hwnd: int, raw_out: str,
             #   否则 agent 拿 ctl_tree（默认轻量模式）文本里的 eid 来点时，
             #   会拿到一句「这个号不存在」，而真因是「这次观测压根没交出节点明细」。
             #   空记录让 t_click 能分辨这两者，给出对症的处方（见 _eid_refuse_missing）。
-            _eid_sessions_put(tok0, hwnd, [], walk, 无明细=True)
+            # ★ M15 C 批：有词元素时**不能**写空记录 —— `w<n>` 得进旁表才点得着。
+            if extra:
+                _eid_sessions_put(tok0, hwnd, extra, walk)
+            else:
+                _eid_sessions_put(tok0, hwnd, [], walk, 无明细=True)
             return tok0
         sig = [(n.get("type"), (n.get("name") or "")[:40], tuple(n.get("rect") or ()))
                for n in nodes]
@@ -886,7 +903,8 @@ def _issue_capture_from_tree(hwnd: int, raw_out: str,
         #   这是 D1 的治本处 —— 改前点击侧是**重新编号**（roles/max_nodes 口径都不同），
         #   现在点击侧按当初那批取回坐标，编号不再被第二次遍历重新定义。
         #   写不进去**不降级**：_eid_sessions_put 返回 False 时，t_click 会拒（见那里）。
-        _eid_sessions_put(tok, hwnd, nodes, walk)
+        # ★ M15 C 批：旁表里含**词元素**（`w<n>`）⇒ `--eid w0` 才取得到。
+        _eid_sessions_put(tok, hwnd, all_nodes, walk)
         return tok
     except Exception:
         return None
@@ -3317,6 +3335,69 @@ def _eid_recheck(hwnd: int, feat: dict, walk: dict):
     return hits[0], note, ctx
 
 
+def _ocr_word_recheck(hwnd: int, feat: dict):
+    """**词元素**的身份复核：重跑一次 OCR，找**同样的词**且位置仍对得上。
+
+    返回 (节点-like, 说明, ctx)；找不到 ⇒ (None, 原因, None)。
+
+    ★ 为什么词元素不能走 UIA 那套复核：词元素是**像素里认出来的字**，
+      UIA 树里**根本没有它** —— R3 存在的意义就是 UIA 瞎了的时候顶上。
+      按「类型+名字+矩形」去树里找，必然找不到 ⇒ 每次都判「元素不见了」
+      ⇒ 词元素永远点不动（等于白造）。
+    ★ 复核口径：**同一个词** + IoU ≥ `SCREEN_OCR_IOU_MIN`（位置还对得上）⇒ 还在原位。
+    ★ 这一趟自己拿 origin（**这一帧的**，由 `ocr_window` 抓图前后各取一次几何保证），
+      **不是现取** —— 现取会把词对到另一个位置上去。
+    """
+    m = _ocr_module()
+    if m is None:
+        return None, "本机没有可用的 OCR 模块 ⇒ 无法复核词元素", None
+    try:
+        res = m.ocr_window(int(hwnd))
+    except Exception as e:
+        return None, "重跑 OCR 失败 %s: %s" % (type(e).__name__, e), None
+    if not res.get("ok"):
+        return None, ("重跑 OCR 没跑成（%s）⇒ 没测出来，不等于词没了"
+                      % (res.get("原因") or "未知")), None
+    cgeom = res.get("客户区") or {}
+    if not (cgeom.get("口径可靠") and cgeom.get("画面稳定")):
+        return None, "这一帧的 origin 不可靠（口径不可靠或抓图期间窗口动过）⇒ 无法复核词元素", None
+    try:
+        ox, oy = int(cgeom.get("left") or 0), int(cgeom.get("top") or 0)
+    except Exception:
+        return None, "客户区原点取不到 ⇒ 无法复核词元素", None
+    want = str(feat.get("name") or "")
+    try:
+        wrect = [int(v) for v in (feat.get("rect") or ())]
+    except Exception:
+        wrect = []
+    if not want or len(wrect) != 4:
+        return None, "词元素的特征不全（词/矩形）⇒ 无法复核", None
+    best, best_iou = None, 0.0
+    for wd in (res.get("词框") or []):
+        if str(wd.get("t") or "") != want:
+            continue
+        try:
+            x, y = int(wd.get("x") or 0), int(wd.get("y") or 0)
+            ww, hh = int(wd.get("w") or 0), int(wd.get("h") or 0)
+        except Exception:
+            continue
+        if ww <= 0 or hh <= 0:
+            continue
+        r = [ox + x, oy + y, ox + x + ww, oy + y + hh]
+        v = _iou_ltrb(r, wrect)
+        if v > best_iou:
+            best, best_iou = r, v
+    if best is None or best_iou < SCREEN_OCR_IOU_MIN:
+        return None, ("重跑 OCR 没找到『%s』还在原位（最好的一次 IoU=%.3f < %.2f）"
+                      % (want, best_iou, SCREEN_OCR_IOU_MIN)), None
+    node = {"name": want, "type": SCREEN_OCR_WORD_ROLE, "rect": list(best),
+            "center": [(best[0] + best[2]) // 2, (best[1] + best[3]) // 2],
+            "enabled": None}
+    ctx = {"uid": _ocr_word_uid(want, best),
+           "口径": {"通道": "ocr", "复核": "重跑 OCR 找同一个词", "IoU": best_iou}}
+    return node, "（重跑 OCR 复核：IoU=%.3f）" % best_iou, ctx
+
+
 def _screen_uid_at(ctx, node) -> str:
     """用**复核那趟树**的结构键，给一个节点算出 uid（与 _screen_build 同口径）。
 
@@ -3804,7 +3885,13 @@ def t_click(args: dict) -> dict:
                            warning="%s —— 重新 ctl_find 拿新的 capture_id 再点" % e.why)
 
         # ── ⑤身份复核（按签发口径重走一遍，特征三重全等，**不看编号**）。
-        cur, why, rctx = _eid_recheck(hwnd, feat, (entry or {}).get("walk"))
+        #   ★ M15 C 批：**词元素**（`w<n>`，来自 OCR 词框）走**另一套**复核 ——
+        #   UIA 树里根本没有它 ⇒ 按「类型+名字+矩形」去树里找必然找不到 ⇒ 永远点不动。
+        #   词元素改成「重跑一次 OCR，找**同样的词**且位置还对得上」（见 `_ocr_word_recheck`）。
+        if feat.get("ocr"):
+            cur, why, rctx = _ocr_word_recheck(hwnd, feat)
+        else:
+            cur, why, rctx = _eid_recheck(hwnd, feat, (entry or {}).get("walk"))
         if cur is None:
             return env(code=gate.CODE_STALE_CAPTURE,
                        warning=("元素 %s『%s』已经不在原位了 —— %s。"
@@ -3818,7 +3905,9 @@ def t_click(args: dict) -> dict:
         expect_verdict = "未给"
         cur_uid = ""
         if expect_uid:
-            cur_uid = _screen_uid_at(rctx, cur)
+            # ★ M15 C 批：词元素的 uid 由 OCR 复核那趟直接算出来（`rctx["uid"]`），
+            #   UIA 元素仍走 `_screen_uid_at`（结构键表）。
+            cur_uid = (rctx or {}).get("uid") or _screen_uid_at(rctx, cur)
             if not cur_uid:
                 判 = {"expect_uid": expect_uid, "判定": "无法判定", "重算uid": "", "说明": "复核树没给出结构键，算不出 uid —— 不点"}
                 return env(code=gate.CODE_STALE_CAPTURE, warning=("给了 expect_uid=%s，但这趟复核取不到结构键，**无法判定是不是同一个对象** —— 宁可不算数也不点。" % expect_uid), data={"expect_uid_校验": 判})
@@ -4736,10 +4825,202 @@ def _screen_ocr(hwnd: int, *, query: str = "", rect=None,
     out["usable_boxes"] = usable
     out["usable"] = bool(usable)
     out["客户区"] = geom
+    # ★ M15 B 批：把**帧绑定**的 origin 交出去 —— 这是「客户区物理 → 屏幕物理」的桥。
+    #   ★ 只有「口径可靠」**且**「画面稳定」时才算数（`ocr_window` 抓图前后各取一次几何，
+    #     一致才认；不一致说明窗口在抓图期间动过 ⇒ 这一帧的 origin 不可信）。
+    #   ⇒ 不可信时**不给 origin**：调用方拿不到就自然不会去对齐（fail-closed，不蒙混）。
+    cgeom = res.get("客户区") or {}
+    out["词框"] = list(res.get("词框") or [])
+    out["origin"] = ((int(cgeom.get("left") or 0), int(cgeom.get("top") or 0))
+                     if (cgeom.get("口径可靠") and cgeom.get("画面稳定")) else None)
+    out["origin_口径"] = str(cgeom.get("origin_口径") or "")
     if out["hit"] and not out["usable"]:
-        out["原因"] = ("认出了「%s」，但它的框落在客户区外或太小（> %d px 才算能当锚），"
+        out["原因"] = ("认出了「%s」，但它的框落在客户区外或太小（> %d px 才算能当锚），"
                         "R3 不成立" % (query, min_px))
     return out
+
+
+# ══ M15 · 视觉接地（B 批）：OCR 词框 ↔ UIA 物体对齐 ══════════════════════
+#: 对齐阈值：OCR 词框（屏幕物理）与 UIA 物体 rect 的 IoU **≥ 此值** ⇒ 判「对上了」。
+#: 派单 §3 定的 0.6 —— 低于它就算**没对上**，不许拿「差不多」当命中。
+SCREEN_OCR_IOU_MIN = 0.6
+
+#: 词元素在 `objects[]` 里的角色名。**不是** UIA 的 ControlType ——
+#:   不许混进 UIA 通道（混进去 R2 的「可交互数」就虚高了，那是另一个口径的事）。
+SCREEN_OCR_WORD_ROLE = "OcrWordControl"
+
+
+def _iou_ltrb(a, b) -> float:
+    """两个 `[l, t, r, b]` 的 IoU。取不到就 0.0（**不许**当命中）。"""
+    try:
+        ax0, ay0, ax1, ay1 = [float(x) for x in a]
+        bx0, by0, bx1, by1 = [float(x) for x in b]
+    except Exception:
+        return 0.0
+    iw = min(ax1, bx1) - max(ax0, bx0)
+    ih = min(ay1, by1) - max(ay0, by0)
+    if iw <= 0 or ih <= 0:
+        return 0.0
+    inter = iw * ih
+    ua = ((max(0.0, ax1 - ax0) * max(0.0, ay1 - ay0))
+          + (max(0.0, bx1 - bx0) * max(0.0, by1 - by0)) - inter)
+    return (inter / ua) if ua > 0 else 0.0
+
+
+def _ocr_align_words(words, origin, objs, iou_min: float = SCREEN_OCR_IOU_MIN) -> list:
+    """OCR 词框（客户区物理）+ **帧绑定** origin ⇒ 屏幕物理 ⇒ 与 UIA 物体 rect 求 IoU。
+
+    ★ origin **必须**是那一帧的 origin（`_screen_ocr` 只在「口径可靠 ∧ 画面稳定」时给）
+      —— **不许现取**：窗口会动，现取会把词框对到另一个位置上去。
+    ★ `objs` 是 UIA 物体（`rect` = 屏幕物理像素，见 `uia_tree.py:249`）
+      ⇒ 两边**同一套坐标系**，IoU 才有意义。
+    ★ 返回**每一行**（命中与否都报），不替调用方做取舍。
+    ★ `objs` 为空（**UIA 瞎了**：树里什么都没认出来）时**照样返回每一行**
+      （IoU=0、命中UIA=False）—— 这正是 C 批要用的那条路：
+      没有 UIA 物体可比，正是「该造一个词元素」的场合。
+      （早前这里写成「objs 为空就返回空」⇒ UIA 瞎了时反而一个词元素都造不出来，
+        判据 C⑤b 把这个洞抓出来了。）
+    """
+    out = []
+    if not origin:
+        return out
+    try:
+        ox, oy = int(origin[0]), int(origin[1])
+    except Exception:
+        return out
+    for wd in (words or []):
+        try:
+            x, y = int(wd.get("x") or 0), int(wd.get("y") or 0)
+            w, h = int(wd.get("w") or 0), int(wd.get("h") or 0)
+        except Exception:
+            continue
+        if w <= 0 or h <= 0:
+            continue
+        srect = [ox + x, oy + y, ox + x + w, oy + y + h]
+        best, best_iou = None, 0.0
+        for ob in objs:
+            r = ob.get("rect") or []
+            if len(r) != 4:
+                continue
+            v = _iou_ltrb(srect, r)
+            if v > best_iou:
+                best, best_iou = ob, v
+        out.append({
+            "词": str(wd.get("t") or ""),
+            "词框": [x, y, w, h],
+            "屏幕矩形": srect,
+            "IoU": round(float(best_iou), 4),
+            "命中UIA": bool(best is not None and best_iou >= float(iou_min)),
+            "uid": str((best or {}).get("uid") or ""),
+            "eid": ((best or {}).get("eid") if (best or {}).get("eid") else None),
+            "role": str((best or {}).get("role") or ""),
+        })
+    return out
+
+
+def _ocr_word_uid(text: str, rect) -> str:
+    """词元素的 uid：`ocrword@词@位置块`。
+
+    ★ 位置**量化到 8 px 的块**（`x//8, y//8`）—— 两方面原因：
+      ① OCR 每次跑同一个字，框会抖 1~2 px ⇒ 不量化的话 uid 每次都变，
+         `expect_uid` 就会**假拒**（明明还在原位）；
+      ② 真挪了位置（≫8 px）uid 一定变 ⇒ 身份对得上。
+    """
+    try:
+        l, t = int(rect[0]), int(rect[1])
+    except Exception:
+        return "ocrword@%s@?" % (text or "")
+    return "ocrword@%s@%d,%d" % (text or "", l // 8, t // 8)
+
+
+def _screen_ocr_word_objects(ocr, cands, query, iou_min: float = SCREEN_OCR_IOU_MIN):
+    """R3 命中 ⇒ `objects[]` 里的**词元素**（带 eid ⇒ `ctl_click --eid` 点得中）。
+
+    返回 `(词元素 list, 旁表节点 list, 说明 dict)`。
+
+    ★ **命中不了就一个都不造**（派单 §4）：没跑 / 没命中 / 退化 / 口径不可靠 /
+      抓图期间窗口动过 ⇒ 全部返回空列表 —— **不许编一个对象出来**。
+    ★ 词元素的 eid 用 **`w<n>`** 前缀（UIA 的是 `e<n>`）⇒ 两套号不撞。
+    ★ 词元素**不进** `cands` ⇒ `screen_version` 仍只描述 UIA 结构
+      （把 OCR 结果塞进版本号，版本会随 OCR 抖动漂移 ⇒ `since` 差分全是噪声）。
+    ★ 对上了某个 UIA 物体时**不造新的** —— 同一个地方两个对象会把 agent 带沟里；
+      改成给那个 UIA 物体挂 `ocr` 标注（它本来就有 eid、本来就能点）。
+    """
+    note = {"原因": "", "命中词": [], "对上UIA": [], "新造词元素": 0}
+    import hashlib as _hl_word
+    ocr = ocr or {}
+    if not ocr.get("hit"):
+        note["原因"] = "R3 没命中 ⇒ 不造对象"
+        return [], [], note
+    origin = ocr.get("origin")
+    if not origin:
+        note["原因"] = ("没有**帧绑定**的 origin（口径不可靠，或抓图期间窗口动过）"
+                        "⇒ 不造对象")
+        return [], [], note
+    q = _ocr_tight(query or "")
+    if not q:
+        note["原因"] = "没给 query ⇒ 不知道要接哪个词 ⇒ 不造对象"
+        return [], [], note
+    aligned = _ocr_align_words(ocr.get("词框") or [], origin, cands, iou_min=iou_min)
+    by_uid = {str(o.get("uid") or ""): o for o in (cands or [])}
+    objs, nodes = [], []
+    n = 0
+    for row in aligned:
+        wt = _ocr_tight(str(row.get("词") or ""))
+        if not wt or not (q in wt or wt in q):
+            continue
+        note["命中词"].append(str(row.get("词") or ""))
+        if row.get("命中UIA"):
+            tgt = by_uid.get(str(row.get("uid") or ""))
+            if tgt is not None:
+                tgt["ocr"] = {"词": str(row.get("词") or ""), "IoU": row.get("IoU"),
+                              "屏幕矩形": list(row.get("屏幕矩形") or [])}
+                note["对上UIA"].append({"词": str(row.get("词") or ""),
+                                        "uid": tgt.get("uid"), "eid": tgt.get("eid"),
+                                        "IoU": row.get("IoU")})
+            continue
+        # ★ UIA 瞎了（Canvas / Electron 常见）⇒ 造一个**带 eid** 的词元素。
+        rect = [int(v) for v in (row.get("屏幕矩形") or [])]
+        if len(rect) != 4:
+            continue
+        eid = "w%d" % n
+        n += 1
+        text = str(row.get("词") or "")[:120]
+        uid = _ocr_word_uid(text, rect)
+        oid = "o" + _hl_word.sha1(uid.encode("utf-8")).hexdigest()[:6]
+        cc = SCREEN_SOURCE_CONF["ocr"]
+        objs.append({
+            "id": oid,
+            "eid": eid,
+            "uid": uid,
+            "label": text,
+            "role": SCREEN_OCR_WORD_ROLE,
+            "rect": rect,
+            "in_view": True,
+            "interactive": True,
+            # ★ 这个词**是可以点的**（R3 的意义就是「UIA 认不出、但像素里认得出」）
+            #   —— 但它能不能触发动作，得由点了之后的核验说话（code 语义不变）。
+            "actions": ["click"],
+            "source": "ocr",
+            "source_confidence": min(cc["existence"], cc["text"]),
+            "conf_bbox": cc["bbox"], "conf_text": cc["text"],
+            "conf_existence": cc["existence"],
+            "volatile": False, "exempted": False, "watched": False,
+            "score": _screen_score(in_view=True, interactive=True, query_hit=True,
+                                   area_ratio=0.0, delta=False),
+            "ocr": {"词": text, "IoU": row.get("IoU"), "屏幕矩形": rect,
+                    "词框": list(row.get("词框") or []),
+                    "来源": "R3 词框（UIA 没认出来 ⇒ 这是一条**像素**证据）"},
+        })
+        nodes.append({"eid": eid, "type": SCREEN_OCR_WORD_ROLE, "name": text,
+                      "rect": rect,
+                      "center": [(rect[0] + rect[2]) // 2, (rect[1] + rect[3]) // 2],
+                      "enabled": None,
+                      "ocr": {"词": text, "uid": uid}})
+    note["新造词元素"] = len(objs)
+    if not objs and not note["对上UIA"]:
+        note["原因"] = "R3 命中了，但那个词**既没对上 UIA 物体、也没造出词元素** ⇒ 不编对象"
+    return objs, nodes, note
 
 
 def _cdp_browser_exe() -> str:
@@ -6130,6 +6411,35 @@ def _screen_build(hwnd: int, args: dict) -> dict:
     ch3["dpi_scale"] = (ocr.get("res") or {}).get("dpi_scale")
     ch3["source_confidence"] = dict(SCREEN_SOURCE_CONF["ocr"])
 
+    # ══ M15 · 视觉接地（B/C 批）══
+    #  ① 词框（客户区物理）+ **帧绑定** origin ⇒ 屏幕物理 ⇒ 与 UIA 物体 rect 求 IoU
+    #     （`SCREEN_OCR_IOU_MIN = 0.6`；origin 不可靠/画面不稳 ⇒ `_screen_ocr` 压根不给 origin）
+    #  ② R3 命中 ⇒ 那个词要么**对上**某个 UIA 物体（给它挂 `ocr` 标注，它本来就有 eid），
+    #     要么**UIA 瞎了**（Canvas/Electron）⇒ 造一个**带 eid 的词元素**，
+    #     让 `ctl_click --eid <eid> --from_capture <cap_id>` 点得中。
+    #  ★ 命中不了 ⇒ **一个都不造**（派单 §4「不许编一个对象出来」）。
+    ocr_align = _ocr_align_words(ocr.get("词框") or [], ocr.get("origin"), cands)
+    ocr_word_objs, ocr_word_nodes, ocr_word_note = _screen_ocr_word_objects(
+        ocr, cands, query)
+    ocr_word_gen = None
+    if ocr_word_objs:
+        # ★ 窗G3 · ②**窗口代际第二道闸**：词元素带上签发那一刻的窗口代际。
+        #   点的时候把它回传（`window_gen=N`）⇒ 窗口清单动过了（移动/最小化/新建/销毁）
+        #   就**拒**（code=12）—— 坐标全死时不许点。
+        #   ★ 只在**有词元素**时才取（要枚举一遍窗口，约 10~30 ms）——
+        #     没有词元素的普通屏不白花这个钱。
+        try:
+            _snap = _windows_snapshot()
+            ocr_word_gen = _windows_gen_bump(_snap) if _snap is not None else None
+        except Exception:
+            ocr_word_gen = None
+        for _o in ocr_word_objs:
+            _o["window_gen"] = ocr_word_gen
+        # ★ 词元素**不进** `cands` ⇒ `screen_version` 仍只描述 UIA 结构
+        #   （把 OCR 结果塞进版本号，版本会随 OCR 抖动漂移 ⇒ `since` 差分全是噪声）。
+        #   但它**要**进 `objects[]`（调用方看得见、能拿 eid 去点）。
+        objects = list(objects) + list(ocr_word_objs)
+
     # ★ 窗G3 · ①：把这一屏的 eid 签进旁表，**口径必须就是这次 walk 的口径**。
     #   口径不对 = 拿不同的坐标系比坐标 ⇒ ctl_click 复核必然假失败（D1 那条教训）。
     #   include_offscreen=True 是**超集**，_eid_recheck 复核那趟也显式取超集（A2 要求），
@@ -6141,7 +6451,10 @@ def _screen_build(hwnd: int, args: dict) -> dict:
     # ★ 窗G3b：动作后回读那次**纯为拿 screen_version**，没人会拿它的 capture_id 去点 ——
     #   白签一张就是往旁表里塞垃圾（15 秒寿命、还带全量明细），不许。
     if objects and any(o.get("eid") for o in objects) and not args.get("_不发capture"):
-        screen_capture_id = _issue_capture_from_tree(hwnd, {"命中": nodes}, eid_walk)
+        # ★ M15 C 批：词元素的 eid（`w<n>`）也进旁表 —— 否则 `--eid w0` 取不回来。
+        #   它们**不进树指纹**（树指纹只描述 UIA 结构）。
+        screen_capture_id = _issue_capture_from_tree(hwnd, {"命中": nodes}, eid_walk,
+                                                     extra_nodes=ocr_word_nodes)
 
     out = {
         "screen_version": screen_version,                 # ← 修正②
@@ -6171,7 +6484,13 @@ def _screen_build(hwnd: int, args: dict) -> dict:
                      "用法": "ctl_click --eid <eid> --from_capture <capture_id> --expect_uid <uid>；uid 可选，给了就严格核对，对不上拒（STALE_SCREEN）",
                      "eid 与 uid": "并存、不互当前别名：eid 定位，uid 认身份",
                      "旁表": "与 ctl_tree/ctl_find 同一套（eid_sessions.json）",
-                     "复核口径": "_eid_recheck 显式 include_offscreen=True 取超集，滚出视口仍可点"},
+                     "复核口径": "_eid_recheck 显式 include_offscreen=True 取超集，滚出视口仍可点",
+                     # ★ M15 C 批：词元素的第二道闸（窗口代际）
+                     "词元素": ("R3 命中且 UIA 没认出来时造的词元素（eid 形如 w0）："
+                             "复核走 `_ocr_word_recheck`（重跑 OCR 找同一个词），"
+                             "**不**走元素树（UIA 树里根本没有它）；"
+                             "带 window_gen=%s —— 点的时候回传它，窗口清单动过了就拒（第二道闸）"
+                             % (ocr_word_gen,))},
         "channels": channels,                              # ← 修正⑤
         # ★ 窗G1：DOM 通道（**缩水版**，不做 UIA×DOM 融合 —— 先看得见，再谈合并）。
         #   没连上时是 {wired:false, objects:[]} 并带一句原因，**不假装有通道**。
@@ -6190,9 +6509,27 @@ def _screen_build(hwnd: int, args: dict) -> dict:
                 "words": list((ocr.get("res") or {}).get("words") or [])[:80],
                 "omitted": dict((ocr.get("res") or {}).get("omitted")
                                 or {"total": 0, "returned": 0, "cap": 80}),
-                "ms": (ocr.get("res") or {}).get("ms")},
+                "ms": (ocr.get("res") or {}).get("ms"),
+                # ★ M15 B 批：词框（客户区物理）+ **帧绑定** origin + 与 UIA 物体的 IoU 对齐
+                "词框": list(ocr.get("词框") or [])[:80],
+                "origin": list(ocr.get("origin") or []) if ocr.get("origin") else None,
+                "origin_口径": str(ocr.get("origin_口径") or ""),
+                "对齐": ocr_align[:80],
+                "对齐口径": ("词框(客户区物理) + 帧绑定 origin ⇒ 屏幕物理 ⇒ 与 UIA 物体 rect 求 IoU；"
+                          "IoU ≥ %.2f 判命中。origin 只在「口径可靠 ∧ 画面稳定」时才有" % SCREEN_OCR_IOU_MIN),
+                # ★ M15 C 批：词元素（带 eid，可点）
+                "词元素": [{"eid": o.get("eid"), "uid": o.get("uid"), "label": o.get("label"),
+                            "rect": o.get("rect"), "role": o.get("role")}
+                           for o in (ocr_word_objs or [])],
+                "词元素说明": dict(ocr_word_note or {}),
+                "词元素口径": ("R3 命中 ⇒ 词要么对上某个 UIA 物体（挂 ocr 标注，eid 仍是 UIA 那个），"
+                           "要么 UIA 没认出来 ⇒ 造一个带 eid 的词元素（eid 形如 w0）。"
+                           "命中不了（没跑/没中/退化/口径不可靠/画面不稳）⇒ **一个都不造**。"),
+                },
         "omitted": {
-            "total": total_cands,                          # 真实候选总数（含屏外；视口过滤/top-N 之前）
+            # ★ M15 C 批：`total` 把**词元素**算进来（它们也出现在 `objects[]` 里）
+            #   ⇒ `total ≥ returned` 这条不变式仍然成立（否则就是数字自相矛盾）。
+            "total": total_cands + len(ocr_word_objs or []),
             "returned": len(objects),
             "reason": ("attention_topn" if n_topn_dropped
                        else ("viewport_filter" if n_view_dropped else "none")),
@@ -6204,6 +6541,7 @@ def _screen_build(hwnd: int, args: dict) -> dict:
                 "viewport_filter": n_view_dropped,
                 "扫描预算丢弃（下界：树里还剩多少没人知道）": int(stats.get("因上限丢弃") or 0),
                 "扫过节点": int(stats.get("扫过节点") or 0),
+                "ocr词元素": len(ocr_word_objs or []),
             },
             "说明": "total 是本口径下的候选对象数；「扫描预算丢弃」>0 时，"
                     "真实对象数**只可能更多**，这个数是下界。",

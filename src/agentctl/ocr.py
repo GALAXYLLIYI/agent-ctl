@@ -253,30 +253,42 @@ def merge_word_boxes(words):
       · 按 x 排序**贪心**；**标点并入左词**；空格（gap > 0.5×h）断词
     输出：词框 = 成员框**并集**；`conf` = min(成员 conf)；`t` = 成员文本依次拼接。
 
-    ★ **纯几何，零依赖**（不引 numpy）。
+    ★★ **A 批实测修正（2026-10-22）**：ZCode 的伪代码是「按 x 排序 + **一个**开放组」
+      （新词只跟**最后一个**输出比）。本机真机实测发现这在**多行**画面上会漏合：
+      记事本状态栏有个「行」字 x=34，恰好**夹在**「文」(x=21) 与「件」(x=42) 中间
+      ⇒ 按 x 排序后「件」跟「行」比（不同行）⇒ **「文」「件」合不成「文件」**。
+      ⇒ 改成**多个开放组**（每组一行里的一个词）：新词跟**所有**组比，
+      命中**同同行 + 紧邻 + 同号**的那个（取 gap 最小的），合不上就**另起一组**。
+      ★ 三条判据**一条没改**（同行/紧邻/同号），只改了「跟谁比」。
     """
-    out = []
-    for b in sorted([dict(x) for x in (words or [])], key=lambda k: k.get("x", 0)):
-        p = out[-1] if out else None
-        if p is not None:
+    groups = []
+    for b in sorted([dict(x) for x in (words or [])], key=lambda k: (k.get("x", 0), k.get("y", 0))):
+        p, best_gap = None, None
+        for g in groups:
             try:
-                same_row = (abs((p["y"] + p["h"] / 2.0) - (b["y"] + b["h"] / 2.0))
-                            <= 0.5 * min(p["h"], b["h"]))
-                gap = b["x"] - (p["x"] + p["w"])
-                close = gap <= 0.5 * min(p["h"], b["h"])
-                same_size = abs(p["h"] - b["h"]) <= 0.25 * max(p["h"], b["h"])
+                same_row = (abs((g["y"] + g["h"] / 2.0) - (b["y"] + b["h"] / 2.0))
+                            <= 0.5 * min(g["h"], b["h"]))
+                gap = b["x"] - (g["x"] + g["w"])
+                close = gap <= 0.5 * min(g["h"], b["h"])
+                same_size = abs(g["h"] - b["h"]) <= 0.25 * max(g["h"], b["h"])
             except Exception:
                 same_row = close = same_size = False
             if same_row and close and same_size:
-                p["x"] = min(p["x"], b["x"])
-                p["y"] = min(p["y"], b["y"])
-                p["w"] = max(p["x"] + p["w"], b["x"] + b["w"]) - p["x"]
-                p["h"] = max(p["y"] + p["h"], b["y"] + b["h"]) - p["y"]
-                p["conf"] = min(p.get("conf", 1.0), b.get("conf", 1.0))
-                p["t"] = str(p.get("t") or "") + str(b.get("t") or "")
-                continue
-        out.append(dict(b))
-    return out
+                # 多个组都接得上时，取**水平最近**的那个（gap 最小）。
+                if best_gap is None or gap < best_gap:
+                    p, best_gap = g, gap
+        if p is not None:
+            p["x"] = min(p["x"], b["x"])
+            p["y"] = min(p["y"], b["y"])
+            p["w"] = max(p["x"] + p["w"], b["x"] + b["w"]) - p["x"]
+            p["h"] = max(p["y"] + p["h"], b["y"] + b["h"]) - p["y"]
+            p["conf"] = min(p.get("conf", 1.0), b.get("conf", 1.0))
+            p["t"] = str(p.get("t") or "") + str(b.get("t") or "")
+            continue
+        g = dict(b)
+        groups.append(g)
+    groups.sort(key=lambda g: (g.get("x", 0), g.get("y", 0)))
+    return groups
 
 
 def _encode_png(img) -> bytes:
