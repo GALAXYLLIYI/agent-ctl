@@ -27,6 +27,7 @@ A⑤  帧绑定原点：抓图期间窗口没动 ⇒ `画面稳定=True`（B 批
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import subprocess
 import sys
@@ -35,6 +36,39 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, os.path.join(ROOT, "src"))
+
+
+def _any_key_down() -> int:
+    """当前有没有键**正按着**。有就不许抢前台（会把用户的按键吞进我的记事本）。"""
+    import ctypes
+    for vk in range(1, 256):
+        try:
+            if ctypes.windll.user32.GetAsyncKeyState(vk) & 0x8000:
+                return vk
+        except Exception:
+            continue
+    return 0
+
+
+def _force_foreground(hwnd: int) -> bool:
+    """抢前台（Windows 前台锁下 `SetForegroundWindow` 会直接失败 ⇒ 用 AttachThreadInput）。"""
+    import ctypes
+    user32 = ctypes.windll.user32
+    fg = int(user32.GetForegroundWindow() or 0)
+    if not fg:
+        return False
+    cur_tid = int(ctypes.windll.kernel32.GetCurrentThreadId())
+    fg_tid = int(user32.GetWindowThreadProcessId(ctypes.c_void_p(fg), None) or 0)
+    if not fg_tid:
+        return False
+    user32.AttachThreadInput(cur_tid, fg_tid, True)
+    try:
+        user32.BringWindowToTop(ctypes.c_void_p(hwnd))
+        user32.SetForegroundWindow(ctypes.c_void_p(hwnd))
+    finally:
+        user32.AttachThreadInput(cur_tid, fg_tid, False)
+    return int(user32.GetForegroundWindow() or 0) == int(hwnd)
+
 
 GREEN, RED, SKIP = [], [], []
 INJECT = False
@@ -355,7 +389,7 @@ def main() -> int:
 
         # ── B④-a 合成一例：阈值**对错各一例**（确定性，不依赖 GUI/OCR）──
         try:
-            # ★ 注入：把对齐阈值改成 0.0 ⇒ 「错的一例」也会被判命中 ⇒ B④/B④b 必须红
+            # ★ 注入：把对齐阈值改成 0.0 ⇒ 「错的一例」也会被判命中 ⇒ B④ 必须红
             #   （证明这两条**不是恒真**）。
             iou_min = 0.0 if INJECT else core_mod.SCREEN_OCR_IOU_MIN
             objs = [{"uid": "u1", "eid": "e1", "role": "TextControl",
@@ -371,12 +405,49 @@ def main() -> int:
             i_miss = float((r_miss[0] or {}).get("IoU") or 0.0)
             ok_hit = bool((r_hit[0] or {}).get("命中UIA")) and i_hit >= 0.6
             ok_miss = (not (r_miss[0] or {}).get("命中UIA")) and i_miss < 0.6
+            # ★★ **同一帧 origin** 的行为级对照：UIA 物体的屏幕位置是按**那一帧**的
+            #   origin 推出来的；若换成「现取的、更晚的」origin（窗口挪了 40 px）
+            #   ⇒ IoU 掉到 ~0.22 ⇒ **判不命中** ⇒ 证明「origin 选错就根本对不上」。
+            _O = (9, 0)
+            _O2 = (49, 0)
+            _objs2 = [{"uid": "u1", "eid": "e1", "role": "TextControl",
+                       "rect": [_O[0] + 100, _O[1] + 200, _O[0] + 200, _O[1] + 260]}]
+            _w2 = [{"t": "文件", "x": 100, "y": 200, "w": 100, "h": 60}]
+            _rf = core_mod._ocr_align_words(_w2, _O, _objs2, iou_min=iou_min)
+            _rl = core_mod._ocr_align_words(_w2, _O2, _objs2, iou_min=iou_min)
+            i_f = float((_rf[0] or {}).get("IoU") or 0.0)
+            i_l = float((_rl[0] or {}).get("IoU") or 0.0)
+            ok_scope = (bool((_rf[0] or {}).get("命中UIA")) and i_f >= 0.6
+                        and not (_rl[0] or {}).get("命中UIA") and i_l < 0.6)
             rec("B④ 对齐：命中对的 IoU ≥ 0.6、错的 < 0.6", ok_hit and ok_miss,
                 "对的一例 IoU=%.3f 判命中=%s ｜ 错的一例 IoU=%.3f 判命中=%s（阈值 %.2f）"
                 % (i_hit, (r_hit[0] or {}).get("命中UIA"), i_miss,
                    (r_miss[0] or {}).get("命中UIA"), iou_min))
+            rec("B④b 同一帧的 origin：帧绑定 origin 命中、错位（现取）origin 不命中",
+                ok_scope,
+                "用**那一帧**的 origin%s ⇒ IoU=%.3f 判命中=%s ｜ 用错位 40px 的 origin%s ⇒ "
+                "IoU=%.3f 判命中=%s ⇒ origin 必须是**那一帧**的（不许现取）"
+                % (str(_O), i_f, (_rf[0] or {}).get("命中UIA"),
+                   str(_O2), i_l, (_rl[0] or {}).get("命中UIA")))
         except Exception as e:
             rec("B④ 对齐：命中对的 IoU ≥ 0.6、错的 < 0.6", False,
+                "★ 跑不起来：%s: %s" % (type(e).__name__, e), skip=True)
+            rec("B④b 同一帧的 origin：帧绑定 origin 命中、错位（现取）origin 不命中", False,
+                "★ 跑不起来：%s: %s" % (type(e).__name__, e), skip=True)
+
+        # ── B④-c 代码级：origin 确实**不现取**（而是随帧绑定）──
+        try:
+            import inspect
+            _so = inspect.getsource(core_mod._screen_ocr)
+            _oc = open(os.path.join(ROOT, "src", "agentctl", "ocr.py"), encoding="utf-8").read()
+            _no_live = ("client_origin(" not in _so)          # ★ 不许现取 origin
+            _n_call = _oc.count("client_rect_screen(hwnd)")
+            rec("B④c 代码级：origin 不现取（随那一帧绑定）", _no_live and _n_call >= 2,
+                "core._screen_ocr 里**没有** client_origin( 现取调用？%s（True=没有现取）｜ "
+                "ocr.py 里 client_rect_screen(hwnd) 出现 %d 次（抓图前后各一次 ⇒ 帧绑定）"
+                % (_no_live, _n_call))
+        except Exception as e:
+            rec("B④c 代码级：origin 不现取（随那一帧绑定）", False,
                 "★ 跑不起来：%s: %s" % (type(e).__name__, e), skip=True)
 
         # ── B④-b 真机：OCR 词框 + 帧绑定 origin ⇒ 与 UIA 物体求 IoU ──
@@ -409,61 +480,113 @@ def main() -> int:
             rec("B④b 真机：词框→屏幕物理→与 UIA 物体对齐", False,
                 "★ 跑不起来：%s: %s" % (type(e).__name__, e), skip=True)
 
-        # ── C⑤ R3 命中 ⇒ objects[] 出现带 eid 的词元素 ⇒ 能定位到点击点 ──
+        # ── C⑤ ★★ **走生产真链**：ctl_screen → objects[] → ctl_click --eid --from_capture
+        #   ⇒ **真点一次**，并验「点完画面确实变了」。
+        #   ★ 主控立的教训（M12 判据 ⑧ 的教训）：**不许只在函数层打桩** ——
+        #   这一条必须真的走「ctl_screen → objects[] → ctl_click --eid → 画面变了」。
         try:
             import tempfile
+            from agentctl import framecache as _fcmod
             _sess = os.path.join(tempfile.gettempdir(), "agentctl_m15_eid_%d.json" % os.getpid())
             os.environ["AGENTCTL_EID_SESSIONS"] = _sess
-            scr = core_mod._screen_build(int(hwnd), {"query": "文件", "ocr": True,
-                                                     "include_offscreen": False})
-            ocr_seg = scr.get("ocr") or {}
-            objs_out = scr.get("objects") or []
-            words_out = ocr_seg.get("词元素") or []
-            al = ocr_seg.get("对齐") or []
-            # 找「带 eid 的词元素」：要么是新造的词元素（role=OcrWordControl），
-            # 要么是对上了 UIA 且挂了 ocr 标注的 UIA 物体。
-            cand = [o for o in objs_out
-                    if (o.get("role") == core_mod.SCREEN_OCR_WORD_ROLE and o.get("eid"))
-                    or (o.get("ocr") and o.get("eid"))]
+            _actor = "M15视觉接地判据"
+            # ① 置前（act.py 的坐标点击要求目标窗在前台）；**有键按着就不抢**
+            _vk = _any_key_down()
+            _fg = False
+            if not _vk:
+                _fg = _force_foreground(int(hwnd))
+                time.sleep(0.6)
+            # ② 生产入口：ctl_screen（带 query + ocr）
+            # ★ 注入：把**对齐**打坏（`_ocr_align_words` 返回空）⇒ 词元素**出不来**
+            #   ⇒ C⑤ 必须红（这才是「产品坏了」的正确红法；顺带证明这条不是恒真）。
+            _orig_align = core_mod._ocr_align_words
+            if INJECT:
+                core_mod._ocr_align_words = lambda *a, **k: []
+            try:
+                scr = core_mod.dispatch("ctl_screen", {"hwnd": int(hwnd), "query": "文件",
+                                                       "ocr": True}, actor=_actor)
+            finally:
+                core_mod._ocr_align_words = _orig_align
+            _sd = (scr or {}).get("data") or {}
+            _res = _sd.get("结果") or _sd
+            objs_out = _res.get("objects") or []
+            cap = _res.get("capture_id")
+            ocr_seg = _res.get("ocr") or {}
             note = ocr_seg.get("词元素说明") or {}
-            cap = scr.get("capture_id")
+            # 找「带 eid 的该词元素」：新造的词元素（role=OcrWordControl）
+            # 或对上了 UIA 且挂了 ocr 标注的 UIA 物体。
+            cand = [o for o in objs_out
+                    if o.get("eid") and (o.get("role") == core_mod.SCREEN_OCR_WORD_ROLE
+                                         or o.get("ocr"))]
             if not cand:
-                rec("C⑤ R3 命中 ⇒ objects[] 出现带 eid 的词元素", False,
-                    "★ objects[] 里没有带 eid 的词元素（命中=%s 命中词=%s 对上UIA=%s 新造=%s 原因=%s）"
+                rec("C⑤ R3 命中 ⇒ objects[] 出现带 eid 的词元素 ⇒ **真能点中**", False,
+                    "★ objects[] 里没有带 eid 的词元素（ocr 命中=%s 命中词=%s 对上UIA=%s 新造=%s 原因=%s）"
                     % (ocr_seg.get("hit"), note.get("命中词"), note.get("对上UIA"),
                        note.get("新造词元素"), note.get("原因")))
+            elif _vk:
+                rec("C⑤ R3 命中 ⇒ objects[] 出现带 eid 的词元素 ⇒ **真能点中**", False,
+                    "★ **环境受阻**：检测到有键正按着（VK=%d）⇒ 不抢前台 ⇒ 这次不点"
+                    "（不冒险吞掉用户的按键）" % _vk, skip=True)
+            elif not _fg:
+                rec("C⑤ R3 命中 ⇒ objects[] 出现带 eid 的词元素 ⇒ **真能点中**", False,
+                    "★ **环境受阻**：抢不到前台（Windows 前台锁）⇒ act 的前台闸会拒 ⇒ 本条验不了",
+                    skip=True)
             else:
-                # 旁表里取回来 + 复核 ⇒ 必须能算出**点击点**
-                eid = cand[0].get("eid")
-                feat, entry, how = core_mod._eid_lookup(cap, eid)
-                if feat is None:
-                    rec("C⑤ R3 命中 ⇒ objects[] 出现带 eid 的词元素", False,
-                        "★ 旁表里取不回 eid=%s（how=%s）⇒ 点不了" % (eid, how))
+                # ③ 取写租约（点完立刻放）
+                lr = core_mod.dispatch("ctl_lease", {"action": "acquire", "actor": _actor,
+                                                     "scopes": "B", "ttl_sec": 60},
+                                       actor=_actor)
+                _lease_id = (lr.get("data") or {}).get("lease_id") or ""
+                if not lr.get("ok"):
+                    rec("C⑤ R3 命中 ⇒ objects[] 出现带 eid 的词元素 ⇒ **真能点中**", False,
+                        "★ **环境受阻**：取不到写租约（code=%s）⇒ 验不了（不是产品红）" % lr.get("code"),
+                        skip=True)
                 else:
-                    if feat.get("ocr"):
-                        cur, why, rctx = core_mod._ocr_word_recheck(int(hwnd), feat)
+                    try:
+                        _eid = cand[0].get("eid")
+                        # ★ 验「画面确实变了」必须看**全屏**：记事本的弹出菜单是
+                        #   **独立窗口**（不在客户区里）⇒ 客户区帧看不见它。
+                        #   （客户区 diff 只看得见菜单栏那点高亮 ⇒ 会误判「没变」。）
+                        from PIL import ImageGrab
+                        _pre = ImageGrab.grab(all_screens=True)
+                        _r = core_mod.dispatch("ctl_click", {"hwnd": int(hwnd), "eid": _eid,
+                                                             "from_capture": cap},
+                                               actor=_actor)
+                        time.sleep(0.8)
+                        _post = ImageGrab.grab(all_screens=True)
+                    finally:
+                        try:
+                            core_mod.dispatch("ctl_lease", {"action": "release",
+                                                             "lease_id": _lease_id},
+                                               actor=_actor)
+                        except Exception:
+                            pass
+                    _d = None
+                    if _pre is not None and _post is not None:
+                        _d = _fcmod.diff_images(_pre, _post,
+                                                caret_px=_fcmod.DIFF_CARET_PX,
+                                                min_area_px=_fcmod.DIFF_MIN_AREA)
+                    _changed = (_d or {}).get("changed")
+                    _code = _r.get("code")
+                    if _code == 10:
+                        rec("C⑤ R3 命中 ⇒ objects[] 出现带 eid 的词元素 ⇒ **真能点中**", False,
+                            "★ **环境受阻**：租约被占（code=10）⇒ 验不了（不是产品红）", skip=True)
                     else:
-                        cur, why, rctx = core_mod._eid_recheck(int(hwnd), feat,
-                                                               (entry or {}).get("walk"))
-                    if cur is None:
-                        rec("C⑤ R3 命中 ⇒ objects[] 出现带 eid 的词元素", False,
-                            "★ 复核失败（%s）⇒ 点不了" % why)
-                    else:
-                        cx, cy = cur.get("center") or (0, 0)
-                        rct = cand[0].get("rect") or []
-                        inside = (len(rct) == 4
-                                  and rct[0] <= cx <= rct[2] and rct[1] <= cy <= rct[3])
-                        rec("C⑤ R3 命中 ⇒ objects[] 出现带 eid 的词元素且能定位",
-                            bool(inside),
-                            "词元素 label=%r eid=%s uid=%s rect=%s ⇒ 复核后点击点=(%s,%s)%s"
-                            % (cand[0].get("label"), eid, cand[0].get("uid"), rct,
-                               cx, cy, "（落在框内）" if inside else "★不在框内"))
+                        rec("C⑤ R3 命中 ⇒ objects[] 出现带 eid 的词元素 ⇒ **真能点中**",
+                            bool(_r.get("ok")) and _changed is True,
+                            "词元素 label=%r eid=%s uid=%s rect=%s ｜ ctl_click --eid --from_capture ⇒ "
+                            "code=%r ｜ **点完画面确实变了？%s**（diff=%s）"
+                            % (cand[0].get("label"), _eid, cand[0].get("uid"),
+                               cand[0].get("rect"), _code, _changed,
+                               json.dumps({k: v for k, v in (_d or {}).items()
+                                           if k in ("changed", "ratio", "bbox")},
+                                          ensure_ascii=False)[:120]))
             try:
                 os.remove(_sess)
             except Exception:
                 pass
         except Exception as e:
-            rec("C⑤ R3 命中 ⇒ objects[] 出现带 eid 的词元素", False,
+            rec("C⑤ R3 命中 ⇒ objects[] 出现带 eid 的词元素 ⇒ **真能点中**", False,
                 "★ 跑不起来：%s: %s" % (type(e).__name__, e), skip=True)
 
         # ── C⑤b「UIA 瞎了」那条路：真词 + 空 UIA ⇒ 必须造出带 eid 的词元素 ──
