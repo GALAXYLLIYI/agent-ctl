@@ -1326,31 +1326,59 @@ def _wait_ready(hwnd, base_img, budget_ms=POLL_BUDGET_MS, need=POLL_HYSTERESIS,
         _t.sleep(POLL_INTERVAL_MS / 1000.0)
 
 
-def _budget_verdict(base_img, last):
+def _budget_verdict(last_d):
     """★ M19'（2026-10-23）等生效**预算耗尽**时的三态判据 —— 两个出口**共用**这一份口径。
 
     ★ 要修的语义缺陷（改前两个出口都硬写 `"生效": False`）：
       core 侧把 False 判成 **code=8「确认没变」**、只有 None 才走 **code=5「没测出来」**
       ⇒ 「我没机会看到」被当成「我看到了、确实没变」⇒ **agent 不重试** ⇒ 流程静默停住。
 
-    ★ 改后口径（**两个预算耗尽出口完全一致** ⇒ 杜绝两处漂移）：
-      · last is None（从未采到帧）          ⇒ False（保持改前行为，不让退化路径漂移）
-      · 最后一帧(last) 与基线(base_img) **不同** ⇒ None（没测出来）⇒ core 判 code=5 ⇒ agent 会重试
-      · 最后一帧(last) 与基线(base_img) **相同** ⇒ False（确认没变）⇒ core 判 code=8（语义不变）
+    ★ 入参是**已经算好**的判差 `last_d`（= `_img_diff(base_img, last)` 的结果）：
+      **绝不重算**。`_img_diff` 在 1632x1191 全尺寸帧上实测 **13.84ms/次**
+      （主控 2026-10-23 实测 20 次平均）⇒ 重算一次就是预算耗尽路径每次动作白加 ~13.8ms，
+      总耗时变成 450+13.8=**463.8ms**，破坏 act.py 自己写的
+      「总耗时 ≤ 预算（**永远不慢于改前的固定 sleep**）」不变式。
+      循环里每次采样后已经算过一次判差（`d = _img_diff(base_img, cur)`），
+      而此刻 `last is cur` ⇒ **直接复用那一份**，零额外开销。
+
+    ★ 口径（**两个预算耗尽出口完全一致** ⇒ 杜绝两处漂移）：
+      · last_d is None（从未采到帧）        ⇒ False（保持改前行为，不让退化路径漂移）
+      · last_d.get('changed') is True      ⇒ None（没测出来）⇒ core 判 code=5 ⇒ agent 会重试
+      · 其余（含 changed False / None）     ⇒ False（确认没变）⇒ core 判 code=8（语义不变）
 
     ★ 判 None 而不是判 True：闪烁（变一帧又变回）因此**永远不会被判成功**
       （None ⇒ code=5 ⇒ 重试，不是成功）。
-    ★ 判差口径**不新造**：`_img_diff`（转发 framecache，唯一真源）；拿不到图 ⇒ None ⇒ 回落 False。
     """
-    if last is None:
+    if not last_d:
         return False
-    try:
-        d = _img_diff(base_img, last)
-    except Exception:
-        return False
-    if d and d.get("changed") is True:
+    if last_d.get("changed") is True:
         return None
     return False
+
+
+def _rc_from_changed(changed, dry=False):
+    """★ M19P（2026-10-23）「变了没」⇒ **退出码三态映射**（三处漏网共用这一份口径）。
+
+    · changed is True  ⇒ rc=0（变了）
+    · changed is None  ⇒ rc=5（**没测出来**／判不了）—— 指纹取不到时**不许**说「确认没变」
+    · changed is False ⇒ rc=8（**确认没变**）
+    · dry=True         ⇒ rc=0（演练不算失败；**dry 分支不动**）
+
+    ★ 要修的缺陷（改前三处都是 `return 0 if changed is True else 8` 一类写法）：
+      `changed is None` 的含义是「**前后图指纹取不到**」＝**没测出来**，
+      却被当成「确认没变」报出去 ⇒ **违反 `core.py:2881` 自己写的铁律**
+      （「没测出来」与「没变」必须**分开**；unknown 永不当成功，也**不当「没变」**）。
+
+    ★ 口径（`core.py` 的 `_map_rc`）：act 的 rc=5 ⇒ 信封 code=5（CODE_UNSTABLE，重新观测）；
+      act 的 rc=8 ⇒ 信封 code=8（CODE_NO_CHANGE，确认没变）⇒ agent 侧**倾向重试**的是前者。
+    """
+    if dry:
+        return 0
+    if changed is True:
+        return 0
+    if changed is None:
+        return 5
+    return 8
 
 
 def _wait_effect(hwnd, base_img, budget_ms=POLL_BUDGET_MS, need=POLL_HYSTERESIS,
@@ -1360,7 +1388,8 @@ def _wait_effect(hwnd, base_img, budget_ms=POLL_BUDGET_MS, need=POLL_HYSTERESIS,
     ★ 这取代了原来的 `time.sleep(_settle(450))`（动作后等界面反应）。
     ★ 返回 {生效: True/False/None, 轮次, 耗时ms, 图}
       None = 没测出来；False = 预算内**没看到**变化（= 老的「页面无变化」口径）。
-    ★ M19'（2026-10-23）：**预算耗尽**的两个出口都走 `_budget_verdict`（共用一份口径）⇒
+    ★ M19'（2026-10-23）：**预算耗尽**的两个出口都走 `_budget_verdict`（共用一份口径，
+      **复用循环里已算好的判差 last_d，不重算**）⇒
       最后一帧与基线**不同** ⇒ None（没测出来 ⇒ core 判 code=5 ⇒ agent 会重试）；
       **相同** ⇒ False（确认没变 ⇒ code=8）；从未采到帧 ⇒ False（保持改前行为）。
     ★ **不落盘**：轮询期只在内存里采样；最后那张由调用方决定要不要落盘。
@@ -1375,13 +1404,14 @@ def _wait_effect(hwnd, base_img, budget_ms=POLL_BUDGET_MS, need=POLL_HYSTERESIS,
     streak = 0
     rounds = 0
     last = None
+    last_d = None          # ★ M19'：最后一帧**已经算好的**判差（预算耗尽时直接复用，不重算）
     first_img = None       # ★ M12：第一次「变化」那一帧（回传给 core 当证据）
     deadline = t0 + max(0.0, float(budget_ms) / 1000.0)
     while True:
         rounds += 1
         # ★ 同上：预算检查在采样之前 ⇒ 总耗时 ≤ 预算（**永远不慢于改前的固定 sleep**）
         if _t.perf_counter() >= deadline:
-            return {"生效": _budget_verdict(base_img, last), "轮次": rounds,
+            return {"生效": _budget_verdict(last_d), "轮次": rounds,
                     "耗时ms": (_t.perf_counter() - t0) * 1000.0, "图": last,
                     "退化": _is_degraded(last), "首变图": first_img,
                     "口径": _frame_scope(last or base_img)}
@@ -1393,6 +1423,7 @@ def _wait_effect(hwnd, base_img, budget_ms=POLL_BUDGET_MS, need=POLL_HYSTERESIS,
                     "口径": _frame_scope(last or base_img)}
         last = cur
         d = _img_diff(base_img, cur)
+        last_d = d           # ★ M19'：存下来给「预算耗尽」出口复用（**不重算判差**）
         if d.get("changed") is True:
             streak += 1
             if first_img is None:
@@ -1405,7 +1436,7 @@ def _wait_effect(hwnd, base_img, budget_ms=POLL_BUDGET_MS, need=POLL_HYSTERESIS,
                     "退化": _is_degraded(cur), "首变图": first_img,
                     "口径": _frame_scope(cur)}
         if _t.perf_counter() >= deadline:
-            return {"生效": _budget_verdict(base_img, last), "轮次": rounds,
+            return {"生效": _budget_verdict(last_d), "轮次": rounds,
                     "耗时ms": (_t.perf_counter() - t0) * 1000.0, "图": last,
                     "退化": _is_degraded(last), "首变图": first_img,
                     "口径": _frame_scope(last or base_img)}
@@ -2591,7 +2622,9 @@ def do_fill(hwnd, xy, text, dry=False, clear=True):
     log(f"⌨ 填字段 [{len(text)}字{'，含中文' if any(ord(c) > 127 for c in text) else ''}"
         f"{'，已先清空' if clear else ''}] 坐标({x},{y}) 窗口「{info['title']}」"
         f"　前图={b0.get('文件') or '无'} 后图={b1.get('文件') or '无'}" + ev)
-    return 0 if changed is True else 8
+    # ★ M19P（2026-10-23）：**三态映射**（W1）—— 指纹取不到（changed=None）＝**没测出来**，
+    #   不许再报 rc=8「确认没变」（core.py:2881 铁律）；rc=5 ⇒ agent 侧倾向重新观测/重试。
+    return _rc_from_changed(changed)
 
 
 # ─────────────────── 证据 ───────────────────
@@ -3350,7 +3383,9 @@ def do_type(hwnd, text, dry=False, allow_if_starts_with=None, force_send=False,
         # ★ 核验降级说明必须留痕：无元素直发**没有 UIA 回读**可比，
         #   「画面没变」判 8 而不是默默当成功。
         log("   核验：前后截图比对（无 UIA 回读可比）；判不了=unknown 不算失败")
-        return 0 if (changed is True) else 8
+        # ★ M19P（2026-10-23）：**三态映射**（W2）—— 指纹取不到（changed=None）＝**没测出来**，
+        #   不许再报 rc=8「确认没变」（core.py:2881 铁律）；rc=5 ⇒ agent 侧倾向重新观测/重试。
+        return _rc_from_changed(changed)
     c, before, how = read_doc(hwnd)
     if before is None and not force_send:
         return _tell_next(4, f"打不了字：{how}", hwnd,
@@ -3379,7 +3414,9 @@ def do_type(hwnd, text, dry=False, allow_if_starts_with=None, force_send=False,
         if scan_code:
             log(f"   扫描码注入：{n_scan}/{len(text)} 字符走了扫描码；"
                 f"回退 UNICODE 的字符：{''.join(fb_chars) or '无'}")
-        return 0 if (dry or changed is True) else 8
+        # ★ M19P（2026-10-23）：**三态映射**（W3）—— 指纹取不到（changed=None）＝**没测出来**，
+        #   不许再报 rc=8「确认没变」（core.py:2881 铁律）；**dry 分支不动**（演练恒 rc=0）。
+        return _rc_from_changed(changed, dry=dry)
     # ★ 最关键的一道保险：只往空文档（或带训练标记的靶文档）里打字，绝不可能污染用户的真实文件
     if before.strip() != "" and not (allow_if_starts_with and before.startswith(allow_if_starts_with)):
         # ① rc=7 必须**自带下一步**：报出当前字符数 + 清空命令原文。
