@@ -44,6 +44,25 @@ r"""发版验收器 —— **一条命令**跑完全部验收项，给**一张�
     1 = **有红项**
     2 = 无红项，但有【验不了 / 待通知】项 ⇒ **不是绿**
 
+★ ★ 2026-10-24（卡 N2-W6「验收器在负载下偶发红」· 窗口b）：本文件改了**四件纯属本层的事**，
+  **一处判据都没碰、一次红都没改绿**：
+  ① **表格渲染修 bug**（本文件自己的锅，害主控误判了 3 小时）：
+     原 `print_table` 的数据行写成 `"  ".join(<一个字符串>)` ⇒ Python 按**字符**迭代 ⇒
+     **每个字符之间被插两个空格** ⇒ 整行逐字拆散、列宽按原串算而实际宽度爆炸 ⇒
+     **列全部错位、关键档位被挤出视野**。
+     现场长这样：主控看到「实测列 0/1/0/0 却判红」—— 那 0/1/0/0 是**期望列**的数字，
+     真正红掉的那一档（实测=1）被拆散+截断藏起来了，**现场无从知道哪一档红**。
+     ⇒ 现在数据行按列拼接（不拆散），并对**非绿项逐档点名**（不受列宽截断）。
+  ② **超时与判红分开记**：「超时」是**验不了**（不是红、也不是绿），且**单独一档**可查：
+     `run_one` 现在分「跑完 / 超时 / 崩」三种状态（以前超时与起不来都只写 `崩=True`，
+     实测列一律显示「崩」，现场分不清「跑太慢」和「脚本坏了」）。
+  ③ **每项可单独配超时**：ITEMS 里可写 `"超时": 秒数`（覆盖 `--timeout`）。
+  ④ **每项跑在独立临时目录**：把 `TMPDIR/TEMP/TMP` 指向该项私有目录 ⇒
+     `%TEMP%` 噪声与**并发的另一批跑批**互不干扰（跑完即删，不留残渣）。
+  ⑤ **红压过验不了**（W2 已定位、本轮补上）：原聚合逻辑
+     `if verdict == RED and res["判定"] != UNKNOWN` ⇒ **先「验不了」后「红」时，红被掩盖成验不了**。
+     ⇒ 现在**红优先**（红显性化，不是把红改绿）。
+
 ★ ★ 2026-10-23：**打包项的锁死期已结束**（本项现为**默认真跑**）
   为什么当初锁死：打包会**现场重新生成 legacy 源**（pack_dist → gen_legacy.main_for_pack）⇒
   在窗口 c 的 act.py 在途改动落地前打包 = 把半成品写进产物 ⇒ 那段时间本项锁死、标【待主控通知】。
@@ -57,8 +76,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import unicodedata
 
@@ -93,6 +114,8 @@ ITEMS = [
             ("未知参数（不许假绿）", "tests/_P3_M19_语义修复_判据.py", ["--no-such-flag"], {}, 0,
              "判据 §10.6 台账更正：判据不解析参数，未知参数退出码必须跟正跑一致"),
         ],
+        # ★ 每项可配超时（卡 N2-W6）：本项有 4 档、且含真钟档 ⇒ 单独放宽
+        "超时": 1800,
     },
     {
         "id": "m19p2",
@@ -166,6 +189,8 @@ ITEMS = [
             ("复核八组", "work/_M19_语义修复_20221023/主控复核/复核_M19_20221023.py", [], {}, 0,
              "脚本 docstring：用法 python -X utf8 <本文件>，期望 exit=0 八组全绿"),
         ],
+        # ★ 每项可配超时（卡 N2-W6）：八组复核最重 ⇒ 单独放宽
+        "超时": 3600,
     },
     {
         "id": "lint",
@@ -249,11 +274,18 @@ def _fit(s, width):
 
 # ── 跑一条 ─────────────────────────────────────────────────────────────
 def run_one(script, argv, extra_env, timeout):
-    """跑一条判定。返回 dict：实测退出码/输出/用时/是否崩。
+    """跑一条判定。返回 dict：实测退出码/输出/用时/状态（跑完|超时|崩）。
 
     ★ env 只在**这一次子进程**里给（`env=` 传副本）——
       绝不改 os.environ：改了就泄漏到后面的跑法
       （M19_USE_PRODUCT=1 漏给下一条 ⇒ 参考实现模式被悄悄换成产品模式）。
+
+    ★ 2026-10-24（卡 N2-W6）：**状态分三档**——
+      「跑完」= 拿到了退出码（绿或红，按退出码判）；
+      「超时」= **验不了**（跑太慢，没拿到结论 ⇒ 不许当红、也不许当绿）；
+      「崩」   = 压根起不来（路径/环境问题 ⇒ 验不了）。
+      以前超时与「起不来」都只写 `崩=True` ⇒ 实测列一律显示「崩」⇒ 现场分不清
+      「这台机器太慢」和「脚本坏了」⇒ 现在分开记。
     """
     env = os.environ.copy()
     env.update({k: str(v) for k, v in (extra_env or {}).items()})
@@ -265,25 +297,33 @@ def run_one(script, argv, extra_env, timeout):
         out = (p.stdout or b"").decode("utf-8", "replace")
         err = (p.stderr or b"").decode("utf-8", "replace")
         return {"实测": p.returncode, "输出": out + err, "用时": round(time.time() - t0, 1),
-                "崩": False, "命令": " ".join(cmd)}
+                "崩": False, "状态": "跑完", "命令": " ".join(cmd)}
     except subprocess.TimeoutExpired as e:
         def _d(x):
             if isinstance(x, bytes):
                 return x.decode("utf-8", "replace")
             return x or ""
         return {"实测": None, "输出": _d(e.stdout) + _d(e.stderr),
-                "用时": round(time.time() - t0, 1), "崩": True,
+                "用时": round(time.time() - t0, 1), "崩": True, "状态": "超时",
                 "命令": " ".join(cmd), "原因": "超时（%ds）" % timeout}
     except Exception as e:                                   # pragma: no cover
         return {"实测": None, "输出": "%s: %s" % (type(e).__name__, e),
-                "用时": round(time.time() - t0, 1), "崩": True,
-                "命令": " ".join(cmd), "原因": "起不来"}
+                "用时": round(time.time() - t0, 1), "崩": True, "状态": "崩",
+                "命令": " ".join(cmd), "原因": "起不来：%s: %s" % (type(e).__name__, e)}
 
 
 def run_item(item, timeout, verbose, enable_pack):
-    """跑一个验收项。返回 (item结果, [每条跑动的明细])。"""
+    """跑一个验收项。返回 (item结果, [每条跑动的明细])。
+
+    ★ 2026-10-24（卡 N2-W6）本层三件事：
+      ① **每项独立临时目录**：把 `TMPDIR/TEMP/TMP` 指向该项私有目录 ⇒ %TEMP% 噪声与
+         并发的另一批跑批互不干扰（跑完即删，不留残渣）。
+      ② **每项可配超时**：ITEMS 里写 `"超时": 秒数` 覆盖全局 `--timeout`。
+      ③ **红压过验不了** + **红在哪档当场点名**（红显性化，不改任何判据）。
+    """
     res = {"id": item["id"], "名称": item["名称"], "验什么": item["验什么"],
-           "判定": GREEN, "期望": [], "实测": [], "说明": "", "跑动": []}
+           "判定": GREEN, "期望": [], "实测": [], "说明": "", "跑动": [],
+           "红档": [], "验不了档": []}
 
     # ① 默认不跑项（打包：等主控通知）
     if "默认" in item and not (item["id"] == "packdist" and enable_pack):
@@ -299,45 +339,77 @@ def run_item(item, timeout, verbose, enable_pack):
             res["说明"] = "验不了 —— %s" % item["前置"]
             return res, []
 
-    for label, script, argv, extra_env, expect, why in item["跑法"]:
-        # 闸 A：脚本必须存在（配置写错 ⇒ 验不了，不许跑出一个"像绿"的结果）
-        spath = os.path.join(ROOT, script.replace("/", os.sep))
-        if not os.path.isfile(spath):
-            res["跑动"].append({"标签": label, "期望": expect, "实测": None, "判定": UNKNOWN,
-                                "输出": "", "用时": 0, "崩": True, "命令": script,
-                                "出处": why, "环境": extra_env or {},
-                                "原因": "配置错误：脚本不存在（%s）" % script})
-            res["期望"].append("%s=%s" % (label, expect))
-            res["实测"].append("%s=验不了" % label)
-            res["判定"] = UNKNOWN
-            res["说明"] = "配置错误：%s 不存在" % script
-            continue
+    # ③ 每项独立临时目录（隔离 %TEMP% 噪声与并发跑批）
+    tmpdir = None
+    try:
+        tmpdir = tempfile.mkdtemp(prefix="验收_%s_" % item["id"])
+    except Exception:
+        tmpdir = None
 
-        r = run_one(script, argv, extra_env, timeout)
-        r["标签"] = label
-        r["期望"] = expect
-        r["出处"] = why
-        r["环境"] = extra_env or {}
-        if r["崩"]:
-            verdict = UNKNOWN
-            r["原因"] = r.get("原因", "崩")
-        elif not (r.get("输出") or "").strip():
-            # 闸 B：跑完但没输出 ⇒ 没结论，不许判绿
-            verdict = UNKNOWN
-            r["原因"] = "没拿到输出（脚本可能没真正执行）"
-        elif r["实测"] == expect:
-            verdict = GREEN
-        else:
-            verdict = RED
-        r["判定"] = verdict
-        res["跑动"].append(r)
-        res["期望"].append("%s=%s" % (label, expect))
-        res["实测"].append("%s=%s" % (label, r["实测"] if not r["崩"] else "崩"))
-        if verdict == RED and res["判定"] != UNKNOWN:
-            res["判定"] = RED
-        elif verdict == UNKNOWN and res["判定"] == GREEN:
-            res["判定"] = UNKNOWN
-            res["说明"] = "验不了 —— %s" % r.get("原因", "该跑动没拿到结论")
+    # ④ 每项可配超时（没配就用全局 --timeout）
+    try:
+        item_timeout = int(item.get("超时") or timeout)
+    except (TypeError, ValueError):
+        item_timeout = timeout
+
+    try:
+        for label, script, argv, extra_env, expect, why in item["跑法"]:
+            # 闸 A：脚本必须存在（配置写错 ⇒ 验不了，不许跑出一个"像绿"的结果）
+            spath = os.path.join(ROOT, script.replace("/", os.sep))
+            if not os.path.isfile(spath):
+                res["跑动"].append({"标签": label, "期望": expect, "实测": None, "判定": UNKNOWN,
+                                    "输出": "", "用时": 0, "崩": True, "状态": "配置错误",
+                                    "命令": script,
+                                    "出处": why, "环境": extra_env or {},
+                                    "原因": "配置错误：脚本不存在（%s）" % script})
+                res["期望"].append("%s=%s" % (label, expect))
+                res["实测"].append("%s=验不了" % label)
+                res["验不了档"].append(label)
+                res["判定"] = UNKNOWN
+                res["说明"] = "配置错误：%s 不存在" % script
+                continue
+
+            # 本次跑动的 env = 判据约定的 env + 该项私有临时目录
+            run_env = dict(extra_env or {})
+            if tmpdir:
+                run_env.update({"TMPDIR": tmpdir, "TEMP": tmpdir, "TMP": tmpdir})
+
+            r = run_one(script, argv, run_env, item_timeout)
+            r["标签"] = label
+            r["期望"] = expect
+            r["出处"] = why
+            r["环境"] = extra_env or {}          # 判据约定的 env（可回指）
+            r["临时目录"] = tmpdir or ""          # 本项私有临时目录（隔离用）
+            if r["崩"]:
+                verdict = UNKNOWN
+                r["原因"] = r.get("原因", "崩")
+            elif not (r.get("输出") or "").strip():
+                # 闸 B：跑完但没输出 ⇒ 没结论，不许判绿
+                verdict = UNKNOWN
+                r["原因"] = "没拿到输出（脚本可能没真正执行）"
+            elif r["实测"] == expect:
+                verdict = GREEN
+            else:
+                verdict = RED
+            r["判定"] = verdict
+            r["不符"] = (verdict == RED)
+            res["跑动"].append(r)
+            res["期望"].append("%s=%s" % (label, expect))
+            # 实测列：超时写「超时」、崩写「崩」——**不许把超时混成红**
+            res["实测"].append("%s=%s" % (label, r["实测"] if not r["崩"]
+                                          else (r.get("状态") or "崩")))
+            if verdict == RED:
+                res["红档"].append(label)
+                # ★ 红优先（红显性化）：红**压过**验不了，绝不被「验不了」掩盖
+                res["判定"] = RED
+            elif verdict == UNKNOWN:
+                res["验不了档"].append(label)
+                if res["判定"] == GREEN:
+                    res["判定"] = UNKNOWN
+                    res["说明"] = "验不了 —— %s" % r.get("原因", "该跑动没拿到结论")
+    finally:
+        if tmpdir:
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
     # ③ 「空洞即验不了」：扫了 0 个文件 ⇒ 结论不成立（铁律②）
     hole = item.get("空洞即验不了")
@@ -346,10 +418,18 @@ def run_item(item, timeout, verbose, enable_pack):
         for r in res["跑动"]:
             if marker in (r.get("输出") or ""):
                 res["判定"] = UNKNOWN
+                res["验不了档"].append(r.get("标签") or "")
                 res["说明"] = "验不了 —— %s" % why
                 break
 
-    if res["判定"] == GREEN and not res["说明"]:
+    # ★ 说明：红项必须写清**哪一档**不符（现场一眼可定位，不再靠猜）
+    if res["判定"] == RED:
+        res["说明"] = "红 —— %s" % ("；".join(
+            "第%d档「%s」期望 %s 实测 %s" % (
+                i + 1, d.get("标签"), d.get("期望"),
+                d.get("实测") if d.get("实测") is not None else d.get("状态", "—"))
+            for i, d in enumerate(res["跑动"]) if d.get("判定") == RED))
+    elif res["判定"] == GREEN and not res["说明"]:
         res["说明"] = "全绿"
     return res, res["跑动"]
 
@@ -365,18 +445,28 @@ def print_table(results, show_detail):
     print("  " + "  ".join(_pad(c, w[i]) for i, c in enumerate(cols)))
     print("  " + "  ".join("-" * w[i] for i in range(len(cols))))
     for r in results:
-        print("  " + "  ".join(
-            _pad(_fit(r["项"], w[0]), w[0]) + "  " +
-            _pad(_fit("; ".join(r["期望"]) or "—", w[1]), w[1]) + "  " +
-            _pad(_fit("; ".join(r["实测"]) or "—", w[2]), w[2]) + "  " +
-            _pad(r["判定"], w[3])))
+        # ★ 2026-10-24（卡 N2-W6）**修 bug**：原来这里写的是
+        #   "  ".join(<一个拼好的字符串>) ⇒ Python 按**字符**迭代 ⇒ 每个字符间插两个空格
+        #   ⇒ 整行逐字拆散、列宽按原串算而实际宽度爆炸 ⇒ 列错位、关键档位被挤出视野
+        #   （主控据此误判成「实测列 0/1/0/0 却判红」——那 0/1/0/0 是**期望列**）。
+        # ⇒ 现在按列拼接（每个元素一个参数），列宽才真正生效。
+        print("  " + "  ".join((
+            _pad(_fit(r["项"], w[0]), w[0]),
+            _pad(_fit("; ".join(r["期望"]) or "—", w[1]), w[1]),
+            _pad(_fit("; ".join(r["实测"]) or "—", w[2]), w[2]),
+            _pad(r["判定"], w[3]),
+        )))
         if r.get("说明"):
             print("      └─ %s" % r["说明"])
-        if show_detail:
-            for d in r.get("跑动", []):
-                print("      · %s（期望 %s / 实测 %s / %ss / %s）"
-                      % (d["标签"], d["期望"], d["实测"], d["用时"],
-                         d.get("原因", "正常")))
+        # ★ 非绿项**逐档点名**（不受列宽截断 ⇒ 现场一眼看出「哪一档不符」）
+        if r["判定"] == GREEN and not show_detail:
+            continue
+        for i, d in enumerate(r.get("跑动", [])):
+            mark = {"绿": "✓", "红": "✗ 不符", "验不了": "? 验不了"}.get(d.get("判定"), "")
+            got = d.get("实测") if d.get("实测") is not None else (d.get("状态") or "—")
+            extra = ("（%s）" % d["原因"]) if d.get("原因") else ""
+            print("      · 第%d档 %s：期望 %s / 实测 %s  %s%s"
+                  % (i + 1, d.get("标签"), d.get("期望"), got, mark, extra))
     print("=" * 132)
 
 
@@ -453,7 +543,10 @@ def main():
     else:
         concl = "**全绿**"
 
-    payload = {"结论": concl, "绿": n_ok, "红": n_red, "验不了": n_unk, "items": results}
+    payload = {"结论": concl, "绿": n_ok, "红": n_red, "验不了": n_unk, "items": results,
+               "退出码": (1 if n_red else (2 if n_unk else 0)),
+               "时间": time.strftime("%Y-%m-%d %H:%M:%S"),
+               "全局超时秒": a.timeout}
     if a.json:
         print(json.dumps(payload, ensure_ascii=False, indent=1))
     else:
