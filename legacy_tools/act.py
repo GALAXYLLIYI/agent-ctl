@@ -182,7 +182,11 @@ import ctypes.wintypes as wt
 import datetime
 import json
 import os
-import sys
+# ★ M19P4（2026-10-23 主控）：补 `import tempfile` —— `_prof()` 用 `tempfile.gettempdir()`
+#   却没 import ⇒ **开 profile 时必崩 NameError**（pyflakes 判致命 ⇒ 发包被拦）。
+#   同时删掉下面那个重复的 `import sys`：模块顶部（:14）已经 import 过 sys，
+#   两处重复定义会被 pyflakes 判 "redefinition of unused 'sys'"（同样致命）。
+import tempfile
 import threading
 import time
 
@@ -2545,7 +2549,8 @@ def do_keys(hwnd, vk=0x41, ctrl=False, times=1, dry=False, wait=0.06, scan_code=
     after = evidence(hwnd, "after")
     fp0, fp1 = _img_fp(before.get("文件") or ""), _img_fp(after.get("文件") or "")
     changed = None if (fp0 is None or fp1 is None) else (fp1 != fp0)
-    ev = "" if changed is None else ("　✔ 页面已变化" if changed else "　⚠ 页面无变化")
+    ev = ("　⚠⚠ 判不出来（指纹取不到）＝**没测出来**" if changed is None
+          else ("　✔ 页面已变化" if changed else "　⚠ 页面无变化"))
     log(f"⌨ 按键 [vk=0x{vk:X}{' +Ctrl' if ctrl else ''} ×{times}"
         f"{' 扫描码' if scan_code else ''}] 窗口「{info['title']}」"
         f"　前图={before.get('文件') or '无'} 后图={after.get('文件') or '无'}" + ev)
@@ -3259,6 +3264,33 @@ def read_doc(hwnd):
         return c, None, f"读不到文本：{str(e)[:60]}"
 
 
+def _read_fail_rc(how):
+    """★ M19P3（2026-10-23）：`read_doc` 失败原因的落码 —— **四种原因不压成一个码**。
+
+    · "未获授权"（`_need_perceive` 没过闸）  ⇒ rc=9（没通行证）
+    · "目标窗口不响应（IsHungAppWindow=1）"  ⇒ rc=5（窗口不稳定 ⇒ 稍后重试）
+    · "找不到文本编辑区"                      ⇒ rc=4（**真的**没有这个控件）
+    · "读不到文本：…"（取值失败）            ⇒ rc=5（**没测出来**）
+    · 其它未知原因                            ⇒ rc=5（**没测出来**，不许当成功）
+
+    ★ 为什么必须分开：改前 `read_doc` 的四种失败全被压成 rc=4「找不到文本区」，
+      而契约 §2.1 给 code=4 的处方是「重新 ctl_windows + ctl_tree 看现状」
+      ⇒ 对「窗口挂了」「读不到值」都是**错处方** ⇒ agent 会照着绕圈。
+    ★ 返回 (rc, kind)：kind 是给调用方分辨「能不能走网页表单模式」的机读标记 ——
+      **只有** kind == "no_ctrl"（真的没有文本区）才允许 --force-send 盲打。
+    """
+    h = (how or "")
+    if h.startswith("未获授权"):
+        return 9, "unauthorized"
+    if h.startswith("目标窗口不响应"):
+        return 5, "hung"
+    if h.startswith("找不到文本编辑区"):
+        return 4, "no_ctrl"
+    if h.startswith("读不到文本"):
+        return 5, "unreadable"
+    return 5, "unknown"
+
+
 def read_selection(hwnd):
     """读回当前**选中的文本** —— 拖拽选字之后，这就是可核验的结果。"""
     if not _need_perceive("读选中文本"):
@@ -3403,6 +3435,20 @@ def do_type(hwnd, text, dry=False, allow_if_starts_with=None, force_send=False,
         #   不许再报 rc=8「确认没变」（core.py:2881 铁律）；rc=5 ⇒ agent 侧倾向重新观测/重试。
         return _rc_from_changed(changed)
     c, before, how = read_doc(hwnd)
+    if before is None:
+        # ★ M19P3（2026-10-23）：**读失败与「真的没有文本区」分开**（四种失败原因不压成一个码）。
+        #   改前 `before is None` 一律落 rc=4「找不到文本区」⇒ 把真因（未获授权 / 窗口不响应 /
+        #   读不到文本）掩盖成另一个错；而 code=4 的处方（契约 §2.1）是「重新 ctl_windows +
+        #   ctl_tree 看现状」⇒ 对挂掉的窗口 / 取不到值**都是错处方** ⇒ agent 会照着绕圈。
+        #   ★ 只有 kind == "no_ctrl"（**真的**没有文本区）才允许走下面的网页表单模式；
+        #     读失败**不许**盲打（网页表单模式是「用户须明确授权」的兜底，不是读失败的出口）。
+        _rc, _kind = _read_fail_rc(how)
+        if _kind != "no_ctrl":
+            return _tell_next(_rc, f"打不了字：{how}", hwnd,
+                              extra=("本次是**读失败**（不是「目标没有文本区」）⇒ "
+                                     "**不许**改用网页表单模式盲打。\n"
+                                     "      先按上面那行真因处置（等窗口恢复 / 重新授权 / 换个目标），"
+                                     "再重跑；真要盲打须显式加 --force-send。"))
     if before is None and not force_send:
         return _tell_next(4, f"打不了字：{how}", hwnd,
                           extra="打字需要 UIA 文本区来做「只往空文档打」的安全阀。\n"
@@ -3710,6 +3756,14 @@ def main():
                           "前80字": (txt or "")[:80], "选中": (sel or "")[:60],
                           "选中字数": len(sel) if sel is not None else None},
                          ensure_ascii=False, indent=1))
+        if txt is None:
+            # ★ M19P3（2026-10-23）：**读失败不许报成功** —— 改前无论读没读到都 `return 0`
+            #   ⇒ 调用方拿到「读取成功、字符数为 null」的自相矛盾回执。
+            #   四种失败原因各落各的码（不许压成一个）：未获授权⇒9 / 窗口不响应⇒5 /
+            #   真的没有文本区⇒4 / 读不到文本⇒5。
+            _rd_rc, _rd_kind = _read_fail_rc(how)
+            log(f"⛔ 读取失败（{_rd_kind}）：{how}")
+            return _rd_rc
         return 0
 
     if a.action == "targets":

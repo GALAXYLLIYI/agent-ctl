@@ -238,7 +238,14 @@ def run_type_forcesend(mod, *, dry=False, scan_code=False, same_shot=False):
     out = {}
 
     def _read_doc(hwnd):
-        return (None, None, "没有 UIA 文本区（判据桩）")
+        # ★ 2026-10-23 主控修正：桩的措辞**与真源 `read_doc` 逐字对齐** =「找不到文本编辑区」。
+        #   原因：M19P3 给 `read_doc` 的失败原因分了因（`_read_fail_rc` 按**前缀**匹配四种原因：
+        #   未获授权 / 目标窗口不响应 / 找不到文本编辑区 / 读不到文本）⇒ 桩若自造第三种措辞，
+        #   会被归成「未知原因」⇒ 读失败 ⇒ 拦下盲打 ⇒ **X1 场景被偷换成了另一个场景**，
+        #   于是本判据与 M19P3 判据互相打架（表现为 X1 组 15 项红）。
+        #   ★ 真源的失败措辞**恰好只有这四种**（act.py read_doc 的四个 return）⇒ 分因覆盖完整。
+        #   ⚠ 本次只改**桩的字符串**，**一个字断言都没动**（元判据①：断言不许被削弱）。
+        return (None, None, "找不到文本编辑区")
 
     def _send_text(text, **kw):
         env.sent.append(text)

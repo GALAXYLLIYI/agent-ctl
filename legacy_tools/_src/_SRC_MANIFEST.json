@@ -1,7 +1,7 @@
 {
   "这是什么": "动作层（老线）的**真源**，在仓内。产物在 legacy_tools/ 根下，由 gen_legacy 从这里生成。",
   "为什么放 _src 子目录": "产物也在 legacy_tools/ 下；放同一个目录的话下次生成会**覆写自己**。",
-  "文件数": 35,
+  "文件数": 37,
   "FILES": [
     "gate.py",
     "gate_lock.py",
@@ -37,7 +37,9 @@
     "probe6.py",
     "验动作.py",
     "闭环.py",
-    "bench.py"
+    "bench.py",
+    "inject_magic.py",
+    "authdir.py"
   ],
   "与产物逐字节一致": [
     "_session.py",
@@ -79,5 +81,6 @@
     "selftest.py"
   ],
   "与产物不同的原因": "gen_legacy 的 RULES 会把真源里写死的本机绝对路径换成环境变量；这几个文件命中了净化规则，所以产物必然不同。真源**保持原样**是刻意的：净化只发生在生成那一刻。",
-  "本目录含本机绝对路径": "是（见 _src/coord.py、_src/perceive.py 等）。scan_legacy.py 扫 legacy_tools/ 时会命中 _src —— 这是真源进仓的已知代价，见 work/_X_receipt.md。"
+  "本目录含本机绝对路径": "是（见 _src/coord.py、_src/perceive.py 等）。scan_legacy.py 扫 legacy_tools/ 时会命中 _src —— 这是真源进仓的已知代价，见 work/_X_receipt.md。",
+  "本表口径": "**手写快照**，以 `tools\\gen_legacy.py` 的 `FILES` 为准（生成器才是真源）；两者不一致时**以生成器为准**。2026-10-23 对齐：补 `inject_magic.py`（M4 漏同步）与 `authdir.py`（M19P-S2 新增）。"
 }

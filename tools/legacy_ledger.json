@@ -2,13 +2,13 @@
  "_note": "gen_legacy 双基线台账：dirs[产物目录(相对仓库根)].files[文件] = {A0: 上次写产物时的规范化md5(去BOM/换行统一), T0: 生成时真源的规范化md5}。★必须进 git（G3 边界③）；手改 A0 等于共谋 —— 防线会失效，改台账唯一合法途径是跑一次生成。键与 src 用相对路径：本文件进仓，不得携带本机绝对路径（R2 (c) 类）。",
  "dirs": {
   "legacy_tools": {
-   "updated": "2026-10-23 12:19:21",
+   "updated": "2026-10-23 15:36:38",
    "src": "legacy_tools/_src",
    "files": {
     "gate.py": {
-     "A0": "dab72156a6ed12b273d3d7df1d5a26aa",
-     "T0": "dab72156a6ed12b273d3d7df1d5a26aa",
-     "bytes_out": 27369
+     "A0": "04f4a1a22ba04b0030b170620b8e9cd7",
+     "T0": "04f4a1a22ba04b0030b170620b8e9cd7",
+     "bytes_out": 29266
     },
     "gate_lock.py": {
      "A0": "5b2c5ef3fa17e7ba505ed50705211385",
@@ -16,9 +16,9 @@
      "bytes_out": 4876
     },
     "act.py": {
-     "A0": "8d2075a362c0b250a873c4ed20266e0b",
-     "T0": "8d2075a362c0b250a873c4ed20266e0b",
-     "bytes_out": 207104
+     "A0": "01c3ac23b95445b47f6b13ecf9d0c757",
+     "T0": "01c3ac23b95445b47f6b13ecf9d0c757",
+     "bytes_out": 210920
     },
     "perceive.py": {
      "A0": "6b2651ce12c093b13a419e5dd27f379f",
@@ -26,9 +26,9 @@
      "bytes_out": 40129
     },
     "auth_popup.py": {
-     "A0": "20fe4cb083c3924334662b66da118736",
-     "T0": "20fe4cb083c3924334662b66da118736",
-     "bytes_out": 50282
+     "A0": "53b95f59da5b63a1337692a8f967f0f1",
+     "T0": "53b95f59da5b63a1337692a8f967f0f1",
+     "bytes_out": 50941
     },
     "brake.py": {
      "A0": "070d33f433e85689c83b1303c4dc62ce",
@@ -184,187 +184,11 @@
      "A0": "825a7f030d5beee06f00c3bd7e7b9a92",
      "T0": "825a7f030d5beee06f00c3bd7e7b9a92",
      "bytes_out": 32408
-    }
-   }
-  },
-  "dist/legacy_gen": {
-   "updated": "2026-10-19 18:53:59",
-   "src": "legacy_tools/_src",
-   "files": {
-    "gate.py": {
-     "A0": "1f37506cd765bab672b568b6604049ef",
-     "T0": "1f37506cd765bab672b568b6604049ef",
-     "bytes_out": 27118
     },
-    "gate_lock.py": {
-     "A0": "5b2c5ef3fa17e7ba505ed50705211385",
-     "T0": "5b2c5ef3fa17e7ba505ed50705211385",
-     "bytes_out": 4876
-    },
-    "act.py": {
-     "A0": "d38da4136640a55ed0a4de76473f3c23",
-     "T0": "d38da4136640a55ed0a4de76473f3c23",
-     "bytes_out": 171264
-    },
-    "perceive.py": {
-     "A0": "6b2651ce12c093b13a419e5dd27f379f",
-     "T0": "6b2651ce12c093b13a419e5dd27f379f",
-     "bytes_out": 40129
-    },
-    "auth_popup.py": {
-     "A0": "58feee38a43a9d97fe92112c2d65f117",
-     "T0": "58feee38a43a9d97fe92112c2d65f117",
-     "bytes_out": 43099
-    },
-    "brake.py": {
-     "A0": "070d33f433e85689c83b1303c4dc62ce",
-     "T0": "070d33f433e85689c83b1303c4dc62ce",
-     "bytes_out": 7973
-    },
-    "cdp.py": {
-     "A0": "41e0e804497300417f944df123d8b507",
-     "T0": "41e0e804497300417f944df123d8b507",
-     "bytes_out": 18626
-    },
-    "coord.py": {
-     "A0": "7f92afe2e8b4f37da63a419b5d9da931",
-     "T0": "7f92afe2e8b4f37da63a419b5d9da931",
-     "bytes_out": 5381
-    },
-    "option_locator.py": {
-     "A0": "0b8a51c6a80ed47c737c11fbf90f451b",
-     "T0": "0b8a51c6a80ed47c737c11fbf90f451b",
-     "bytes_out": 9123
-    },
-    "selftest.py": {
-     "A0": "1735278d9d3000ea095991b370f4698f",
-     "T0": "1735278d9d3000ea095991b370f4698f",
-     "bytes_out": 15266
-    },
-    "guardian.py": {
-     "A0": "880e5442f6534f09d8d92699e3e37dcc",
-     "T0": "880e5442f6534f09d8d92699e3e37dcc",
-     "bytes_out": 18986
-    },
-    "whitelist.json": {
-     "A0": "816b3b1a073889a3472df479beb2b8d2",
-     "T0": "816b3b1a073889a3472df479beb2b8d2",
-     "bytes_out": 2121
-    },
-    "click_option.py": {
-     "A0": "f887323bbe25e896b68916a0dfb72010",
-     "T0": "f887323bbe25e896b68916a0dfb72010",
-     "bytes_out": 4136
-    },
-    "formfill.py": {
-     "A0": "289aa9bf0ab361317f404581d31d411a",
-     "T0": "289aa9bf0ab361317f404581d31d411a",
-     "bytes_out": 8790
-    },
-    "padd2.py": {
-     "A0": "9b39846fa5bf4ee446788748916e2f56",
-     "T0": "9b39846fa5bf4ee446788748916e2f56",
-     "bytes_out": 8117
-    },
-    "preflight.py": {
-     "A0": "65b3bd80d26080183ce58d45f3a946d6",
-     "T0": "65b3bd80d26080183ce58d45f3a946d6",
-     "bytes_out": 8518
-    },
-    "next_question.py": {
-     "A0": "887deacb2b414be8b74a6a3e93008392",
-     "T0": "887deacb2b414be8b74a6a3e93008392",
-     "bytes_out": 5938
-    },
-    "minidump_probe.py": {
-     "A0": "7d41a5c92cc84f880b4031236bdb197e",
-     "T0": "7d41a5c92cc84f880b4031236bdb197e",
-     "bytes_out": 5303
-    },
-    "minidump_stack.py": {
-     "A0": "728dfa763683b59af14783e4589465f3",
-     "T0": "728dfa763683b59af14783e4589465f3",
-     "bytes_out": 7315
-    },
-    "pe_export_lookup.py": {
-     "A0": "20ef61de26e303acf90962f925093812",
-     "T0": "20ef61de26e303acf90962f925093812",
-     "bytes_out": 4670
-    },
-    "radio_finder.py": {
-     "A0": "d59fb637d406fc2bbae711f8cb680a40",
-     "T0": "d59fb637d406fc2bbae711f8cb680a40",
-     "bytes_out": 4279
-    },
-    "win_list.py": {
-     "A0": "1e18dd1dfef3318fa39268add83b0870",
-     "T0": "1e18dd1dfef3318fa39268add83b0870",
-     "bytes_out": 3164
-    },
-    "zoomgrid.py": {
-     "A0": "b779a436dda7d03eb219d95484c91074",
-     "T0": "b779a436dda7d03eb219d95484c91074",
-     "bytes_out": 4780
-    },
-    "post_compat.json": {
-     "A0": "e430115c280facf853b154b17875656d",
-     "T0": "e430115c280facf853b154b17875656d",
-     "bytes_out": 13225
-    },
-    "guardian_policy.json": {
-     "A0": "9e47426aa46079f549a7d1944c50154e",
-     "T0": "9e47426aa46079f549a7d1944c50154e",
-     "bytes_out": 4899
-    },
-    "_session.py": {
-     "A0": "b9657603c6db1b308f1889341c62ad8f",
-     "T0": "b9657603c6db1b308f1889341c62ad8f",
-     "bytes_out": 6339
-    },
-    "probe.py": {
-     "A0": "3d30f542dd1a92ff50c1555304db012f",
-     "T0": "3d30f542dd1a92ff50c1555304db012f",
-     "bytes_out": 676
-    },
-    "probe2.py": {
-     "A0": "684965e80051244a74a2f23d3b389a13",
-     "T0": "684965e80051244a74a2f23d3b389a13",
-     "bytes_out": 830
-    },
-    "probe3.py": {
-     "A0": "a8d202f0836f0bec5507a8f8d4a2e03a",
-     "T0": "a8d202f0836f0bec5507a8f8d4a2e03a",
-     "bytes_out": 993
-    },
-    "probe4.py": {
-     "A0": "40ee175e35324ca0fb6498d24d3202ae",
-     "T0": "40ee175e35324ca0fb6498d24d3202ae",
-     "bytes_out": 614
-    },
-    "probe5.py": {
-     "A0": "c428511ff8b7e5504ad87ae0e994e550",
-     "T0": "c428511ff8b7e5504ad87ae0e994e550",
-     "bytes_out": 365
-    },
-    "probe6.py": {
-     "A0": "1d8554f4d7799539e8c4ef3001b493a7",
-     "T0": "1d8554f4d7799539e8c4ef3001b493a7",
-     "bytes_out": 558
-    },
-    "验动作.py": {
-     "A0": "e517c1f0bd88816dbbf62060c1bda989",
-     "T0": "e517c1f0bd88816dbbf62060c1bda989",
-     "bytes_out": 39777
-    },
-    "闭环.py": {
-     "A0": "8ef0bb265aea906676f2ed3300c1a06d",
-     "T0": "8ef0bb265aea906676f2ed3300c1a06d",
-     "bytes_out": 8071
-    },
-    "bench.py": {
-     "A0": "825a7f030d5beee06f00c3bd7e7b9a92",
-     "T0": "825a7f030d5beee06f00c3bd7e7b9a92",
-     "bytes_out": 32408
+    "authdir.py": {
+     "A0": "141022ea097888f247b724d94f481ca9",
+     "T0": "141022ea097888f247b724d94f481ca9",
+     "bytes_out": 3323
     }
    }
   }
