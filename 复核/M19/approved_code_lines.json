@@ -1,0 +1,390 @@
+{
+  "ledger_version": 3,
+  "title": "M19 链「已批准改动真代码行」账本",
+  "purpose": "主控复核脚本 ⑤-b 的唯一数量依据：act.py 相对 M19 前基线（backup_before\\act_1_src__legacy_tools__act.py）被改动的真代码行，只允许出现在本账本里；多一行、少一行都报红。行文本 = tokenize 剥掉 COMMENT/STRING 后的该行文本再 strip。",
+  "maintainer": "主控：每来一刀只**追加一段**，不改复核脚本逻辑",
+  "how_to_append": "① 往 segments 里加一个 {name, desc, evidence, lines, sha256}；② 在 files.<该文件>.segments 里加上这个段名（若该文件要换基线，再更新 files.<该文件>.baseline）；③ 重算段 sha256 与整本 ledger_sha256；④ 用 账本工具.py hash <段.json> 可自动算（避免手算错）。",
+  "tamper_policy": "改账本必须在提交里留痕：账本在仓内，每次改都进 diff；段 sha256 与整本 ledger_sha256 当场对不上 ⇒ 复核脚本报红；且每次复核报告都会打印账本摘要与整本指纹供比对。",
+  "updated": "2026-10-23",
+  "segments": [
+    {
+      "name": "M19′",
+      "desc": "等生效三态口径（_budget_verdict）+ 两个预算耗尽出口复用已算判差",
+      "evidence": "work\\_M19_语义修复_20221023\\backup_before → backup_after",
+      "lines": {
+        "def _budget_verdict(last_d):": 1,
+        "if last_d.get(\"changed\") is True:": 1,
+        "if not last_d:": 1,
+        "last_d = None": 1,
+        "last_d = d": 1,
+        "return False": 2,
+        "return None": 1,
+        "return {\"生效\": _budget_verdict(last_d), \"轮次\": rounds,": 2
+      },
+      "sha256": "513fadd91eb3e9880327bc670755170342a4755d7ad2a714f3d978b168101c32"
+    },
+    {
+      "name": "M19P",
+      "desc": "M19P 任务②：退出码三态映射助手 _rc_from_changed + W1/W2/W3 三个调用点",
+      "evidence": "M19P 交卷（主控复核输出_M19P交付后.txt）",
+      "lines": {
+        "def _rc_from_changed(changed, dry=False):": 1,
+        "if changed is None:": 1,
+        "if changed is True:": 1,
+        "if dry:": 1,
+        "return 0": 2,
+        "return 5": 1,
+        "return 8": 1,
+        "return _rc_from_changed(changed)": 2,
+        "return _rc_from_changed(changed, dry=dry)": 1
+      },
+      "sha256": "8bed167dc0e539f538e6b2aba12e2f5887ec27c03140af2030cf3e1ba261fad7"
+    },
+    {
+      "name": "M19P2",
+      "desc": "同族两处：X1 do_type 的 UIA 读回 / X2 do_drag 的选区读回",
+      "evidence": "窗口c 2026-10-23 11:25:20 交卷；主控 11:34:36 复核；提交 9dd051a",
+      "lines": {
+        "changed = None if sel is None else (True if len(sel) > 0 else False)": 1,
+        "changed = True if ok else False": 1,
+        "changed, ok, nl_only = None, False, False": 1,
+        "elif sel is None:": 1,
+        "else \"✅ 读回逐字符一致\") if ok else \"❌ 读回不一致\"": 1,
+        "else:": 2,
+        "f\"（{len(before)} → {len(after) if after is not None else 'None'} 字）\")": 1,
+        "if after is None:": 1,
+        "if dry:": 1,
+        "log(f\"{'（演练）' if dry else ''}✋ 拖拽 [{frm} → {to}] 窗口「{info['title']}」\" + tail)": 1,
+        "mark = \"❓ 读不回来＝**没测出来**（本次不报成功，请重新观测后重试）\"": 1,
+        "mark = (\"✅ 读回逐字符一致（仅换行表示不同）\" if nl_only": 1,
+        "nl_only = (after != want)": 1,
+        "ok = (after == want) or (_norm_nl(after) == _norm_nl(want))": 1,
+        "return _rc_from_changed(changed, dry=dry)": 2,
+        "tail = \"\"": 1,
+        "tail = \"　选中了 %d 字：「%s」\" % (len(sel), sel[:30])": 1,
+        "tail = \"　选区**读不回来**＝**没测出来**（本次不报成功，请重新观测后重试）\"": 1
+      },
+      "sha256": "2a8d1bfd58bd97b49a957e67e00147363dad74318f74711717fa8a6807df7b1e"
+    },
+    {
+      "name": "M20_core加长观测",
+      "desc": "core 判决层「加长观测」：判「确认没变」之前用 core 自己的尺子再看 ≤300ms（framecache.WAIT_BUDGET_MS，不新增数字）",
+      "evidence": "提交 a19fbad（已推 Gitee）；施工前基线 MD5 5BB4A068…（= 旧 INVARIANTS 指纹）",
+      "lines": {
+        "% (before.size, _img.size))": 1,
+        "ACT_EXT_OBSERVE_MS = framecache.WAIT_BUDGET_MS": 1,
+        "_after, _df = _obs[\"after\"], _obs[\"df\"]": 2,
+        "_diff_ignore_cfg(args),": 2,
+        "_ig = ignore if isinstance(ignore, dict) else ACT_DIFF_IGNORE_DEFAULT": 1,
+        "_img = r.get(\"图\")": 1,
+        "_new_df = _act_diff_of(before, _img, win_off, ignore)": 1,
+        "_obs = _act_extend_observe(hwnd, _before, _after, _df, _before_off,": 2,
+        "_obs = {\"做了\": False, \"原因\": \"\", \"耗时ms\": 0.0, \"轮次\": 0, \"结果\": None}": 1,
+        "_obs[\"做了\"] = True": 1,
+        "_obs[\"原因\"] = \"加长观测异常：%s: %s\" % (type(e).__name__, e)": 1,
+        "_obs[\"原因\"] = \"取不到基线尺寸 ⇒ 不升级\"": 1,
+        "_obs[\"原因\"] = \"复核判差未确认变化 ⇒ 判词不动\"": 1,
+        "_obs[\"原因\"] = \"末帧≠基线（或没测出来）⇒ 不加长观测（零额外等待）\"": 1,
+        "_obs[\"原因\"] = \"没有基线帧/末帧 ⇒ 无从比对 ⇒ 不加长观测\"": 1,
+        "_obs[\"原因\"] = \"测到变化但没拿到帧 ⇒ 判词不动\"": 1,
+        "_obs[\"原因\"] = \"画面退化 ⇒ 没测出来 ⇒ 不加长观测（保持 code=5）\"": 1,
+        "_obs[\"原因\"] = \"窗口内没有测到变化 ⇒ 判词不动（仍 code=8「确认没变」）\"": 1,
+        "_obs[\"原因\"] = \"窗口内测到变化 ⇒ 改判成功（code=0）\"": 1,
+        "_obs[\"原因\"] = (\"新帧与基线口径/尺寸不同（%s vs %s）⇒ 不升级\"": 1,
+        "_obs[\"结果\"] = r.get(\"changed\")": 1,
+        "_obs[\"耗时ms\"] = float(r.get(\"耗时ms\") or 0.0)": 1,
+        "_obs[\"说明\"] = r.get(\"说明\") or \"\"": 1,
+        "_obs[\"轮次\"] = int(r.get(\"轮次\") or 0)": 1,
+        "_out = {\"after\": after, \"df\": df, \"观测\": _obs}": 1,
+        "_out[\"after\"] = _img": 1,
+        "_out[\"df\"] = _new_df": 1,
+        "budget_ms: int = ACT_EXT_OBSERVE_MS) -> dict:": 1,
+        "budget_ms=int(budget_ms),": 1,
+        "caret_px=int(_ig.get(\"caret_px\", 8) or 0),": 1,
+        "def _act_extend_observe(hwnd: int, before, after, df: dict, win_off=None,": 1,
+        "degraded=bool(_eff_info and _eff_info.get(\"degraded\") is True))": 2,
+        "except Exception as e:": 1,
+        "except Exception:": 1,
+        "if (_new_df or {}).get(\"changed\") is not True:": 1,
+        "if (df or {}).get(\"changed\") is not False:": 1,
+        "if _img is None:": 1,
+        "if _obs[\"观测\"].get(\"做了\"):": 2,
+        "if before is None or after is None:": 1,
+        "if before.size != _img.size:": 1,
+        "if degraded:": 1,
+        "if r.get(\"changed\") is not True:": 1,
+        "ignore=None, degraded: bool = False,": 1,
+        "min_area_px=int(_ig.get(\"min_area_px\", 24) or 0))": 1,
+        "poll_ms=framecache.WAIT_POLL_MS,": 1,
+        "r = framecache.wait_change(int(hwnd), before,": 1,
+        "r[\"data\"] = {**(r.get(\"data\") or {}), \"加长观测\": _obs[\"观测\"]}": 2,
+        "return _out": 10,
+        "try:": 2
+      },
+      "sha256": "77d40e066b229f766a3c63767f8889524ca829e0b814eb8ed45e5966937f766c"
+    },
+    {
+      "name": "M20_act安全批",
+      "desc": "M20 act 安全批（ae62a18，OpenCode 审计 §九 的安全/崩溃级三条）：X1 干跑打字闸 / X2 滚动干跑闸 / X3 root=None 兜底",
+      "evidence": "提交 ae62a18（已入仓）；基线 = M19P2 交卷态 0BA9D046…（git ae62a18^）",
+      "lines": {
+        "else:": 2,
+        "f\"{'（演练：光标未移动）' if dry else ''}] 窗口「{info['title']}」\")": 1,
+        "if not dry:": 1,
+        "if root is None:": 1,
+        "if scan_code:": 1,
+        "log(f\"{'（演练）' if dry else ''}🖱 滚动 [SendInput 滚轮 {amount} 格，光标置于 ({x},{y})\"": 1,
+        "n_scan, fb_chars = send_text_scan(text)": 1,
+        "r = info[\"rect\"]": 1,
+        "send_text(text)": 1,
+        "time.sleep(0.12)": 1,
+        "user32.SetCursorPos(x, y)": 1,
+        "x, y, rr, ok_rect = (r[0] + r[2]) // 2, (r[1] + r[3]) // 2, r, True": 1,
+        "x, y, rr, ok_rect = _center(root)": 1
+      },
+      "sha256": "aa861c7d39a8200ba4a98c8e2301f07a6ec210c701d1bea404be8f60c0d8b74b"
+    },
+    {
+      "name": "M19P-S2_authdir",
+      "desc": "M19P-S2（src/agentctl/authdir.py）：AUTHDIR 收编为单一解析",
+      "evidence": "提交 678a19f（已入仓）",
+      "lines": {
+        "APP_DIR_NAME = \"AgentCtl\"": 1,
+        "AUTH_DIR_NAME = \"_auth\"": 1,
+        "ENV_KEY = \"AGENTCTL_AUTHDIR\"": 1,
+        "def app_dir() -> str:": 1,
+        "def default_dir() -> str:": 1,
+        "def resolve() -> str:": 1,
+        "from __future__ import annotations": 1,
+        "if v:": 1,
+        "import os": 1,
+        "os.environ.get(\"LOCALAPPDATA\", os.path.expanduser(\"~\")), APP_DIR_NAME)": 1,
+        "return os.environ.get(\"AGENTCTL_APP_DIR\") or os.path.join(": 1,
+        "return os.path.abspath(default_dir())": 1,
+        "return os.path.abspath(os.path.expanduser(v))": 1,
+        "return os.path.join(app_dir(), AUTH_DIR_NAME)": 1,
+        "v = (os.environ.get(ENV_KEY) or \"\").strip()": 1
+      },
+      "sha256": "b7f47c82edd5c9cbe5ae6e01f29bb308859aaccdb890d3509424e7850bdcf1a7"
+    },
+    {
+      "name": "M19P-S2_gate_src",
+      "desc": "M19P-S2（src/agentctl/gate.py）：AUTHDIR 收编为单一解析",
+      "evidence": "提交 678a19f（已入仓）",
+      "lines": {
+        "AUTHDIR = _resolve_authdir()": 1,
+        "CAPTURE_DB = os.path.join(AUTHDIR, \"capture.json\")": 1,
+        "LEASE_DB = os.path.join(AUTHDIR, \"lease.json\")": 1,
+        "LOCKFILE = os.path.join(AUTHDIR, \"gate.lock\")": 1,
+        "LOG = os.path.join(AUTHDIR, \"gate_agentctl.log\")": 1,
+        "PASSFILE = os.path.join(AUTHDIR, \"auth_pass.json\")": 1,
+        "_authdir_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), \"authdir.py\")": 1,
+        "_mod = _ilu.module_from_spec(_spec)": 1,
+        "_resolve_authdir = _mod.resolve": 1,
+        "_spec = _ilu.spec_from_file_location(\"agentctl._authdir_shared\", _authdir_path)": 1,
+        "_spec.loader.exec_module(_mod)": 1,
+        "except ImportError:": 1,
+        "from agentctl.authdir import resolve as _resolve_authdir": 1,
+        "if _spec is None or _spec.loader is None:": 1,
+        "import importlib.util as _ilu": 1,
+        "raise ImportError(\"找不到共享规则模块 authdir.py：%s\" % _authdir_path)": 1,
+        "try:": 1
+      },
+      "sha256": "e034a0cc12a6677d6b3192711142712931a3a6f85492732833a7faace9976fba"
+    },
+    {
+      "name": "M19P-S2_gate_legacy",
+      "desc": "M19P-S2（legacy_tools/_src/gate.py）：AUTHDIR 收编为单一解析",
+      "evidence": "提交 678a19f（已入仓）",
+      "lines": {
+        "AUTHDIR = authdir.resolve()": 1,
+        "_HERE_DIR = os.path.dirname(os.path.abspath(__file__))": 1,
+        "if _HERE_DIR not in sys.path:": 1,
+        "import authdir": 1,
+        "sys.path.insert(0, _HERE_DIR)": 1
+      },
+      "sha256": "cd6144452f562fbc6390a03363159ec2c6c39fa92a14b249060f94a2aadffeb6"
+    },
+    {
+      "name": "M19P-S2_auth_popup",
+      "desc": "M19P-S2（legacy_tools/_src/auth_popup.py）：AUTHDIR 收编为单一解析",
+      "evidence": "提交 678a19f（已入仓）",
+      "lines": {
+        "AUTHDIR = gate.AUTHDIR": 1
+      },
+      "sha256": "d9f81af8fc148598c74fccdbe3f8f167e6dc28c9563a204167088a97fc4c6c2f"
+    },
+    {
+      "name": "M19P3_谎报成功三条",
+      "desc": "F3 日志诚实度(changed is None 说清没测出来，rc 维持 0) + F5 read 读失败不再 return 0(落 9/5/4/5) + F7 do_type 前置读失败与真的没有文本区分开(落 9/5/5) + 新助手 _read_fail_rc(how) 四因落码",
+      "evidence": "work/_M19P3_谎报成功三条_20221023/真代码行清单_待追加账本.txt；判据 tests/_P3_M19P3_谎报成功三条_判据.py",
+      "lines": {
+        "\"再重跑；真要盲打须显式加 --force-send。\"))": 1,
+        "_rc, _kind = _read_fail_rc(how)": 1,
+        "_rd_rc, _rd_kind = _read_fail_rc(how)": 1,
+        "def _read_fail_rc(how):": 1,
+        "else (\"　✔ 页面已变化\" if changed else \"　⚠ 页面无变化\"))": 1,
+        "ev = (\"　⚠⚠ 判不出来（指纹取不到）＝**没测出来**\" if changed is None": 1,
+        "extra=(\"本次是**读失败**（不是「目标没有文本区」）⇒ \"": 1,
+        "h = (how or \"\")": 1,
+        "if _kind != \"no_ctrl\":": 1,
+        "if before is None:": 1,
+        "if h.startswith(\"找不到文本编辑区\"):": 1,
+        "if h.startswith(\"未获授权\"):": 1,
+        "if h.startswith(\"目标窗口不响应\"):": 1,
+        "if h.startswith(\"读不到文本\"):": 1,
+        "if txt is None:": 1,
+        "log(f\"⛔ 读取失败（{_rd_kind}）：{how}\")": 1,
+        "return 4, \"no_ctrl\"": 1,
+        "return 5, \"hung\"": 1,
+        "return 5, \"unknown\"": 1,
+        "return 5, \"unreadable\"": 1,
+        "return 9, \"unauthorized\"": 1,
+        "return _rd_rc": 1,
+        "return _tell_next(_rc, f\"打不了字：{how}\", hwnd,": 1
+      },
+      "sha256": "878681f8338ee401209014f5f6479aa361f61884ae83cbb83bd58031dad1ab50"
+    },
+    {
+      "name": "M19P4_致命项两条",
+      "desc": "删掉顶层 import 块里重复的 import sys（模块顶部已 import 过）+ 补 import tempfile（_pf() 用 tempfile.gettempdir() 却没 import ⇒ 开 profile 时 NameError 崩在半路）",
+      "evidence": "首次跑完整 pack_dist 被 pyflakes 常驻门槛拦下（act.py:185 redefinition of unused sys / act.py:1072 undefined name tempfile）；判据 tests/_P3_M19P4_致命项_判据.py",
+      "lines": {
+        "import tempfile": 1
+      },
+      "sha256": "d43509b5b46ac2c84a03c687cd0a4a5e512940556135083b8871d2e62411e7e8"
+    }
+  ],
+  "ledger_sha256": "793d58860c8bdef3e23c2e11cb13f04794ded801c37a111c78bd276eb801562b",
+  "files": {
+    "act.py": {
+      "target": "legacy_tools/_src/act.py",
+      "baseline": {
+        "kind": "file",
+        "path": "../backup_before/act_1_src__legacy_tools__act.py",
+        "md5": "91AE6D554048912F8CA21DC113AD077F"
+      },
+      "segments": [
+        "M19′",
+        "M19P",
+        "M19P2",
+        "M20_act安全批",
+        "M19P3_谎报成功三条",
+        "M19P4_致命项两条"
+      ]
+    },
+    "core.py": {
+      "target": "src/agentctl/core.py",
+      "baseline": {
+        "kind": "file",
+        "path": "baseline_core_pre_M20.py",
+        "md5": "5BB4A068CA1A89837A09F9C875FA36CE",
+        "git_ref": "a19fbad^:src/agentctl/core.py"
+      },
+      "segments": [
+        "M20_core加长观测"
+      ]
+    },
+    "src/agentctl/gate.py": {
+      "target": "src/agentctl/gate.py",
+      "baseline": {
+        "kind": "git",
+        "git_ref": "678a19f^:src/agentctl/gate.py",
+        "md5": "3FFAFB8E2774A1CF203FF2510D62F633"
+      },
+      "segments": [
+        "M19P-S2_gate_src"
+      ],
+      "desc": "M19P-S2 受控文件：新线闸门（AUTHDIR 收编为单一解析）"
+    },
+    "legacy_tools/_src/gate.py": {
+      "target": "legacy_tools/_src/gate.py",
+      "baseline": {
+        "kind": "git",
+        "git_ref": "678a19f^:legacy_tools/_src/gate.py",
+        "md5": "DAB72156A6ED12B273D3D7DF1D5A26AA"
+      },
+      "segments": [
+        "M19P-S2_gate_legacy"
+      ],
+      "desc": "M19P-S2 受控文件：老线闸门真源（只 import authdir，不复制规则）"
+    },
+    "legacy_tools/_src/auth_popup.py": {
+      "target": "legacy_tools/_src/auth_popup.py",
+      "baseline": {
+        "kind": "git",
+        "git_ref": "678a19f^:legacy_tools/_src/auth_popup.py",
+        "md5": "20FE4CB083C3924334662B66DA118736"
+      },
+      "segments": [
+        "M19P-S2_auth_popup"
+      ],
+      "desc": "M19P-S2 受控文件：签发方真源（不再写死 BASE/_auth，改走 gate.AUTHDIR）"
+    },
+    "legacy_tools/_src/authdir.py": {
+      "target": "legacy_tools/_src/authdir.py",
+      "baseline": {
+        "kind": "git",
+        "git_ref": "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391",
+        "md5": "D41D8CD98F00B204E9800998ECF8427E"
+      },
+      "segments": [
+        "M19P-S2_authdir"
+      ],
+      "desc": "M19P-S2 受控文件：★ 本单**新建**（AUTHDIR 规则正文的唯一源；由 gen_legacy 生成）"
+    }
+  },
+  "format": {
+    "files": "按**受控文件**分组：target = 该文件在工作区里的相对路径；baseline = 它的「上一刀之前」基线怎么取；segments = 哪些交付段覆盖它",
+    "files.*.baseline.path": "基线快照文件（相对**账本所在目录**）；脚本按 md5 校验它",
+    "files.*.baseline.git_ref": "备用来源：git show <ref>（脚本在快照缺失/不符时用，仍按 md5 校验）",
+    "segments[].name": "交付段名（M19′ / M19P / M19P2 / M20…）",
+    "segments[].desc": "这一段改了什么",
+    "segments[].evidence": "交卷证据（文件/提交/时间）",
+    "segments[].lines": "该段批准的**真代码行** → 期望出现次数（行文本 = tokenize 剥掉 COMMENT/STRING 后的该行再 strip）",
+    "segments[].sha256": "段校验值 = sha256(段规范化文本)；规范化 = 行文本排序后拼「行文本\\t次数」用 \\n 连接",
+    "ledger_sha256": "整本指纹 = sha256(逐行「FILE\\t文件\\ttarget\\t基线md5\\t段名列表」与「SEG\\t段名\\t段规范化文本」，全部按顺序用 \\n 连接)"
+  },
+  "removed": {
+    "act.py": {
+      "+ (\"\" if dry else f\"　选中了 {len(sel) if sel is not None else '?'} 字：\"": 1,
+      "else \"✅ 读回逐字符一致\") if ok else \"❌ 读回不一致\"": 1,
+      "else:": 1,
+      "ev = \"\" if changed is None else (\"　✔ 页面已变化\" if changed else \"　⚠ 页面无变化\")": 1,
+      "f\"「{(sel or '')[:30]}」\"))": 1,
+      "f\"（{len(before)} → {len(after) if after else 'None'} 字）\")": 1,
+      "if scan_code:": 1,
+      "import sys": 1,
+      "log(f\"{'（演练）' if dry else ''}✋ 拖拽 [{frm} → {to}] 窗口「{info['title']}」\"": 1,
+      "log(f\"{'（演练）' if dry else ''}🖱 滚动 [SendInput 滚轮 {amount} 格，光标置于 ({x},{y})] 窗口「{info['title']}」\")": 1,
+      "mark = (\"✅ 读回逐字符一致（仅换行表示不同）\" if nl_only": 1,
+      "n_scan, fb_chars = send_text_scan(text)": 1,
+      "nl_only = (after != want)": 1,
+      "ok = (after == want) or (_norm_nl(after) == _norm_nl(want))": 1,
+      "return 0 if (changed is True) else 8": 1,
+      "return 0 if (dry or (sel is not None and len(sel) > 0)) else 8": 1,
+      "return 0 if (dry or changed is True) else 8": 1,
+      "return 0 if (dry or ok) else 8": 1,
+      "return 0 if changed is True else 8": 1,
+      "return {\"生效\": False, \"轮次\": rounds,": 2,
+      "send_text(text)": 1,
+      "time.sleep(0.12)": 1,
+      "user32.SetCursorPos(x, y)": 1,
+      "x, y, rr, ok_rect = _center(root)": 1
+    },
+    "src/agentctl/gate.py": {
+      "AUTHDIR = os.path.join(HOME, \"_auth\") if HOME else None": 1,
+      "CAPTURE_DB = os.path.join(AUTHDIR, \"capture.json\") if AUTHDIR else None": 1,
+      "LEASE_DB = os.path.join(AUTHDIR, \"lease.json\") if AUTHDIR else None": 1,
+      "LOCKFILE = os.path.join(AUTHDIR, \"gate.lock\") if AUTHDIR else None": 1,
+      "LOG = os.path.join(AUTHDIR, \"gate_agentctl.log\") if AUTHDIR else None": 1,
+      "PASSFILE = os.path.join(AUTHDIR, \"auth_pass.json\") if AUTHDIR else None": 1
+    },
+    "legacy_tools/_src/gate.py": {
+      "AUTHDIR = os.environ.get(\"AGENTCTL_AUTHDIR\") or os.path.join(HERE, \"_auth\")": 1
+    },
+    "legacy_tools/_src/auth_popup.py": {
+      "AUTHDIR = os.path.join(BASE, \"_auth\")": 1
+    }
+  }
+}
