@@ -1,0 +1,50 @@
+# ★ 2026-10-23（H5）：版本号**单一真源** = `src/agentctl/__init__.py` 的 `__version__`。
+#   本文件用 dynamic 引用**同一个常量**（不写第二份数字）⇒ 改一处，两处同步。
+#   打包脚本 `tools/pack_dist.py` 的 read_version() 按这个顺序取：
+#     ① __version__ → ② 本文件的静态 version（若有人改成写死）→ ③ README 正则（老取法，回退）。
+#   ★ 为什么不把数字写在这里：`src/agentctl/__init__.py` 是**运行时真正对外报出去**的那个版本
+#     （docs\AGENT接口.md 的 status.version 与它同源）⇒ 真源在产品代码里，本文件只做索引。
+
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agent-ctl"
+dynamic = ["version"]
+description = "Windows 本机电脑控制的统一控制面（HTTP / MCP / CLI 三态同源）"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+keywords = ["windows", "automation", "mcp", "uia", "accessibility"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Win32 (MS Windows)",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Desktop Environment",
+]
+# ★ 依赖清单以 requirements.txt 为准（install.ps1 装它）：
+#   winrt-* / windows-capture 是 vendor/ 里**预编译随包分发**的轮子，不走 PyPI
+#   ⇒ 这里不重复声明，避免 pip 去网上拉一个装不上的版本。
+dependencies = []
+
+[project.urls]
+Homepage = "https://gitee.com/GALAXYLIYI/agent-ctl"
+Repository = "https://gitee.com/GALAXYLIYI/agent-ctl"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["agentctl*"]
+
+[tool.setuptools.dynamic]
+version = { attr = "agentctl.__version__" }

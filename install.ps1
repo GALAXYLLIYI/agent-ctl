@@ -313,7 +313,16 @@ Step '6/7  MCP(HTTP) 守护：开机自启 + 令牌对账'
 #   §config.toml§ 里 agentctl_http 是 **url 型** MCP ⇒ **Codex 自己不会去拉它**
 #   （url 型没有 command 可执行）。服务没起 ⇒ 新会话里 25 个工具一条都不出现。
 #   ⇒ 「装完就能用」的前提是：**这个服务自己会站起来，掉了会自己回来，令牌两边一致**。
-$daemon = Join-Path $Dir 'tools\守护_mcp_http.py'
+# ★ 2026-10-23 P0-5 修复：守护脚本随包落在 **app\tools\** 下
+#   （第 3 步把包内容整体搬进 $AppDir ⇒ %LOCALAPPDATA%\AgentCtl\app\tools\）。
+#   原来这里读的是 $Dir\tools\…（$Dir 是安装根，app 是它的**子目录**）⇒ 与实际落盘位置对不上，
+#   装完必然红「找不到守护脚本」⇒ MCP(HTTP) 守护 / 开机自启 / 令牌对账全缺。
+#   ★ 为什么必须是 $AppDir 而不是 $Dir：守护脚本按**自身位置**推导两件事 ——
+#     SRC = <上级>\src（要和服务同一个包根）、STATE = <上级>\work\state\token
+#     （要和服务用同一份令牌文件）—— 两处都指 app 根 ⇒ 只有放 app\tools\ 下才对。
+#   ★ 回退 $Dir\tools\：兼容老机器上手工放过脚本的摆法（那台机器 app\ 下没有）。
+$daemon = Join-Path $AppDir 'tools\守护_mcp_http.py'
+if (-not (Test-Path $daemon)) { $daemon = Join-Path $Dir 'tools\守护_mcp_http.py' }
 if (Test-Path $daemon) {
     $pyw = Join-Path (Split-Path $py.Exe -Parent) 'pythonw.exe'
     if (-not (Test-Path $pyw)) { $pyw = $py.Exe }
@@ -325,7 +334,8 @@ if (Test-Path $daemon) {
     Say '  （服务掉了会自动拉起；日志 %LOCALAPPDATA%\AgentCtl\mcp_http_daemon.log）'
     & $pyw $daemon --once
     Start-Sleep -Seconds 2
-    $selfck = Join-Path $Dir 'tools\自检_mcp_http.py'
+    $selfck = Join-Path $AppDir 'tools\自检_mcp_http.py'
+    if (-not (Test-Path $selfck)) { $selfck = Join-Path $Dir 'tools\自检_mcp_http.py' }
     if (Test-Path $selfck) {
         Say '  跑一次自检（端口 / 协议 / 工具数 / 令牌 / 急停）：'
         & $py.Exe -X utf8 $selfck 2>&1 | ForEach-Object { Say "  $_" }

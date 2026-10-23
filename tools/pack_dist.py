@@ -52,6 +52,22 @@ FILES = [
 # 进包的文档（docs/ 太大，只挑对外的那几份）
 DOCS = ["AGENT接口.md"]
 
+# ★ P0-5（2026-10-23）：install.ps1 第 6 步**直接调用**的两个脚本必须随包发 ——
+#   守护_mcp_http.py（登录自启 + 看门狗 + 令牌对账）与 自检_mcp_http.py（六项自检）。
+#   缺件后果（体检报告 H3）：装完必然红「找不到守护脚本」⇒ MCP(HTTP) 不开机自启、
+#   令牌两边不对账 ⇒ 「装完就能用」在**发布件**上不成立。
+#   ★ 只放行这两个 —— install.ps1 真正取的就是这两个；
+#     **不把整个 tools/ 塞进包**（tools/ 下 100+ 个脚本绝大多数是开发期一次性脚本，
+#     还夹着本机工作笔记与私货；全量进包等于把开发资产发到公开仓）。
+#   ★ 这两个文件名都**不以 _ 开头** ⇒ 不会被 guard() 的「_ 开头 = 一次性脚本」规则误伤，
+#     所以**不需要**像 _session.py 那样再登记进 KEEP_NAMES（KEEP_NAMES 按文件名匹配）。
+#   ★ 落包位置 = app\tools\…（install.ps1 第 3 步把包内容整体搬进 $AppDir）
+#     ⇒ 装完落在 %LOCALAPPDATA%\AgentCtl\app\tools\。
+TOOLS_FILES = [
+    "tools/守护_mcp_http.py",
+    "tools/自检_mcp_http.py",
+]
+
 ALWAYS_EXCLUDE_DIRS = {
     "__pycache__", ".git", "work", "dist", "build",
     ".pytest_cache", ".mypy_cache", "_auth", "_digest",
@@ -182,6 +198,71 @@ def add_dir(z: zipfile.ZipFile, src: Path, arc: str, st: dict, keep_private: boo
         st["bytes"] += len(data)
 
 
+def add_shipped_tools(z: zipfile.ZipFile, st: dict) -> None:
+    """把 install.ps1 真正要用的 tools 脚本放进包（逐个过隐私闸门）。
+
+    ★ 为什么单独一个闸门而不是并进 FILES：FILES 里是 README/LICENSE 这类
+      **人写的对外文本**，给它们加隐私扫描会与「脱敏」那条线（另一条线在改 README）
+      撞在一起 ⇒ 这里只对**机器读的随包脚本**扫，命中就中止发包。
+    """
+    for rel in TOOLS_FILES:
+        p = ROOT / rel
+        if not p.is_file():
+            raise SystemExit("[X] 发布件需要的文件不存在：%s（装完会缺件）" % rel)
+        data = p.read_bytes()
+        txt = data.decode("utf-8", "replace")
+        bad = []
+        if PAT_MOBILE.search(txt):
+            bad.append("手机号")
+        if PAT_IDCARD.search(txt):
+            bad.append("身份证号")
+        if PAT_SECRET_ASSIGN.search(txt):
+            bad.append("密钥赋值")
+        if bad:
+            raise SystemExit("[X] 隐私闸门拦下（不发）：%s —— %s" % (rel, "、".join(bad)))
+        z.writestr("app/" + rel, data)
+        st["files"] += 1
+        st["bytes"] += len(data)
+
+
+def read_version() -> tuple[str | None, str]:
+    """版本号**单一真源** = 产品代码里的 ``__version__``（src/agentctl/__init__.py）。
+
+    ★ 为什么是它：它是**运行时真正对外报出去的那个版本**
+      （docs\\AGENT接口.md 的 status.version 与它同源），不是文档里手写的字符串。
+    ★ 为什么不在这里 import agentctl 取：import 会牵进 core 的依赖链（win32/uia…），
+      打包机上不一定装得齐 ⇒ 只用正则读那一行常量。
+    ★ 回退顺序（老取法不破坏）：① __version__ → ② pyproject.toml 的静态 version
+      → ③ README 的「版本 x.y.z」正则（2026-10-12 起的老取法，仍留着）。
+    ★ pyproject.toml 走 ``dynamic = ["version"]`` 引用同一个常量 ⇒ 仓里**只有一份数字**。
+    """
+    # ① 产品代码的 __version__
+    try:
+        txt = (ROOT / "src" / "agentctl" / "__init__.py").read_text(encoding="utf-8")
+        m = re.search(r"""^__version__\s*=\s*['"]([^'"]+)['"]""", txt, re.M)
+        if m:
+            return m.group(1), "src/agentctl/__init__.py 的 __version__"
+    except OSError:
+        pass
+    # ② pyproject.toml 的静态 version（若有人把它写成写死的数字）
+    try:
+        txt = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+        m = re.search(r"""^version\s*=\s*['"]([^'"]+)['"]""", txt, re.M)
+        if m:
+            return m.group(1), "pyproject.toml 的 version"
+    except OSError:
+        pass
+    # ③ README 正则（老取法）
+    try:
+        txt = (ROOT / "README.md").read_text(encoding="utf-8")
+        m = re.search(r"版本\s*([0-9]+\.[0-9]+\.[0-9]+)", txt)
+        if m:
+            return m.group(1), "README.md 的「版本 x.y.z」"
+    except OSError:
+        pass
+    return None, "（没找到）"
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default=str(ROOT / "dist" / "agentctl.zip"))
@@ -264,6 +345,9 @@ def main() -> int:
             st["files"] += 1
             st["bytes"] += len(data)
 
+        # ★ P0-5：install.ps1 第 6 步要用的守护 / 自检脚本（只放行 TOOLS_FILES 那两个）
+        add_shipped_tools(z, st)
+
         # legacy_tools：控制链路的底座（窗口枚举/键鼠注入/OCR 都在里面）
         if not legacy_src.is_dir():
             raise SystemExit("[X] 找不到 legacy 脚本源目录：%s" % legacy_src)
@@ -320,21 +404,20 @@ def main() -> int:
     # ★2026-10-12 改：原来写死 "git tag v1.2.0 && gh release create …" ——
     #   仓库在 **Gitee**（gh 用不上），而且 v1.2.0 是手写的旧版本号，改一次就过期。
     #   现在版本号从 README 现读，发布口径按 Gitee 写，并把「仓库不公开=别人装不上」顶出来。
-    _v = None
-    try:
-        _m = re.search(r"版本\s*([0-9]+\.[0-9]+\.[0-9]+)",
-                       (ROOT / "README.md").read_text(encoding="utf-8"))
-        if _m:
-            _v = _m.group(1)
-    except Exception:
-        pass
+    # ★2026-10-23 改（H5）：版本号**不再从 README 读** —— README 上那个正则实测取不到值，
+    #   而 README 是「另一个窗口在写」的文件 ⇒ 改为读**单一真源**（产品代码的 __version__），
+    #   README 正则退成第三级回退（老取法保留，不破坏）。
+    _v, _v_src = read_version()
     print()
     print("发布（仓库在 Gitee，不是 GitHub；gh 用不上）：")
     if _v:
+        print("  版本号：%s（来源：%s）" % (_v, _v_src))
         print("  git tag v%s && git push origin v%s" % (_v, _v))
         print("  然后在 Gitee 仓库页 → 发行版/Release 新建，把 dist/agentctl.zip 附上")
     else:
-        print("  先在 README 里标明版本号，再打 tag；然后在 Gitee 仓库页建 Release 并附上本 zip")
+        print("  没读到版本号（__version__ / pyproject / README 三处都没有）")
+        print("  先在 src/agentctl/__init__.py 的 __version__ 标明版本号，再打 tag；"
+              "然后在 Gitee 仓库页建 Release 并附上本 zip")
     print("  ★ 仓库若仍是私有，别人 `irm` 装不上（匿名请求会拿到 403）—— 公开前别对外发安装命令")
     return 0
 

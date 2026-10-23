@@ -23,7 +23,15 @@ TARGET = ROOT / "legacy_tools"
 
 PAT_PATH = re.compile(r"[A-Z]:\\[A-Za-z0-9_\\.一-鿿-]+|Users\\[^\\]+|dsh-viewer-plugin|dsh-viewer")
 PAT_NAME = re.compile(r"用户|豆包|WorkBuddy|WorkBuddy|TRAE|trae|dsh\b")
-PAT_WECHAT = re.compile(r"1323779\d{4}|微信|weixin")
+# ★ 2026-10-23 脱敏（开源 P0-1 / H1）：这里原来写的是**某个真实手机号的前 7 位**字面量
+#   （形如「7 位前缀 + \d{4}」）—— 「扫隐私的工具自己带着隐私」，仓库一公开就等于交出一个真实号码。
+#   现在改成**形态级**判据：任何 11 位、以 1[3-9] 开头的中国大陆手机号都算命中。
+#   ★ 等价性（检测能力不被削弱）：旧正则命中的那**一个**具体号码，本身就是 1[3-9] 开头的 11 位数
+#     ⇒ 新正则的命中集合 ⊇ 旧的（旧 ⊂ 新），是**超集** ⇒ 原来能查出来的，现在一定能查出来。
+#   ★ 为什么**不加** (?<!\d) / (?!\d) 前后哨兵：加了就会漏掉「嵌在更长数字串中间」的那种旧命中形态
+#     （旧正则那种位置本来就会命中）⇒ 那才是真削弱。所以这里刻意不加哨兵。
+#   ★ 新写法不含任何真实号码前缀，也拼不回任何一个具体号码。
+PAT_WECHAT = re.compile(r"1[3-9]\d{9}|微信|weixin")
 
 rows: list[tuple[str, str, str]] = []
 for p in sorted(TARGET.rglob("*")):
