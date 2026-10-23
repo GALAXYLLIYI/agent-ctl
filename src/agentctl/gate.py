@@ -26,13 +26,17 @@ r"""gate.py —— AgentCtl 的安全内核：闸门（原子）＋ 急停 ＋ �
        （读闸、放行、刹车、--status CLI）。**它随包发、装在别人机器上，不能反过来依赖 src\。**
      · 两份的**跨进程锁唯一定义处都是 `gate_lock.py`**（D18），存储也都是 `_auth\auth_pass.json`，
        所以「用户的授权」只有一份账。
-   ⚠ **已知分歧（未修，待 DSH 裁）**：两份的 AUTHDIR 解析方式**不同** ——
-     本文件 L379 `AUTHDIR = HOME/_auth`（HOME 走 `_resolve_home()` 四层查找：env / meipass /
-     指针 / 源码上溯）；老线 L43 `AUTHDIR = HERE/_auth`（HERE = gate.py 所在目录）。
-     两者**同处一个 legacy_tools 目录时相等**，一旦新线解析到别的 home（env 层或指针层指定了
-     另一份），就会读**两份不同的 auth_pass.json** ⇒ 判档口径当场分裂成两处。
-     急停不受影响：两份的 BRAKE_FLAG 都走 `AGENTCTL_APP_DIR`，恒同源。
-     要修的话改本文件的 HOME 解析或老线的 AUTHDIR，**不能各改一半**。
+   ✔ **已收编（S2 · 2026-10-23）**：两份的 AUTHDIR 解析方式**曾经**不同 ——
+     本文件原为 `AUTHDIR = HOME/_auth`（HOME 走 `_resolve_home()` 四层查找：env / meipass /
+     指针 / 源码上溯）、老线原为 `AUTHDIR = HERE/_auth`（HERE = gate.py 所在目录）、
+     签发方原为写死 `BASE/_auth` ⇒ **三方各解析各的**，`AGENTCTL_AUTHDIR` 只覆盖其中 1/3
+     （工单 §8.3 实测）。
+     ⇒ 现已收编为**单一解析**：`agentctl\authdir.py` 是规则正文的**唯一**定义处，
+     本文件 / 老线 gate.py / 签发方 auth_popup.py **三方全部走它**
+     （老线那侧由 `gen_legacy` 把同一个文件**生成**到 legacy 目录 ⇒ 仍是**一份**规则，
+     台账 + CHK-A 照常盯它）。
+     口径不变的部分：急停（两份的 BRAKE_FLAG 都走 `AGENTCTL_APP_DIR`，恒同源）、
+     `HOME`（它管的是「老脚本在哪」，不是「账本在哪」——**一个字没动**）。
 """
 from __future__ import annotations
 
@@ -392,12 +396,35 @@ def require_home() -> str:
         % (HOME, _LEGACY_GATE_NAME, "、".join(rep["missing"]),
            rep["size"], rep["sha256_16"] or "", _LEGACY_GATE_NAME, _rejected_hint()))
 
-AUTHDIR = os.path.join(HOME, "_auth") if HOME else None
-PASSFILE = os.path.join(AUTHDIR, "auth_pass.json") if AUTHDIR else None
-LOCKFILE = os.path.join(AUTHDIR, "gate.lock") if AUTHDIR else None
-LEASE_DB = os.path.join(AUTHDIR, "lease.json") if AUTHDIR else None
-CAPTURE_DB = os.path.join(AUTHDIR, "capture.json") if AUTHDIR else None
-LOG = os.path.join(AUTHDIR, "gate_agentctl.log") if AUTHDIR else None
+# ★ S2（2026-10-23）：AUTHDIR 收编为**单一解析**。
+#   规则正文在 `agentctl\authdir.py`（**唯一**定义处）：AGENTCTL_AUTHDIR 非空 ⇒ 用它（绝对化）；
+#   否则默认 `%LOCALAPPDATA%\AgentCtl\_auth`（与 BRAKE_FLAG 同一个 _APP_DIR）。
+#   改前这里是 `HOME/_auth`（HOME 走 `_resolve_home()` 四层）⇒ **不认** AGENTCTL_AUTHDIR
+#   ⇒ 与老线闸门、签发方**三方各读各的**（工单 §8.3 实测：env 覆盖只覆盖 1/3）。
+#   ⇒ 现在三方**同一本账**（判据 tests\_authdir一致_判据.py 守着这条）。
+#   ★ `HOME` / `_resolve_home()` **一个字没动** —— 它管的是「老脚本在哪」，不是「账本在哪」。
+#   ★ 本模块**恒有值**（不再有 None 那条路）⇒ 下面几个 `if AUTHDIR else None` 的兜底全部退场。
+try:                                    # 正常路径：作为 agentctl 包的子模块被 import
+    from agentctl.authdir import resolve as _resolve_authdir
+except ImportError:                    # pragma: no cover - 被**按文件路径** import 时的兜底
+    # 判据（tests\_默认关闭_判据.py 等）会用 importlib 按**路径**加载本文件 ⇒
+    # 此时它不在 `agentctl` 包里 ⇒ `from agentctl.authdir import …` 必然失败。
+    # ⇒ 退回「按同目录的兄弟文件加载」（与 authstate.py 加载 gate_lock.py 同一手法）。
+    import importlib.util as _ilu
+    _authdir_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "authdir.py")
+    _spec = _ilu.spec_from_file_location("agentctl._authdir_shared", _authdir_path)
+    if _spec is None or _spec.loader is None:
+        raise ImportError("找不到共享规则模块 authdir.py：%s" % _authdir_path)
+    _mod = _ilu.module_from_spec(_spec)
+    _spec.loader.exec_module(_mod)
+    _resolve_authdir = _mod.resolve
+
+AUTHDIR = _resolve_authdir()
+PASSFILE = os.path.join(AUTHDIR, "auth_pass.json")
+LOCKFILE = os.path.join(AUTHDIR, "gate.lock")
+LEASE_DB = os.path.join(AUTHDIR, "lease.json")
+CAPTURE_DB = os.path.join(AUTHDIR, "capture.json")
+LOG = os.path.join(AUTHDIR, "gate_agentctl.log")
 
 # ── 急停状态：文件挪出桌面 ──────────────────────────────────
 # 为什么挪：用户 2026-10-04「桌面那些急停文件就不用了」。
@@ -702,6 +729,8 @@ def brake_engaged() -> bool:
 #   而 AUTHDIR 为 None 恰恰就是「legacy 没打 T7 补丁」那条路 ——
 #   闸门在自己该报错的场景里导不进来。改用 T10 的规范根 _APP_DIR（行 405），
 #   与 BRAKE_FLAG（行 407）同一口径。纯路径兜底，不碰任何判定。
+# ★ S2（2026-10-23）：AUTHDIR 现在**恒为绝对路径**（agentctl\authdir.py）⇒ 这条兜底
+#   **不再可能触发**（None 那条路没了）⇒ 表达式保留只为不改行为。
 BRAKELOG = os.path.join(AUTHDIR or _APP_DIR, "brake.log")
 
 

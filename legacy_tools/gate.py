@@ -12,9 +12,11 @@
 用法（脚本里）：
     import gate
     gate.require(gate.A, "读控件树")      # 不过就抛 GateDenied，脚本不许继续
-★ 已知分歧（待 DSH 裁）——**两本账**：本模块按 `HERE/_auth` 找通行证，而随包运行时（dsh-viewer-plugin\tools）实际落在 `%LOCALAPPDATA%\AgentCtl\_auth`。
-  两边各读各的 ⇒ 可能出现「签了证但这边说没有」。DSH 建议：以**运行时目录**为准，
-  源码侧改成读环境变量 `AGENTCTL_AUTHDIR`（默认回落 HERE/_auth），修完这条注释即可删。
+★ **已收编（S2 · 2026-10-23）**—— formerly「两本账」：本模块原按 `HERE/_auth` 找通行证，
+  签发方原写死 `BASE/_auth`，新线原走 `HOME/_auth` ⇒ **三方各读各的**。
+  现已收编为**单一解析**：`authdir.py`（规则正文的唯一定义处，由 gen_legacy **生成**到本目录）
+  ⇒ 三方**同一本账**；`AGENTCTL_AUTHDIR` 不再只覆盖 1/3，而是**三方通吃**。
+  判据：tests\_authdir一致_判据.py（J1）+ tests\_authdir注入必红_判据.py（J2）。
 ★ 本文件在发布包里是**随包执行层**（被 MCP 调用），仓库里是**真源**；改真源后必须刷新运行时并留 md5。
 
 用法（命令行）：
@@ -45,9 +47,27 @@ except Exception:
     pass
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-# ★ 2026-10-19 修「两本账」：允许由环境变量指定同一本账（core 派 act.py 时会注入）。
-#   不指定时保持老行为（HERE/_auth），所以单独跑 legacy 脚本的语义没变。
-AUTHDIR = os.environ.get("AGENTCTL_AUTHDIR") or os.path.join(HERE, "_auth")
+# ★ S2（2026-10-23）：AUTHDIR 收编为**单一解析** —— 规则正文的**唯一**定义处是
+#   `src\agentctl\authdir.py`；本文件只 import、**不复制**（与 D18 把锁的定义抽到
+#   gate_lock.py 同一个纪律：定义一处，引用它）。
+#   规则（顺序固定）：
+#     1) `AGENTCTL_AUTHDIR` 非空 ⇒ 用它（绝对化）；
+#     2) 否则默认 `%LOCALAPPDATA%\AgentCtl\_auth`（与 BRAKE_FLAG 同一个 _APP_DIR）。
+#   改前这里是 `env or HERE/_auth`（**认** env），而签发方 auth_popup.py 写死
+#   `BASE/_auth`（**不认** env）、新线走 `HOME/_auth`（**不认** env）
+#   ⇒ env 覆盖只覆盖三方中的 1/3（工单 §8.3 实测）⇒「签了证这边说没有」随时复现。
+#   ★ 本文件是「随包执行层」，**不能**反过来依赖 `src\` ⇒ `authdir.py` 由
+#     `tools\gen_legacy.py` **生成**到本目录与 legacy_tools\ 根下（生成物，不是人手写的
+#     第二份）⇒ 两边永远逐字节一致，台账 + CHK-A 照常盯它（P8 的机器盯防）。
+#   ⇒ 改这一处之前先看 src\agentctl\authdir.py；改完必须跑 tests\_authdir一致_判据.py。
+# ★ 伴生模块的可达性：authdir.py 与本文件**同目录** ⇒ 先把它加进 sys.path 再 import
+#   （与 coord.py「自插老线路径：包内要指向自己」同一个手法）——
+#   否则「按文件路径 import 本文件」的场景（判据、工具）会因为**当前工作目录**不同而找不到它。
+_HERE_DIR = os.path.dirname(os.path.abspath(__file__))
+if _HERE_DIR not in sys.path:
+    sys.path.insert(0, _HERE_DIR)
+import authdir  # noqa: E402  （同目录的**生成件**：authdir.py；缺它 ⇒ 本模块导不进来）
+AUTHDIR = authdir.resolve()
 PASSFILE = os.path.join(AUTHDIR, "auth_pass.json")
 GATELOG = os.path.join(AUTHDIR, "gate.log")
 # ★ 跨进程锁文件：路径由共享模块 gate_lock 统一给出（`<AUTHDIR>/gate.lock`）。
@@ -73,6 +93,9 @@ IS_WIN = os.name == "nt"
 #   它 spawn 老脚本时把 AGENTCTL_BRAKE_FLAG 塞进子进程环境，
 #   于是不管老脚本解析到哪个 gate，读的都是同一个文件。
 # ★ T10 治本（2026-10-09）：与老线 brake.py / legacy_tools / 新线 gate 四方口径一致。
+# ★ S2（2026-10-23）：这段 `_APP_DIR` 与 `authdir.app_dir()` 是**同一个口径**
+#   （同一个公式）—— 账本默认位置由 authdir.py 给，急停由这里给。
+#   ★ 改一边就要改另一边（判据 J1 的第 ③ 档用例就是查这个：两边都认 AGENTCTL_APP_DIR）。
 _APP_DIR = os.environ.get("AGENTCTL_APP_DIR") or os.path.join(
     os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "AgentCtl")
 BRAKE_FLAG = os.environ.get("AGENTCTL_BRAKE_FLAG") or os.path.join(_APP_DIR, "_急停.flag")

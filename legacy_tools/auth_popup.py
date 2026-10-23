@@ -74,7 +74,13 @@ from gate_lock import save_json  # noqa: E402
 import gate  # noqa: E402
 
 BASE = os.path.dirname(os.path.abspath(__file__))
-AUTHDIR = os.path.join(BASE, "_auth")
+# ★ S2（2026-10-23）：签发方**不再写死** `BASE/_auth` —— 与两侧闸门走**同一本账**。
+#   改前：三方里只有老线闸门认 `AGENTCTL_AUTHDIR`（签发方写死、新线走 `HOME/_auth`）
+#         ⇒ env 覆盖只覆盖 1/3 ⇒「签了证这边说没有」随时复现（工单 §8.3 实测）。
+#   改后：这里**只引用、不复制**闸门那一份定义（auth_popup 本来就 import gate 取档位常量）
+#         ⇒ 老线树里**只有一份**规则正文（`authdir.py`，由 gen_legacy 生成）。
+#   ★ BASE 保留（本文件还有别的用途）；`_auth` 这个字面量在本文件里**一处都不该再有**。
+AUTHDIR = gate.AUTHDIR
 KEYFILE = os.path.join(AUTHDIR, "auth_key.json")
 PASSFILE = os.path.join(AUTHDIR, "auth_pass.json")
 LOCKFILE = lock_path(AUTHDIR)
