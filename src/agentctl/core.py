@@ -2632,6 +2632,16 @@ ACT_DIFF_STEP = framecache.DIFF_STEP
 ACT_DIFF_IGNORE_DEFAULT = {"caret_px": framecache.DIFF_CARET_PX,
                            "min_area_px": framecache.DIFF_MIN_AREA}
 
+# ★ M20（甲案 · core 侧接线）：「加长观测」的预算（毫秒）。
+#   ★ **不新增数字**：直接引用 `framecache.WAIT_BUDGET_MS`（既有的「变化即停」默认预算，
+#     `framecache.py:107` = 300）⇒ act.py / framecache.py / gate.py / 契约
+#     **一个预算/阈值常量都没动**（本单只**引用**既有常量）。
+#   ★ 为什么 300ms 够（两条入口都覆盖）：
+#     ① act 侧等满 `POLL_BUDGET_MS=800`（`act.py:1115`）⇒ 观测窗口 800 → ~1,130ms；
+#     ② core 回落 `wait_change(300)` 那条路（`core.py:2957-2959`）⇒ 300 → ~630ms
+#     ⇒ 覆盖「点了之后 200~500ms 才响应」这一段（主控核稿 §七 的慢应用场景）。
+ACT_EXT_OBSERVE_MS = framecache.WAIT_BUDGET_MS   # = 300
+
 # ★ M6-①（2026-10-22）：**帧复用总开关**。
 #   False ⇒ 一次观测都不复用（退回改前行为：每步都重扫、每次都现拍）。
 #   判据 `tests\_P2_帧复用_判据.py --inject` 会把它打成 False ⇒ 判据必须变红。
@@ -2971,6 +2981,79 @@ def _act_after(hwnd: int, before, effect=None, t_spawn=None):
     return _img
 
 
+def _act_extend_observe(hwnd: int, before, after, df: dict, win_off=None,
+                        ignore=None, degraded: bool = False,
+                        budget_ms: int = ACT_EXT_OBSERVE_MS) -> dict:
+    """★ M20（甲案）· **加长观测**：判「确认没变」之前，core 用**自己的尺子**再看一会儿。
+
+    ★ 触发条件（**收窄到一格**）：`df.changed is False`（末帧==基线 ⇒ core 会判「确认没变」）
+      **且** 本次观测**没测出退化**（degraded=False）。
+      · `changed is True`（末帧≠基线 ⇒ 成功路）⇒ **不进来** ⇒ **零额外等待**；
+      · `changed is None`（没测出来）⇒ **不进来** ⇒ 保持 code=5；
+      · 退化 ⇒ **不进来** ⇒ 保持 code=5。
+    ★ 期间测到变化 ⇒ 返回新的 (after, df)（changed=True）⇒ 上层照常判成功（code=0）。
+      一直不变 / 抓不到帧 / 口径对不上 ⇒ **原样返回** ⇒ 仍判 code=8
+      （「确认没变」语义一点没丢，**绝不**变成「一律 code=5」）。
+    ★ 尺子**同一把**：`framecache.wait_change` 用的是 `framecache.diff_images`
+      （= `_act_diff_of` 的算法本体，`framecache.py:482`）⇒ 不会出现「core 说变了、act 说没变」。
+      滞回 `HYSTERESIS=2`（**连续 2 帧**超阈才报变，`framecache.py:80` / `:632-662`）
+      ⇒ **闪烁永不被判成功**（抗假阳性红线守住）。
+    ★ 返回 {"after":…, "df":…, "观测":{…}}；`观测["做了"]` 为 False ⇒
+      调用方**一个字段都不加**给回执 ⇒ 未触发时输出**逐字节不变**。
+    """
+    _obs = {"做了": False, "原因": "", "耗时ms": 0.0, "轮次": 0, "结果": None}
+    _out = {"after": after, "df": df, "观测": _obs}
+    if degraded:
+        _obs["原因"] = "画面退化 ⇒ 没测出来 ⇒ 不加长观测（保持 code=5）"
+        return _out
+    if (df or {}).get("changed") is not False:
+        _obs["原因"] = "末帧≠基线（或没测出来）⇒ 不加长观测（零额外等待）"
+        return _out
+    if before is None or after is None:
+        _obs["原因"] = "没有基线帧/末帧 ⇒ 无从比对 ⇒ 不加长观测"
+        return _out
+    _ig = ignore if isinstance(ignore, dict) else ACT_DIFF_IGNORE_DEFAULT
+    try:
+        r = framecache.wait_change(int(hwnd), before,
+                                   budget_ms=int(budget_ms),
+                                   poll_ms=framecache.WAIT_POLL_MS,
+                                   caret_px=int(_ig.get("caret_px", 8) or 0),
+                                   min_area_px=int(_ig.get("min_area_px", 24) or 0))
+    except Exception as e:
+        _obs["原因"] = "加长观测异常：%s: %s" % (type(e).__name__, e)
+        return _out
+    _obs["做了"] = True
+    _obs["耗时ms"] = float(r.get("耗时ms") or 0.0)
+    _obs["轮次"] = int(r.get("轮次") or 0)
+    _obs["结果"] = r.get("changed")
+    _obs["说明"] = r.get("说明") or ""
+    if r.get("changed") is not True:
+        _obs["原因"] = "窗口内没有测到变化 ⇒ 判词不动（仍 code=8「确认没变」）"
+        return _out
+    _img = r.get("图")
+    if _img is None:
+        _obs["原因"] = "测到变化但没拿到帧 ⇒ 判词不动"
+        return _out
+    # ★ 口径守卫：尺寸不同 ⇒ `diff_images` 会**直接判 changed=True**
+    #   （`framecache.py:515-519`「动作前后画面尺寸变了」）⇒ 那是**假成功** ⇒ 这里不升级。
+    try:
+        if before.size != _img.size:
+            _obs["原因"] = ("新帧与基线口径/尺寸不同（%s vs %s）⇒ 不升级"
+                            % (before.size, _img.size))
+            return _out
+    except Exception:
+        _obs["原因"] = "取不到基线尺寸 ⇒ 不升级"
+        return _out
+    _new_df = _act_diff_of(before, _img, win_off, ignore)
+    if (_new_df or {}).get("changed") is not True:
+        _obs["原因"] = "复核判差未确认变化 ⇒ 判词不动"
+        return _out
+    _out["after"] = _img
+    _out["df"] = _new_df
+    _obs["原因"] = "窗口内测到变化 ⇒ 改判成功（code=0）"
+    return _out
+
+
 def _act_diff_store(fid, before, after, diff) -> dict:
     """before/after/diff 落 work\\_actions\\<fid>\\；只留最近 ACT_DIFF_KEEP 组。
 
@@ -3303,6 +3386,14 @@ def _act(action: str, args: dict, argv: list[str], scope: str = "B") -> dict:
         _after = _act_after(hwnd, _before, _eff_info, t_spawn)
         _rm_snapdir(_snapdir)          # ★ 返工②：帧已进内存 ⇒ 临时目录立刻删
         _df = _act_diff_of(_before, _after, _before_off, _diff_ignore_cfg(args))
+        # ★★ M20（甲案 · core 侧接线）：**判「确认没变」之前，多看一眼**。
+        #   只有「末帧==基线」（`_df.changed is False`）且**没测出退化**这一格才进来；
+        #   成功路（changed=True）与没测出来（changed=None）**零额外等待**。
+        #   期间测到变化 ⇒ 换帧、换判差 ⇒ 照常判成功；一直不变 ⇒ 仍 code=8。
+        _obs = _act_extend_observe(hwnd, _before, _after, _df, _before_off,
+                                   _diff_ignore_cfg(args),
+                                   degraded=bool(_eff_info and _eff_info.get("degraded") is True))
+        _after, _df = _obs["after"], _obs["df"]
         _fid = "%s_%d" % (action, time.time_ns())
         # ★ 2026-10-20 修：这里原来写的是 `_ev_after`（**没有这个变量**）
         #   ⇒ NameError ⇒ 非 diff 路径（绝大多数动作）的 A2 证据整段炸掉。
@@ -3333,6 +3424,8 @@ def _act(action: str, args: dict, argv: list[str], scope: str = "B") -> dict:
                                         "首变ms": (round(float((_eff_info or {}).get("first_change_ms")), 1)
                                                    if (_eff_info or {}).get("first_change_ms") is not None
                                                    else None)}}
+        if _obs["观测"].get("做了"):
+            r["data"] = {**(r.get("data") or {}), "加长观测": _obs["观测"]}
     if _need_diff:
         _after = _act_after(hwnd, _before, _eff_info, t_spawn)
         _rm_snapdir(_snapdir)          # ★ 返工②：帧已进内存 ⇒ 临时目录立刻删
@@ -3345,6 +3438,12 @@ def _act(action: str, args: dict, argv: list[str], scope: str = "B") -> dict:
                             "**没测出来**，不等于「画面没变化」⇒ 本次**不报成功**。")
             r.setdefault("data", {})["退化"] = True
         _df = _act_diff_of(_before, _after, _before_off, _diff_ignore_cfg(args))
+        # ★★ M20（甲案 · core 侧接线）：**判「确认没变」之前，多看一眼**（口径同分支 A）。
+        #   退化那一格在 `core.py:3341-3346` 已经落 code=5 ⇒ 这里 `degraded=True` 时**不进**观测。
+        _obs = _act_extend_observe(hwnd, _before, _after, _df, _before_off,
+                                   _diff_ignore_cfg(args),
+                                   degraded=bool(_eff_info and _eff_info.get("degraded") is True))
+        _after, _df = _obs["after"], _obs["df"]
         # 没带 frame_id 的（focus 模式）用作用名+时间戳当目录名 —— 同一次动作仍落在同一个目录里。
         _fid = args.get("frame_id") or ("%s_%d" % (action, time.time_ns()))
         _st = _act_diff_store(_fid, _before, _after, _df)
@@ -3367,6 +3466,8 @@ def _act(action: str, args: dict, argv: list[str], scope: str = "B") -> dict:
                                         "首变ms": (round(float((_eff_info or {}).get("first_change_ms")), 1)
                                                    if (_eff_info or {}).get("first_change_ms") is not None
                                                    else None)}}
+        if _obs["观测"].get("做了"):
+            r["data"] = {**(r.get("data") or {}), "加长观测": _obs["观测"]}
 
         # ★ 契约 §二 · mode=focus 的第二种失败：「发了但画面没变 ⇒ code=8」。
         #   ⛔ **绝不当成功**。因为这一款就是「不要用「动作发出去了」冒充
