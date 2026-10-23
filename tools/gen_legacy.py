@@ -6,7 +6,9 @@ T14 阶段 2。设计要点：
 1. **老线是唯一真源**（`dsh-viewer-plugin\\tools`）。功能一律取老线全量版，
    打包版缺的 T2/T3/T4/T5 整代功能与 targets 检查随之补齐。
 2. **净化只有一类**：把写死的本机绝对路径改成环境变量可注入。
-   实测老线代码行里只有 7 处绝对路径，全部列在 `RULES` 里，逐条精确替换。
+   实测老线代码行里只有 7 处绝对路径：其中 6 处列在 `RULES` 里逐条精确替换；
+   第 7 处（coord.py 的「自插老线路径」）在**真源收进仓内**那轮就被**整行删掉**了
+   ⇒ 它那条规则已撤（理由见 `RULES` 里的注释）⇒ 现在 `RULES` 里 6 条。
    替换不上就**报错退出** —— 静默跳过会让人以为打包干净了。
 3. 阶段 1 裁决为「废」的三段（`_force_foreground` 强抢前台、`approve_target`
    第二套放行账本、auth_popup 文案差异）**不得搬进来**，那等于把老线的
@@ -90,7 +92,54 @@ FILES = ["gate.py", "gate_lock.py", "act.py", "perceive.py", "auth_popup.py", "b
            #   于是必须登记在这里，否则打包时取不到、装出去的那份里没有。
            #   ★ 配套改动（缺一不生效）：core.py::_verify_py() 要加 legacy_tools\ 候选，
            #     因为它们会落在 legacy_tools\ 而不是 tools\。
-           "验动作.py", "闭环.py", "bench.py"]
+           "验动作.py", "闭环.py", "bench.py",
+          # ↓ S2（2026-10-23）**规则正文的唯一源**：AUTHDIR 的解析规则。
+          #   它住在 `src\agentctl\authdir.py`（新线包内），**老线不许再抄一份**
+          #   （工单 §5.2 禁止第二份逻辑拷贝）⇒ 由本生成器**复制**进真源目录与产物目录。
+          #   老线 gate.py / auth_popup.py 只 `import authdir`，不复制规则。
+          #   ★ 必须登记在这里：不登记的话包里缺件 ⇒ 老线两个脚本 import 失败。
+          #   ★ 不带前导下划线 ⇒ pack_dist 的「`_` 开头 = 一次性脚本」过滤不会把它丢掉。
+          "authdir.py"]
+
+# ── S2（2026-10-23）：**规则正文唯一源** → 老线侧的「生成件」──────────────
+# 为什么要这张表：工单 §7.2.1 要「唯一 resolve()」，§5.2 禁止「新增第二份逻辑拷贝」。
+#   ⇒ 规则正文**只写在** `src\agentctl\authdir.py` 一处；老线那侧**不写**，
+#     由本生成器把同一个文件**复制**到 `legacy_tools\_src\`（真源侧）与 `legacy_tools\`
+#     （产物侧）—— 两处都是**生成物**（不是人手写的第二份）⇒ 逐字节相同、永远不漂。
+#   ⇒ 台账 + CHK-A 照常盯它（**被机器盯着的重复不算病** —— P8 的原话与本仓纪律）。
+#   ⇒ 缺它会怎样：老线 gate.py 的 `import authdir` 直接 ImportError ⇒ 老脚本一 import 就死
+#     （与 gate_lock.py 同一个道理：它是**伴生模块**，必须与闸门一起走）。
+RULE_SOURCES = {
+    "authdir.py": os.path.join(ROOT, "src", "agentctl", "authdir.py"),
+}
+
+
+def materialize_rule_sources(src_dir=SRC):
+    """把**规则正文唯一源**复制进真源目录（`legacy_tools\\_src\\`）。
+
+    返回 (已复制的文件列表, 缺件列表)。
+    ★ 复制是**逐字节**的（不做净化：authdir.py 里没有本机绝对路径，不需要）。
+    ★ 幂等：内容一样就不动它（免得每次生成都改 mtime，干扰 diff 观感）。
+    """
+    done, missing = [], []
+    for name, rule_path in RULE_SOURCES.items():
+        if not os.path.isfile(rule_path):
+            missing.append("%s：规则正文唯一源不在（%s）" % (name, rule_path))
+            continue
+        with open(rule_path, "rb") as f:
+            data = f.read()
+        dst = os.path.join(src_dir, name)
+        old = None
+        if os.path.isfile(dst):
+            with open(dst, "rb") as f:
+                old = f.read()
+        if old != data:
+            if os.path.exists(dst):
+                clear_readonly(dst)
+            with open(dst, "wb") as f:
+                f.write(data)
+        done.append(name)
+    return done, missing
 
 # ── 净化规则：逐条精确替换，不做模糊匹配 ───────────────────────────────
 # 每条 = (文件名, 旧文本, 新文本, 为什么)
@@ -124,10 +173,30 @@ RULES = [
      '"--user-data-dir=' + _WS2 + r'\\_edge_cdp"',
      '"--user-data-dir=" + os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "AgentCtl", "_edge_cdp")',
      "浏览器 profile：不写死本机路径"),
-    ("coord.py",
-     'import sys; sys.path.insert(0, r"' + _WS1 + r'\dsh-viewer-plugin\tools")',
-     'import sys, os; sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))',
-     "自插老线路径：包内要指向自己"),
+    # ★ 2026-10-23（发版前置 · A 单）**撤掉 coord.py 那条规则**。摆明理由，免得后人再提：
+    #   ① 它要匹配的老形态 `import sys; sys.path.insert(0, r"<工作区>\dsh-viewer-plugin\tools")`
+    #      **从来就不在仓内真源里**：`legacy_tools\_src\coord.py` 是 7b7022f（2026-10-18 真源收进仓内）
+    #      **新建**的，新建时就已经脱敏（那单的提交说明写着「`_src\` 7 处本机绝对路径脱敏」）。
+    #      脱敏时 coord.py 的那行是**整行删掉**，不是改写成便携形态。
+    #      ⇒ 规则的「针」永远扎不到东西 ⇒ 它**从来没做过任何净化，只贡献阻塞**：
+    #      gen_legacy 对未命中 fail-closed（rc=1）⇒ pack_dist 直接「不发包」⇒ 发版卡死。
+    #   ② 其余 6 条走的是框架的「已是净化态（跳过）」通道（源里已是便携形态，`new` 的最后一行
+    #      在源里找得到）；coord.py 没有便携形态可找（它压根不插路径了）
+    #      ⇒ 框架认不出「比便携形态更彻底的净化」⇒ 只报未命中。
+    #   ③ 「包内要指向自己」这个诉求**现在由调用方保证**，不靠模块自己插路径：
+    #      `src\agentctl\core.py` 自己是先 `sys.path.insert(0, LEGACY)` 才 `import coord`
+    #      （LEGACY = gate.HOME = 包的 legacy 目录）⇒ 模块再插一次是多余的。
+    #   ④ ★ **为什么这不是「把检查绕过去」**（怕被当成拆闸门）：
+    #      - 删的是**一条从未生效过的替换规则**，不是一道闸门；闸门还在，而且更宽：
+    #        `tools\scan_repo.py`（pre-commit，扫暂存区，形态匹配盘符路径与 `dsh-viewer-plugin`）
+    #        ＋ `tools\scan_legacy.py`（扫整个 legacy_tools 产物目录，同形态）——
+    #        它们对 coord.py 与对其它 35 个文件**一视同仁**，比「单文件单字面量」更严。
+    #      - 仓内既有先例：`tools\port_legacy.py` 对 perceive/selftest 的同类规则写的就是
+    #        「转换**无对象**了 ⇒ 故删除；防漂移靠全机字面量扫描自测，不靠这里的转换」。
+    #      - 撤规则**不改一个字节的产物**：真源里没有那行 ⇒ 撤规则前后生成的 coord.py 逐字节相同
+    #        （实测 md5 都是 7f92afe2e8b4f37da63a419b5d9da931）。
+    #      ⇒ 留个坑给后人：若哪天 coord.py 真源里又出现**写死的**路径，
+    #      scan_repo / scan_legacy 会当场命中；**不要**靠往 RULES 里加规则来解决。
     ("option_locator.py",
      'r"' + _WS1 + r'\agent-manual\_监控\shots\*_win2754900.png"',
      'os.path.join(os.environ.get("AGENTCTL_SHOTS_DIR", ""), "*_win2754900.png")',
@@ -718,7 +787,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default=os.path.join(ROOT, "dist", "legacy_gen"))
     ap.add_argument("--verify", help="与该目录逐字节对比（自证模式）")
-    ap.add_argument("--dry-run", action="store_true", help="只报告，不落盘")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="只报告，不落盘（★ 例外：规则正文唯一源的**生成件**会落进真源目录"
+                         "—— 它是派生内容，逐字节等于唯一源，且正式生成时本来就要写它）")
     # ↓ D1（G3）：双基线防误改参数
     ap.add_argument("--src", default=SRC, help="真源目录（默认老线真源；沙箱测试可覆盖）")
     ap.add_argument("--ledger", default=LEDGER_DEFAULT,
@@ -771,6 +842,15 @@ def main():
     problems = []
     made = {}
     srchash = {}   # D1：T₀ = 生成时真源的规范化 md5（G3 要求补记的就是这个）
+
+    # ── S2（2026-10-23）：先把**规则正文唯一源**复制进真源目录，再进 FILES 循环 ──
+    #   （老线那侧的 authdir.py 是**生成件**，不是人手写的第二份规则正文）
+    _done, _missing = materialize_rule_sources(src_dir)
+    if _missing:
+        print("[X] 规则正文唯一源缺件：%s" % "；".join(_missing), flush=True)
+        return 1
+    if _done:
+        print("  [规则源] 已把规则正文唯一源复制进真源目录：%s" % "、".join(_done), flush=True)
 
     for f in FILES:
         src = os.path.join(src_dir, f)
@@ -952,6 +1032,11 @@ def main_for_pack(out_dir):
               "|---|---|---:|---|---:|---|"]
     problems = []
     n = 0
+    # ── S2（2026-10-23）：打包路径上同样要先落**规则正文唯一源**的生成件 ──
+    _done, _missing = materialize_rule_sources(SRC)
+    if _missing:
+        print("[X] 规则正文唯一源缺件：%s" % "；".join(_missing), flush=True)
+        return 1
     for f in FILES:
         src = os.path.join(SRC, f)
         if not os.path.exists(src):

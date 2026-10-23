@@ -474,6 +474,13 @@ def describe_icons(img, boxes, dpi=DEFAULT_DPI, size=16,
     ★ 这是**「多一条证据」**：不替代 UIA/OCR，也不单独作为动作依据
       （认错一个图标 = 点错一个按钮）。调用方应把它和 UIA 的名字合起来看。
     """
+    # ★ 2026-10-23（发版前置 · A 单）：本函数用了 np.asarray，但**函数内没有 numpy**
+    #   ⇒ pyflakes 判「undefined name 'np'」（致命类：运行到这行才崩）⇒ 补回。
+    #   补法照**本文件房规**：numpy 一律**函数内 import**（本文件另 9 处都这么写），
+    #   不动模块级依赖口径 —— numpy 早已在 requirements.txt（>=1.24）里，
+    #   本模块的定位就是「纯 numpy + PIL + 系统字体」⇒ **不新增任何依赖**。
+    #   （M18d 的 numpy 轻量化是 act.py 判差那条路径，与本模块无关。）
+    import numpy as np
     tpl = templates if templates is not None else build_templates(dpi=dpi, size=size)
     out = []
     for (x, y, w, h) in boxes:
