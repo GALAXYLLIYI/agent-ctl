@@ -41,7 +41,7 @@
 |---|---|
 | 真源 | `legacy_tools\_src\act.py` |
 | 产物 | `legacy_tools\act.py` |
-| live | `<工作区>\Documents\dsh-viewer-plugin\tools\act.py` |
+| live | `<文档目录>\dsh-viewer-plugin\tools\act.py` |
 
 **收尾必须核对三处 MD5 全等**，并在回执里报三个 MD5 值。当前三处全等 MD5 = `81b45b7b8afc42aef9d71cae18a80be1`（**改完后必然变**，报新值并自证三处相等）。
 

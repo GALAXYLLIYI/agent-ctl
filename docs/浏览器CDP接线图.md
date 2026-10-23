@@ -236,7 +236,7 @@ legacy_tools\\cdp.py」**。
 
 ## 7. 同一套 CDP 通道怎么开给 Electron 应用（2026-10-20 实测：MiniMax Code）
 
-MiniMax Code（`F:\MiniMax Code\MiniMax Code.exe`，Electron 42.8 / Chromium 148）
+MiniMax Code（`<本机路径>\MiniMax Code\MiniMax Code.exe`，Electron 42.8 / Chromium 148）
 也能用 agentctl 驱动，走的是**同一条 `ctl_browser` 通道**，不用真键鼠。
 
 | 步骤 | 做法 | 踩到的坑 |

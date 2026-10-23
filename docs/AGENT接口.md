@@ -721,7 +721,7 @@ ctl_click    --actor <你> --hwnd <hwnd> \
 
 | 传输 | 配置名 | 地址 | 谁活着 | 典型死法 |
 |---|---|---|---|---|
-| stdio | `agentctl` | `<用户目录>\.codex\mcp\run_agentctl.cmd` | **宿主**（Codex）持有 stdin 管道 | 父进程一断管道，server 收到 EOF 就得退出（MCP 规范也要求退出） |
+| stdio | `agentctl` | `<用户主目录>\.codex\mcp\run_agentctl.cmd` | **宿主**（Codex）持有 stdin 管道 | 父进程一断管道，server 收到 EOF 就得退出（MCP 规范也要求退出） |
 | Streamable HTTP | `agentctl_http` | `http://127.0.0.1:8761/mcp` | **我们自己**（常驻进程） | 进程被杀才死；宿主在不在都不影响 |
 
 ★ **传输层不是授权层**：两种传输走的是同一个 `core.dispatch()`，
@@ -740,7 +740,7 @@ ctl_click    --actor <你> --hwnd <hwnd> \
 
 ### HTTP 入口怎么用
 
-- 常驻服务：`<用户目录>\.codex\mcp\run_mcp_http.cmd`
+- 常驻服务：`<用户主目录>\.codex\mcp\run_mcp_http.cmd`
   （已放进启动文件夹 ⇒ 登录自启；端口被占用时会自动让位，不顶掉已跑的实例）
 - 令牌：`agent-ctl\work\state\token`；Codex 侧用
   `--bearer-token-env-var AGENTCTL_MCP_TOKEN`（用户环境变量已写好）
