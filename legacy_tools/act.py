@@ -3110,7 +3110,17 @@ def do_scroll(hwnd, amount, dry=False, force_wheel=False):
     _fg = ensure_foreground(hwnd, "滚动(滚轮)", dry=dry)
     if _fg:
         return _fg
-    x, y, rr, ok_rect = _center(root)
+    # ★ M20（2026-10-23 · X3）：**root=None 时不许 `_center(None)` 崩掉**（崩溃级缺陷）。
+    #   `_uia` 超时/失败时上面把 root 置 None（注释写「直接走路线 P」），
+    #   但这里**无条件** `_center(root)` ⇒ `ctrl.BoundingRectangle` → AttributeError
+    #   ⇒ 进程 rc=1 ⇒ **路线 P 的前台兜底永远走不到**。
+    #   护栏：root 为 None 时直接用**窗口矩形中心**（与下面 ok_rect=False 的兜底同一口径）；
+    #   **root 正常时的路径一字不改**（仍走 `_center(root)` 的控件矩形中心）。
+    if root is None:
+        r = info["rect"]
+        x, y, rr, ok_rect = (r[0] + r[2]) // 2, (r[1] + r[3]) // 2, r, True
+    else:
+        x, y, rr, ok_rect = _center(root)
     if not ok_rect:                       # 根控件矩形为空时，退回窗口矩形中心
         r = info["rect"]
         x, y = (r[0] + r[2]) // 2, (r[1] + r[3]) // 2
@@ -3119,14 +3129,20 @@ def do_scroll(hwnd, amount, dry=False, force_wheel=False):
         return _tell_next(
             5, f"**坐标类**：滚轮落点 ({x},{y}) 不在窗口矩形 {r} 内", hwnd,
             extra=_dpi_report(hwnd))
-    user32.SetCursorPos(x, y)
-    time.sleep(0.12)
+    # ★ M20（2026-10-23 · X2）：**dry-run 不许移动鼠标光标**（安全级缺陷）。
+    #   改前 `wheel` 被 dry 护住了，`user32.SetCursorPos(x, y)` 却没有
+    #   ⇒ 演练也会把**用户的光标**挪到窗口中心（演练不该动用户的手）。
+    #   护栏：挪光标 + 随后的停顿 + 滚轮**一起**进 `if not dry:`；
+    #   **非 dry 路径一字不改**（挪光标 → 停顿 → 滚轮，顺序与参数照旧）。
     if not dry:
+        user32.SetCursorPos(x, y)
+        time.sleep(0.12)
         # 注意符号：MOUSEEVENTF_WHEEL 的 data **正值 = 向上滚**（远离用户）。
         # 所以"下滚 amount 格"（amount 为负）要发负值 —— 写成 wheel(-120*amount) 会方向反掉，
         # 表现是"数值一点不动"，因为已经在顶了。这个错被判据抓出来过一次。
         wheel(120 * amount)
-    log(f"{'（演练）' if dry else ''}🖱 滚动 [SendInput 滚轮 {amount} 格，光标置于 ({x},{y})] 窗口「{info['title']}」")
+    log(f"{'（演练）' if dry else ''}🖱 滚动 [SendInput 滚轮 {amount} 格，光标置于 ({x},{y})"
+        f"{'（演练：光标未移动）' if dry else ''}] 窗口「{info['title']}」")
     return 0
 
 
@@ -3398,10 +3414,17 @@ def do_type(hwnd, text, dry=False, allow_if_starts_with=None, force_send=False,
         b0 = {} if dry else evidence(hwnd, "typesend0")
         before = ""
         n_scan, fb_chars = 0, []
-        if scan_code:
-            n_scan, fb_chars = send_text_scan(text)
-        else:
-            send_text(text)
+        # ★ M20（2026-10-23 · X1）：**dry-run 不许真的把字打出去**（安全级缺陷）。
+        #   演练语义是「只算不做」；改前这里 `send_text_scan(text)` / `send_text(text)`
+        #   **没有 dry 闸门**（只有 b0/b1 用了 `{} if dry else evidence(...)` 护住）
+        #   ⇒ `--force-send --dry-run` 会**真的把字打进目标窗口**。
+        #   护栏：发送这一段整体进 `if not dry:`；**非 dry 路径一字不改**
+        #   （调用次数、顺序、参数、返回码口径全部照旧）。
+        if not dry:
+            if scan_code:
+                n_scan, fb_chars = send_text_scan(text)
+            else:
+                send_text(text)
         time.sleep(_settle(450))
         b1 = {} if dry else evidence(hwnd, "typesend1")
         f0, f1 = _img_fp(b0.get("文件") or ""), _img_fp(b1.get("文件") or "")
