@@ -45,6 +45,15 @@ a = Analysis(
     optimize=0,
 )
 pyz = PYZ(a.pure)
+# ★ C-0（2026-10-24 · M19P3-W3）：**不分发** msvcp140.dll。
+#   实测：vendor 里 7 个 winrt 的 `.pyd`（`_winrt*.cp312-win_amd64.pyd`）的 **PE 导入表里写着
+#   `MSVCP140.dll`** ⇒ PyInstaller 照导入表收依赖时，会从搜索路径（**本机 System32**）收一份进来
+#   ⇒ 那等于**又分发**了微软专有件（条款：再分发 "limited to licensed Visual Studio users"），
+#   而 vendor 侧那份已被 C-0 移除 ⇒ 冻结构建**必须显式剔掉**，否则 C-0 在这条产物线上破功。
+#   ⇒ 剔掉后运行时走**目标机 System32 自带那份**（缺 VC++ 运行库时由 install.ps1 指路 vcredist）。
+#   ⚠ 本条**未实跑验证**：git worktree 检出里没有 vendor 的 `.pyd`（未跟踪）⇒ 冻结构建在本机跑不起来。
+a.binaries = [(k, v) for (k, v) in a.binaries
+              if os.path.basename(k).lower() != "msvcp140.dll"]
 
 exe = EXE(
     pyz,
