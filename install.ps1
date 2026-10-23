@@ -69,7 +69,28 @@ $Owner = 'GALAXYLIYI'
 $RepoHost = 'https://gitee.com'
 $DefaultZip = "$RepoHost/$Owner/agent-ctl/releases/latest/download/agentctl.zip"
 $RepoZip = "$RepoHost/$Owner/agent-ctl/repository/archive/main.zip"
-$MinPy = [Version]'3.10'
+# >>> PY-GATE-BEGIN（M19P3-W3 · 2026-10-24 · 可执行版：判据会原样抽出这段跑）
+#   ★ 判据 `tests\_P3_W3_发布链_判据.py` 把下面这段**逐字抽出来**用 pwsh 跑：
+#     喂一个版本号进去 ⇒ 落在 [3.12, 3.13) 退出 0；落在窗口外退出**非 0**。
+#   ★ 为什么要**上限**（cp312 硬伤，比许可更致命，卡所有用户）：
+#     vendor 里 7 个 winrt wheel 全是 `cp312-cp312-win_amd64`（**非 abi3**）
+#     ⇒ 3.13+ 加载 winrt 必失败。本机实测：
+#       Python 3.12 ⇒ LOAD-OK
+#       Python 3.14 ⇒ ModuleNotFoundError: No module named 'winrt._winrt'
+#                       （把 cp312 的 ABI tag 去掉让它找到文件 ⇒
+#                        ImportError: DLL load failed while importing _winrt）
+#     ⇒ 只把下限提到 3.12 **不够**（`py -3` 在只装了 3.14 的机器上仍会被选中，
+#       装出来是坏的）⇒ 必须把 3.13+ **明确拒绝**。
+#   ★ 不许静默降级：窗口外 ⇒ 明确报错 + 给可操作提示（见 Find-Python 之后的分支）。
+$MinPy = [Version]'3.12'
+$MaxPy = [Version]'3.13'
+function Test-PyVersion {
+    param([Version]$V)
+    if ($V -lt $MinPy) { return 1 }      # 太老
+    if ($V -ge $MaxPy) { return 2 }      # 太新：cp312 硬绑定，3.13+ 加载不了 winrt
+    return 0
+}
+# <<< PY-GATE-END
 $AppName = 'Windows agent-ctl 组件'
 
 function Say { param([string]$m) Write-Host "  $m" }
@@ -85,6 +106,20 @@ if ($PSVersionTable.PSVersion.Major -lt 5) {
     exit 1
 }
 Good "PowerShell $($PSVersionTable.PSVersion)"
+
+# ★ M19P3-W3 · C-0 落地：**不分发** msvcp140.dll（微软专有件，条款写明再分发
+#   "limited to licensed Visual Studio users"）⇒ 装出来的程序走**目标机 System32 自带那份**。
+#   ⇒ 仓里的 vendor\winrt\msvcp140.dll 已按 C-0 从仓里移除（见 docs\msvcp140_C0落地_20261024.md）。
+#   ⇒ 目标机缺 VC++ 运行库时，我们**只指路**微软官网的官方 vcredist（我们自己不发它）。
+$vcrt = Join-Path $env:SystemRoot 'System32\msvcp140.dll'
+if (Test-Path $vcrt) {
+    Good "VC++ 运行库已在位（System32\msvcp140.dll $((Get-Item $vcrt).VersionInfo.FileVersion)）"
+} else {
+    Say '⚠ 本机没有 System32\msvcp140.dll（VC++ 运行库）⇒ OCR 相关功能会不可用。'
+    Say '  我们**不分发**它（微软条款限制再分发），请装微软官方运行库：'
+    Say '    https://aka.ms/vs/17/release/vc_redist.x64.exe   （x64）'
+    Say '    https://aka.ms/vs/17/release/vc_redist.x86.exe   （x86）'
+}
 
 if (-not $Dir) { $Dir = Join-Path $env:LOCALAPPDATA 'AgentCtl' }
 $AppDir = Join-Path $Dir 'app'
@@ -102,6 +137,7 @@ function Find-Python {
     foreach ($c in @("$env:LOCALAPPDATA\Programs\Python\Python312\python.exe", "$env:LOCALAPPDATA\Programs\Python\Python313\python.exe", "$env:ProgramFiles\Python312\python.exe", "$env:ProgramFiles\Python313\python.exe")) {
         if (Test-Path $c) { $try += , @($c, @()) }
     }
+    $script:PyTooNew = @()      # ★ 见过但**不受支持**的版本（3.13+）—— 用来把话说清楚
     foreach ($t in $try) {
         $exe = $t[0]
         foreach ($p in $t[1]) {
@@ -116,12 +152,16 @@ function Find-Python {
             if ($LASTEXITCODE -eq 0 -and $o -and $o.Count -ge 4) {
                 $v = [Version]::new([int]$o[0], [int]$o[1], [int]$o[2])
                 $real = $o[3].Trim()
-                if ($v -ge $MinPy -and (Test-Path $real)) {
+                # ★ M19P3-W3（cp312 硬伤）：用**窗口**判版本，不是"≥下限"就行。
+                #   3.13+ 必须被拒（vendor 的 winrt 是 cp312 硬绑定 ⇒ 装了也加载不了）。
+                $gate = Test-PyVersion $v
+                if ($gate -eq 0 -and (Test-Path $real)) {
                     # ★ 拿到真实解释器后就**一律用它调**，前缀固定为空数组。
                     #   `py.exe -3.12` 只有启动器认这个参数，`python.exe -3.12` 会直接报错，
                     #   所以不能把探测用的前缀原样带回来。
                     return @{ Exe = $real; Prefix = @(); Ver = $v }
                 }
+                if ($gate -eq 2) { $script:PyTooNew += $v }
             }
         }
     }
@@ -130,7 +170,7 @@ function Find-Python {
 
 $py = Find-Python
 if (-not $py) {
-    Say "本机没有 Python $MinPy 或更高版本。"
+    Say "本机没有落在受支持窗口 [$MinPy, $MaxPy) 内的 Python。"
     if (Get-Command winget.exe -ErrorAction SilentlyContinue) {
         Say '尝试用 winget 静默安装 Python 3.12（可能弹 UAC，请点是）...'
         try {
@@ -142,9 +182,19 @@ if (-not $py) {
 }
 
 if (-not $py) {
-    Bad "没找到可用的 Python $MinPy+。二选一："
-    Bad "  [1] 装完 Python 后重跑本脚本（https://www.python.org/downloads/）"
-    Bad "  [2] 或一行装：winget install Python.Python.3.12"
+    # ★ M19P3-W3（cp312 硬伤）：话要说清楚 —— 「太新」与「没有」是两种病，处方不同。
+    if ($script:PyTooNew -and $script:PyTooNew.Count -gt 0) {
+        Bad "本机有 Python $($script:PyTooNew -join ' / ')，但它**不在受支持窗口 [$MinPy, $MaxPy)** 里。"
+        Bad "  原因：vendor 里 7 个 winrt wheel 全是 cp312-cp312-win_amd64（**非 abi3**）"
+        Bad "        ⇒ 3.13+ 加载 winrt 必失败（本机实测 3.14 报 DLL load failed）⇒ 装出来是坏的。"
+        Bad "  处置二选一："
+        Bad "  [1] 装 Python 3.12 后重跑本脚本：winget install Python.Python.3.12"
+        Bad "  [2] 或从 https://www.python.org/downloads/ 选 3.12.x（安装时勾 Add to PATH）"
+    } else {
+        Bad "没找到可用的 Python [$MinPy, $MaxPy)。二选一："
+        Bad "  [1] 装完 Python 后重跑本脚本（https://www.python.org/downloads/）"
+        Bad "  [2] 或一行装：winget install Python.Python.3.12"
+    }
     exit 2
 }
 Good "Python $($py.Ver)  ->  $($py.Exe)"
