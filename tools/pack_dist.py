@@ -291,6 +291,60 @@ def main() -> int:
               "它们**不会进包** —— 值得保留就搬回真源。")
         print()
 
+    # ── live 漂移自动闸（P3-M19S）：发包前 live 必须与仓内产物逐字节一致 ────
+    #   ★ 治的是「仓里看不出来、运行行为却已经漂了」：live 是**本机状态**
+    #     （build\local_legacy_home.txt 指针指向的那份真在跑的 legacy），不在仓里、不受 git 保护。
+    #     M19prime/M19P/M19P2/M20 四轮改动每一轮都是**人肉核 MD5**才收口 ⇒ 这里把它变成自动闸。
+    #   ★ live 是本机状态，**不是发布内容** —— 这里**只读**它做比对，
+    #     它的内容**绝不进包**（包里的 legacy 一律来自下面现场生成的 legacy_src = 从真源生成）。
+    #   ★ 处置分档（关键设计，别混成一个码）：
+    #     · rc=1（live 在，且与仓内产物不一致）⇒ **中止发包**（比事后查更值钱）
+    #     · rc=2（live 定位不到 / 本机没部署 live）⇒ **跳过并提示，不算红**
+    #       —— 别的机器装完就是"没有 live"；若让它红，这条闸在 CI 上永远红
+    #         ⇒ 被人加个 --force 绕过去 ⇒ 闸名存实亡。
+    #     · rc=0 ⇒ 绿，继续。
+    #   ★ 闸本身缺件（干净克隆：tools\ 整体被 gitignore 挡着）⇒ **响亮地跳过**并说明
+    #     "这是缺件、不是通过"，但**不拦发包**（闸门不存在不是发包的理由）。
+    print("live 同步闸（live ↔ 仓内产物）：")
+    _live_gate = ROOT / "tools" / "check_live_sync.py"
+    if not _live_gate.is_file():
+        print("[!] live 闸**未接线**：%s 不在（干净克隆 / 未随包）—— 本闸跳过，不拦发包。"
+              % _live_gate)
+        print("    ★ 这是**缺件**，不是「查过没问题」：闸门不存在 ≠ 闸门通过。")
+        print("    ★ 要让它真跑：把 tools\\check_live_sync.py 随仓进 git（.gitignore 白名单）。")
+    else:
+        import check_live_sync
+        _lrc, _lrep = check_live_sync.run(quiet=True)
+        _lc = _lrep.get("counts", {}) or {}
+        if _lrc == 2:
+            print("[!] %s" % (_lrep.get("error") or "验不了（定位不到 live）"))
+            print("    ⇒ 本机没有 live（没部署 / 没指针）⇒ **跳过**，不拦发包。")
+            print("    ★ 「查不到」≠「一致」：这一档**没有结论**，别把它读成绿。")
+        elif _lrc == 1:
+            print("[X] live 与仓内产物不一致：不一致 %d / live 缺件 %d / 产物缺件 %d"
+                  % (_lc.get("inconsistent", 0), _lc.get("live_missing", 0),
+                     _lc.get("product_missing", 0)))
+            for _k in ("inconsistent", "live_missing", "product_missing"):
+                for _it in _lrep.get(_k, []) or []:
+                    print("      - %s" % _it["file"])
+                    print("          live ：%s" % _it["live_path"])
+                    print("          产物 ：%s" % _it["product_path"])
+                    print("          live md5 = %s" % (_it.get("live_md5") or "N/A"))
+                    print("          产物 md5 = %s" % (_it.get("product_md5") or "N/A"))
+                    print("          原因：%s" % _it["reason"])
+            raise SystemExit(
+                "[X] live 与仓内产物不一致 —— **中止发包**。"
+                "live 是本机真在跑的那份（仓里看不出来、运行行为却已经漂了）；"
+                "把改动同步回真源（legacy_tools\\_src\\）并重生/重同步 live 后再发。")
+        else:
+            print("  live    ：%s" % _lrep.get("live_dir"))
+            print("  仓内产物：%s" % _lrep.get("product_dir"))
+            print("  一致 %d / 不一致 %d / live 缺件 %d / 产物缺件 %d"
+                  % (_lc.get("consistent", 0), _lc.get("inconsistent", 0),
+                     _lc.get("live_missing", 0), _lc.get("product_missing", 0)))
+            print("  【绿】live 与仓内产物逐字节一致。")
+    print()
+
     # ── T14 阶段 2：现场生成 legacy 打包源 ──────────────────────────────
     if args.legacy_src:
         legacy_src = Path(args.legacy_src)

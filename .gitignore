@@ -50,6 +50,7 @@ tools/*
 !tools/lint_gate.py
 !tools/pack_dist.py
 !tools/verify_dist.py
+!tools/check_live_sync.py
 !tools/make_legacy_dir.py
 !tools/port_legacy.py
 !tools/scan_legacy.py
