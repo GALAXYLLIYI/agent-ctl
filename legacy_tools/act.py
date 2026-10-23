@@ -3442,15 +3442,26 @@ def do_type(hwnd, text, dry=False, allow_if_starts_with=None, force_send=False,
     time.sleep(_settle(450))
     _, after, _ = read_doc(hwnd)
     want = before + text
-    ok = (after == want) or (_norm_nl(after) == _norm_nl(want))
-    nl_only = (after != want)
-    mark = ("✅ 读回逐字符一致（仅换行表示不同）" if nl_only
-            else "✅ 读回逐字符一致") if ok else "❌ 读回不一致"
+    # ★ M19P2（2026-10-23）：**三态映射**（同族第①处 · do_type 元素段 · UIA 读回）——
+    #   读回**失败**（after is None）＝「**没测出来**」，不许写成「确认没变」
+    #   （core.py:2881 铁律：「没测出来」与「没变」必须**分开**）；
+    #   改前这里还会 `_norm_nl(None)` 直接 AttributeError **崩掉**（更糟）。
+    #   「读到了但不一致」才是 rc=8。口径复用 M19P 的 `_rc_from_changed`
+    #   （True⇒0 / None⇒5 / False⇒8），**dry 分支不动**。
+    if after is None:
+        changed, ok, nl_only = None, False, False
+        mark = "❓ 读不回来＝**没测出来**（本次不报成功，请重新观测后重试）"
+    else:
+        ok = (after == want) or (_norm_nl(after) == _norm_nl(want))
+        nl_only = (after != want)
+        changed = True if ok else False
+        mark = ("✅ 读回逐字符一致（仅换行表示不同）" if nl_only
+                else "✅ 读回逐字符一致") if ok else "❌ 读回不一致"
     log(f"{'（演练）' if dry else ''}⌨ 打字 [{len(text)} 字"
         f"{'（含中文）' if any(ord(x) > 127 for x in text) else ''}] "
         f"窗口「{info['title']}」 {mark} "
-        f"（{len(before)} → {len(after) if after else 'None'} 字）")
-    return 0 if (dry or ok) else 8
+        f"（{len(before)} → {len(after) if after is not None else 'None'} 字）")
+    return _rc_from_changed(changed, dry=dry)
 
 
 def do_drag(hwnd, frm, to, dry=False):
@@ -3495,10 +3506,19 @@ def do_drag(hwnd, frm, to, dry=False):
         drag(frm, to)
     time.sleep(_settle(400))
     sel = read_selection(hwnd) if not dry else None
-    log(f"{'（演练）' if dry else ''}✋ 拖拽 [{frm} → {to}] 窗口「{info['title']}」"
-        + ("" if dry else f"　选中了 {len(sel) if sel is not None else '?'} 字："
-                          f"「{(sel or '')[:30]}」"))
-    return 0 if (dry or (sel is not None and len(sel) > 0)) else 8
+    # ★ M19P2（2026-10-23）：**三态映射**（同族第②处 · do_drag · 选区读回）——
+    #   读回**失败**（sel is None）＝「**没测出来**」，不许写成「确认没变」
+    #   （core.py:2881 铁律）；「读到了但是空选区」才是 rc=8。
+    #   口径复用 M19P 的 `_rc_from_changed`（True⇒0 / None⇒5 / False⇒8）。
+    changed = None if sel is None else (True if len(sel) > 0 else False)
+    if dry:
+        tail = ""
+    elif sel is None:
+        tail = "　选区**读不回来**＝**没测出来**（本次不报成功，请重新观测后重试）"
+    else:
+        tail = "　选中了 %d 字：「%s」" % (len(sel), sel[:30])
+    log(f"{'（演练）' if dry else ''}✋ 拖拽 [{frm} → {to}] 窗口「{info['title']}」" + tail)
+    return _rc_from_changed(changed, dry=dry)
 
 
 def main():
