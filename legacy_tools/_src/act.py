@@ -1326,6 +1326,33 @@ def _wait_ready(hwnd, base_img, budget_ms=POLL_BUDGET_MS, need=POLL_HYSTERESIS,
         _t.sleep(POLL_INTERVAL_MS / 1000.0)
 
 
+def _budget_verdict(base_img, last):
+    """★ M19'（2026-10-23）等生效**预算耗尽**时的三态判据 —— 两个出口**共用**这一份口径。
+
+    ★ 要修的语义缺陷（改前两个出口都硬写 `"生效": False`）：
+      core 侧把 False 判成 **code=8「确认没变」**、只有 None 才走 **code=5「没测出来」**
+      ⇒ 「我没机会看到」被当成「我看到了、确实没变」⇒ **agent 不重试** ⇒ 流程静默停住。
+
+    ★ 改后口径（**两个预算耗尽出口完全一致** ⇒ 杜绝两处漂移）：
+      · last is None（从未采到帧）          ⇒ False（保持改前行为，不让退化路径漂移）
+      · 最后一帧(last) 与基线(base_img) **不同** ⇒ None（没测出来）⇒ core 判 code=5 ⇒ agent 会重试
+      · 最后一帧(last) 与基线(base_img) **相同** ⇒ False（确认没变）⇒ core 判 code=8（语义不变）
+
+    ★ 判 None 而不是判 True：闪烁（变一帧又变回）因此**永远不会被判成功**
+      （None ⇒ code=5 ⇒ 重试，不是成功）。
+    ★ 判差口径**不新造**：`_img_diff`（转发 framecache，唯一真源）；拿不到图 ⇒ None ⇒ 回落 False。
+    """
+    if last is None:
+        return False
+    try:
+        d = _img_diff(base_img, last)
+    except Exception:
+        return False
+    if d and d.get("changed") is True:
+        return None
+    return False
+
+
 def _wait_effect(hwnd, base_img, budget_ms=POLL_BUDGET_MS, need=POLL_HYSTERESIS,
                  capture=None):
     """**变化即停**：连续 `need` 帧都判「变了」⇒ 动作生效了，可以收工。
@@ -1333,6 +1360,9 @@ def _wait_effect(hwnd, base_img, budget_ms=POLL_BUDGET_MS, need=POLL_HYSTERESIS,
     ★ 这取代了原来的 `time.sleep(_settle(450))`（动作后等界面反应）。
     ★ 返回 {生效: True/False/None, 轮次, 耗时ms, 图}
       None = 没测出来；False = 预算内**没看到**变化（= 老的「页面无变化」口径）。
+    ★ M19'（2026-10-23）：**预算耗尽**的两个出口都走 `_budget_verdict`（共用一份口径）⇒
+      最后一帧与基线**不同** ⇒ None（没测出来 ⇒ core 判 code=5 ⇒ agent 会重试）；
+      **相同** ⇒ False（确认没变 ⇒ code=8）；从未采到帧 ⇒ False（保持改前行为）。
     ★ **不落盘**：轮询期只在内存里采样；最后那张由调用方决定要不要落盘。
     """
     import time as _t
@@ -1351,7 +1381,7 @@ def _wait_effect(hwnd, base_img, budget_ms=POLL_BUDGET_MS, need=POLL_HYSTERESIS,
         rounds += 1
         # ★ 同上：预算检查在采样之前 ⇒ 总耗时 ≤ 预算（**永远不慢于改前的固定 sleep**）
         if _t.perf_counter() >= deadline:
-            return {"生效": False, "轮次": rounds,
+            return {"生效": _budget_verdict(base_img, last), "轮次": rounds,
                     "耗时ms": (_t.perf_counter() - t0) * 1000.0, "图": last,
                     "退化": _is_degraded(last), "首变图": first_img,
                     "口径": _frame_scope(last or base_img)}
@@ -1375,7 +1405,7 @@ def _wait_effect(hwnd, base_img, budget_ms=POLL_BUDGET_MS, need=POLL_HYSTERESIS,
                     "退化": _is_degraded(cur), "首变图": first_img,
                     "口径": _frame_scope(cur)}
         if _t.perf_counter() >= deadline:
-            return {"生效": False, "轮次": rounds,
+            return {"生效": _budget_verdict(base_img, last), "轮次": rounds,
                     "耗时ms": (_t.perf_counter() - t0) * 1000.0, "图": last,
                     "退化": _is_degraded(last), "首变图": first_img,
                     "口径": _frame_scope(last or base_img)}
