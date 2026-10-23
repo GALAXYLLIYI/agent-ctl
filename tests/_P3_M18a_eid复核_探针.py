@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """M18-a 探针：对给定 feat 跑一次 core._eid_recheck（模式由环境变量/argv 切）。"""
 import json, os, sys
-sys.path.insert(0, r"<工作区>\Documents\agent-ctl\src")
+sys.path.insert(0, os.environ["AGENTCTL_SRC"])
 hwnd = int(sys.argv[1]); feat = json.loads(sys.argv[2])
 need_keys = sys.argv[3] == "1"; inject = len(sys.argv) > 4 and sys.argv[4] == "inject"
 from agentctl import core
