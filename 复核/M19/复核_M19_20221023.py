@@ -221,6 +221,56 @@ ALLOWED_NEW_CODE = (
     #    新增真代码行只有 `import tempfile` 这一行；被删的旧行 `import sys` 已登记进
     #    外置账本的 removed["act.py"]（24 → 25 行）⇒ 数量账本照旧兜底。
     _exact('import tempfile'),
+    # —— M20 act 安全批 · X4/X5（2026-10-24 本次追加 · 窗口 e · N1-W4）——
+    #    X4：do_click 的**就绪闸真被读** —— `_rdy = _wait_ready(...)` 原来算了却从不看
+    #        （pyflakes 早就报过 'local variable _rdy is assigned to but never used'）
+    #        ⇒「界面还在动但矩形恰好没变」照样点下去。现在：就绪=True 才动手；
+    #        False（还在动）/ None（没测出来）⇒ 一律拒（rc=5，unknown 永不当成功）。
+    #    X5：targets 的**失败不再用空列表兼任** —— 新增 TargetsUnavailable + strict 参数
+    #        （未获授权⇒9 / UIA 失败⇒5）+ _targets_rc（空列表⇒4，不再是 0）+ _targets_meta
+    #        （枚举失败/已截断标记）+ main 的 targets 出口。
+    #    —— 逐字精确匹配，42 行（39 种）与外置账本「M20_act安全批（X4/X5）」段一一对应；
+    #    旧侧 6 行（5 种）已登记进账本 removed["act.py"]（25 → 31 行）。
+    #    ★ 数量由 ⑤-b 兜底：账本该段 = 42 行，多一行少一行都报红 ⇒ 白名单没有放宽。
+    _exact('"      下一步：等界面停下（或先 scroll 到位）再重试。")'),
+    _exact('"可操作区(④)": bands, **_targets_meta(ts)},'),
+    _exact('"可操作区(④)": {}, **_targets_meta([], err=e.why)},'),
+    _exact('"失败原因": (err or ""),'),
+    _exact('"已截断": bool(len(ts) >= limit)}'),
+    _exact('"枚举失败": bool(err),'),
+    _exact('5, f"**反竞态拒绝**：控件「{c.Name}」{_rdy_why}", hwnd,'),
+    _exact('_rdy_ok = (_rdy or {}).get("就绪")'),
+    _exact('_rdy_why = ("界面在动（预算内没稳）" if _rdy_ok is False'),
+    _exact('auto, root = _uia(hwnd)'),
+    _exact('class TargetsUnavailable(Exception):'),
+    _exact('def __init__(self, why, rc, kind):'),
+    _exact('def _targets_meta(ts, limit=40, err=None):'),
+    _exact('def _targets_rc(ts, limit=40):'),
+    _exact('def targets(hwnd, limit=40, with_geo=False, strict=False):'),
+    _exact('else "就绪没测出来（抓不到画面）")'),
+    _exact('ensure_ascii=False, indent=1))'),
+    _exact('except Exception as e:'),
+    _exact('except TargetsUnavailable as e:'),
+    _exact('extra="就绪轮询说界面还没稳 ⇒ 宁可不点也不点错。\\n"'),
+    _exact('if _rdy_ok is not True:'),
+    _exact('if not ts:'),
+    _exact('if strict:'),
+    _exact('print(json.dumps({"窗口": info, "白名单": "OK", "可交互控件": [],'),
+    _exact('raise'),
+    _exact('raise TargetsUnavailable("UIA 枚举失败：%s" % (e,), 5, "uia_failed")'),
+    _exact('raise TargetsUnavailable("未获授权（没有通行证/感知授权）", 9, "unauthorized")'),
+    _exact('return 0'),
+    _exact('return 4'),
+    _exact('return _targets_rc(ts)'),
+    _exact('return _tell_next('),
+    _exact('return _tell_next(e.rc, f"列不出可点控件：{e.why}", a.hwnd)'),
+    _exact('return {"可交互控件数": len(ts),'),
+    _exact('self.kind = kind'),
+    _exact('self.rc = rc'),
+    _exact('self.why = why'),
+    _exact('super().__init__(why)'),
+    _exact('try:'),
+    _exact('ts, geo = targets(a.hwnd, with_geo=True, strict=True)'),
 )
 
 # ★ 旧行侧（被删/被替换的真代码行）：**改由外置账本的 removed[文件] 逐行列举**（不再用关键词近似）。

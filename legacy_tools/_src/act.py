@@ -1842,7 +1842,27 @@ def _need_perceive(note):
         return False
 
 
-def targets(hwnd, limit=40, with_geo=False):
+class TargetsUnavailable(Exception):
+    """★ W4（2026-10-24）X5：`targets` 枚举失败 —— **显式失败标记**，不再用空列表兼任。
+
+    ★ 为什么需要它：改前 `targets()` 在两种**失败**下都返回 `[]` ——
+      「没通行证」（`_need_perceive` 没过）与「真的没有可交互控件」**分不开**；
+      而 `_uia` 失败是直接抛异常（不在 `targets` 内捕获，`main` 也没有 try）⇒
+      ① 失败被报成**成功 + 空列表**（静默假成功）② 崩溃时 rc=1（没约定的码）。
+    ★ rc 口径（**都用现成码，不新增码表**）：
+      · 未获授权（没通行证）⇒ 9（契约：停下，向用户申请）
+      · UIA 枚举失败 / 窗口不响应 ⇒ 5（没测出来，稍后重试）
+    ★ 既有调用方（drill.py 等）**不受影响**：它们走默认 strict=False，行为与改前逐字节一致。
+    """
+
+    def __init__(self, why, rc, kind):
+        super().__init__(why)
+        self.why = why
+        self.rc = rc
+        self.kind = kind
+
+
+def targets(hwnd, limit=40, with_geo=False, strict=False):
     """列出可交互的控件（只读，但同样要过闸）。
 
     ★ 返回值形状（2026-10-10 加 ④ 时为兼容而保留）：
@@ -1851,10 +1871,20 @@ def targets(hwnd, limit=40, with_geo=False):
       `with_geo=True` → 返回 `(可点控件列表, 全树几何列表)`，供 ④ 推断带状区。
     **默认不改形状**是刻意的：为了加一个输出字段而改掉函数返回类型，
     等于把所有既有调用方一起打破（drill.py 就有两处）。
+    ★ W4（2026-10-24）X5：新增 `strict` —— **失败不再用空列表兼任**：
+      strict=True 时，枚举失败抛 `TargetsUnavailable`（带 rc）；
+      strict=False（默认）时**行为与改前逐字节一致**（既有调用方零影响）。
     """
     if not _need_perceive("列可点控件"):
+        if strict:
+            raise TargetsUnavailable("未获授权（没有通行证/感知授权）", 9, "unauthorized")
         return ([], []) if with_geo else []
-    auto, root = _uia(hwnd)
+    try:
+        auto, root = _uia(hwnd)
+    except Exception as e:
+        if strict:
+            raise TargetsUnavailable("UIA 枚举失败：%s" % (e,), 5, "uia_failed")
+        raise
     out = []
 
     def walk(c, d=0):
@@ -1896,6 +1926,35 @@ def targets(hwnd, limit=40, with_geo=False):
     except Exception:
         geo = []
     return out, geo
+
+
+def _targets_rc(ts, limit=40):
+    """★ W4（2026-10-24）X5：列控件的结果 → 退出码。
+
+    ★ **空列表不再是成功**（改前 `main` 一律 `return 0`）：
+      「真的没有可交互控件」是一个**事实**，但它必须落成**明确的失败码**
+      （4 找不到控件）⇒ 调用方不会把「没列出来」与「列出来是空的」当成同一种「成功」。
+    ★ 与审计建议的关系：审计 P5 说「空列表本身可以是合法结果」（更软的口径），
+      工单 W4 要求「空列表也返回成功 ⇒ 改判为明确的『没目标』失败码」⇒ 采纳工单口径；
+      「枚举失败」与「真的没有」则用「枚举失败 / 已截断」标记分开（见 `_targets_meta`）。
+    ★ 不新增错误码：只用现成的 4（契约：重新 ctl_windows + ctl_tree 看现状）。
+    """
+    if not ts:
+        return 4
+    return 0
+
+
+def _targets_meta(ts, limit=40, err=None):
+    """★ W4（2026-10-24）X5：列表结果的**自描述元信息** ——
+    让人和机器能分辨三种「空」：枚举失败 / 被 limit 截断 / 真的没有可交互控件。
+
+    ★ 审计 P5 的原话：「它无法区分『枚举成功但确实没有』与『枚举失败/被截断』」
+      ⇒ 这几个标记就是那个区分。
+    """
+    return {"可交互控件数": len(ts),
+            "枚举失败": bool(err),
+            "失败原因": (err or ""),
+            "已截断": bool(len(ts) >= limit)}
 
 
 def _scan_all_geometry(c, acc, d=0, maxd=8):
@@ -2822,6 +2881,21 @@ def do_click(hwnd, name=None, xy=None, dry=False, force_coord=False, retry=0,
                         extra="这是刻意设计的护栏：动的手指比读到的坐标慢，宁可不点也不点错。\n"
                               "      下一步：等界面停下（或先 scroll 到位）再重试；"
                               "滚动类控件可改用 UIA Scroll（本工具默认就会优先走它）。")
+                # ★ W4（2026-10-24）X4：`_rdy` 原来**算了却从不看** ——
+                #   反竞态只看「矩形有没有变」⇒「界面还在动但矩形恰好没变」照样点下去
+                #   ⇒ M7 的就绪轮询（连续 N 帧没变才动手）这个护栏形同虚设。
+                #   现在**真的读它**：就绪=True 才动手；
+                #   False=预算内没稳（界面还在动）、None=没测出来（抓不到画面）⇒ 一律拒（rc=5）。
+                #   ★ 为什么 None 也拒：本仓铁律「unknown 永不当成功」——「没测出来」≠「稳了」。
+                #   ★ dry 分支不受影响（这一整段就在 `if not dry:` 里）。
+                _rdy_ok = (_rdy or {}).get("就绪")
+                if _rdy_ok is not True:
+                    _rdy_why = ("界面在动（预算内没稳）" if _rdy_ok is False
+                                else "就绪没测出来（抓不到画面）")
+                    return _tell_next(
+                        5, f"**反竞态拒绝**：控件「{c.Name}」{_rdy_why}", hwnd,
+                        extra="就绪轮询说界面还没稳 ⇒ 宁可不点也不点错。\n"
+                              "      下一步：等界面停下（或先 scroll 到位）再重试。")
             if use_post:
                 method = "PostMessage 后台投递（不抢前台焦点）"
                 if not dry:
@@ -3775,7 +3849,17 @@ def main():
         info, why = check_target(a.hwnd)
         if why:
             return _tell_deny(why, a.hwnd)
-        ts, geo = targets(a.hwnd, with_geo=True)
+        # ★ W4（2026-10-24）X5：枚举失败**显式落码**，不再用空列表兼任 ——
+        #   改前：_need_perceive 没过 ⇒ targets 返回 [] ⇒ 这里照旧 return 0
+        #   （调用方把「没列出来」当成「列出来了、就是没有」⇒ 静默假成功）；
+        #   _uia 失败 ⇒ 异常直接穿出 main ⇒ rc=1（没约定的码）。
+        try:
+            ts, geo = targets(a.hwnd, with_geo=True, strict=True)
+        except TargetsUnavailable as e:
+            print(json.dumps({"窗口": info, "白名单": "OK", "可交互控件": [],
+                              "可操作区(④)": {}, **_targets_meta([], err=e.why)},
+                             ensure_ascii=False, indent=1))
+            return _tell_next(e.rc, f"列不出可点控件：{e.why}", a.hwnd)
         bands = _bands(a.hwnd, geo)
         if a.compact:
             print(f"窗口：{info['title']}　前台={info['foreground']}　可交互控件 {len(ts)} 个")
@@ -3805,11 +3889,11 @@ def main():
             print("     拖拽推荐点     : %s" % json.dumps(bands.get("拖拽推荐点", {}),
                                                         ensure_ascii=False))
             print("     坐标系         : %s" % bands.get("坐标系"))
-            return 0
+            return _targets_rc(ts)
         print(json.dumps({"窗口": info, "白名单": "OK", "可交互控件": ts,
-                          "可操作区(④)": bands},
+                          "可操作区(④)": bands, **_targets_meta(ts)},
                          ensure_ascii=False, indent=1))
-        return 0
+        return _targets_rc(ts)
     if a.action == "click":
         xy = tuple(int(v) for v in a.xy.split(",")) if a.xy else None
         if not a.name and not xy:
