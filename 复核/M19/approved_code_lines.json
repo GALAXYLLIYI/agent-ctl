@@ -253,9 +253,56 @@
         "import tempfile": 1
       },
       "sha256": "d43509b5b46ac2c84a03c687cd0a4a5e512940556135083b8871d2e62411e7e8"
+    },
+    {
+      "name": "M20_act安全批（X4/X5）",
+      "desc": "M20 act 安全批 · X4（do_click 的就绪闸真被读）/ X5（targets 失败与空列表显式落码）—— 窗口 e · 2026-10-24 · N1-W4 交卷",
+      "evidence": "N1-W4 交卷 work\\通宵_20261024\\交卷\\W4_act安全批.md；判据 tests\\_P3_W4_act安全批_判据.py（四跑法 0/1/0/0）；worktree night/e（未合并入 main）",
+      "lines": {
+        "\"      下一步：等界面停下（或先 scroll 到位）再重试。\")": 1,
+        "\"可操作区(④)\": bands, **_targets_meta(ts)},": 1,
+        "\"可操作区(④)\": {}, **_targets_meta([], err=e.why)},": 1,
+        "\"失败原因\": (err or \"\"),": 1,
+        "\"已截断\": bool(len(ts) >= limit)}": 1,
+        "\"枚举失败\": bool(err),": 1,
+        "5, f\"**反竞态拒绝**：控件「{c.Name}」{_rdy_why}\", hwnd,": 1,
+        "_rdy_ok = (_rdy or {}).get(\"就绪\")": 1,
+        "_rdy_why = (\"界面在动（预算内没稳）\" if _rdy_ok is False": 1,
+        "auto, root = _uia(hwnd)": 1,
+        "class TargetsUnavailable(Exception):": 1,
+        "def __init__(self, why, rc, kind):": 1,
+        "def _targets_meta(ts, limit=40, err=None):": 1,
+        "def _targets_rc(ts, limit=40):": 1,
+        "def targets(hwnd, limit=40, with_geo=False, strict=False):": 1,
+        "else \"就绪没测出来（抓不到画面）\")": 1,
+        "ensure_ascii=False, indent=1))": 1,
+        "except Exception as e:": 1,
+        "except TargetsUnavailable as e:": 1,
+        "extra=\"就绪轮询说界面还没稳 ⇒ 宁可不点也不点错。\\n\"": 1,
+        "if _rdy_ok is not True:": 1,
+        "if not ts:": 1,
+        "if strict:": 2,
+        "print(json.dumps({\"窗口\": info, \"白名单\": \"OK\", \"可交互控件\": [],": 1,
+        "raise": 1,
+        "raise TargetsUnavailable(\"UIA 枚举失败：%s\" % (e,), 5, \"uia_failed\")": 1,
+        "raise TargetsUnavailable(\"未获授权（没有通行证/感知授权）\", 9, \"unauthorized\")": 1,
+        "return 0": 1,
+        "return 4": 1,
+        "return _targets_rc(ts)": 2,
+        "return _tell_next(": 1,
+        "return _tell_next(e.rc, f\"列不出可点控件：{e.why}\", a.hwnd)": 1,
+        "return {\"可交互控件数\": len(ts),": 1,
+        "self.kind = kind": 1,
+        "self.rc = rc": 1,
+        "self.why = why": 1,
+        "super().__init__(why)": 1,
+        "try:": 2,
+        "ts, geo = targets(a.hwnd, with_geo=True, strict=True)": 1
+      },
+      "sha256": "0d978c8f4387edfdd812e15f6923dde39887d4afd7fe85782b882a056fa8a9b1"
     }
   ],
-  "ledger_sha256": "793d58860c8bdef3e23c2e11cb13f04794ded801c37a111c78bd276eb801562b",
+  "ledger_sha256": "ee3558bd892d4ad2269a3f17c8e362026461bd9252fbb6d0db12c63bd1cbcca9",
   "files": {
     "act.py": {
       "target": "legacy_tools/_src/act.py",
@@ -270,7 +317,8 @@
         "M19P2",
         "M20_act安全批",
         "M19P3_谎报成功三条",
-        "M19P4_致命项两条"
+        "M19P4_致命项两条",
+        "M20_act安全批（X4/X5）"
       ]
     },
     "core.py": {
@@ -347,7 +395,10 @@
   },
   "removed": {
     "act.py": {
+      "\"可操作区(④)\": bands},": 1,
       "+ (\"\" if dry else f\"　选中了 {len(sel) if sel is not None else '?'} 字：\"": 1,
+      "auto, root = _uia(hwnd)": 1,
+      "def targets(hwnd, limit=40, with_geo=False):": 1,
       "else \"✅ 读回逐字符一致\") if ok else \"❌ 读回不一致\"": 1,
       "else:": 1,
       "ev = \"\" if changed is None else (\"　✔ 页面已变化\" if changed else \"　⚠ 页面无变化\")": 1,
@@ -361,6 +412,7 @@
       "n_scan, fb_chars = send_text_scan(text)": 1,
       "nl_only = (after != want)": 1,
       "ok = (after == want) or (_norm_nl(after) == _norm_nl(want))": 1,
+      "return 0": 2,
       "return 0 if (changed is True) else 8": 1,
       "return 0 if (dry or (sel is not None and len(sel) > 0)) else 8": 1,
       "return 0 if (dry or changed is True) else 8": 1,
@@ -369,6 +421,7 @@
       "return {\"生效\": False, \"轮次\": rounds,": 2,
       "send_text(text)": 1,
       "time.sleep(0.12)": 1,
+      "ts, geo = targets(a.hwnd, with_geo=True)": 1,
       "user32.SetCursorPos(x, y)": 1,
       "x, y, rr, ok_rect = _center(root)": 1
     },
