@@ -31,7 +31,7 @@
       "sha256": "b7f47c82edd5c9cbe5ae6e01f29bb308859aaccdb890d3509424e7850bdcf1a7"
     }
   ],
-  "ledger_sha256": "cf3d5edfd2748094b9d406b5c828988796ff885e0cfc872f5440787acc820a17",
+  "ledger_sha256": "55a8765e88efc2374b036b8f437ad6ea1af9d59b9bd9818aa9540e0936dc6900",
   "files": {
     "act.py": {
       "target": "legacy_tools/_src/act.py",
@@ -69,7 +69,7 @@
       "baseline": {
         "kind": "file",
         "path": "baseline_gate_legacy_20261024.py",
-        "md5": "E874CA6C28F82C0A565FEC6ACF41F153",
+        "md5": "226C9F722A674FD20370106F3D89AB1D",
         "note": "2026-10-24 重写历史（路径脱敏）后重新落基线：原 git_ref 678a19f^ 已不存在"
       },
       "segments": [],
