@@ -740,13 +740,19 @@ ctl_click    --actor <你> --hwnd <hwnd> \
 
 ### HTTP 入口怎么用
 
-- 常驻服务：`<用户主目录>\.codex\mcp\run_mcp_http.cmd`
-  （已放进启动文件夹 ⇒ 登录自启；端口被占用时会自动让位，不顶掉已跑的实例）
-- 令牌：`agent-ctl\work\state\token`；Codex 侧用
-  `--bearer-token-env-var AGENTCTL_MCP_TOKEN`（用户环境变量已写好）
+- 常驻服务：`python -X utf8 -m agentctl.mcp_http`（安装后也可用 `agentctl.cmd serve`）；
+  端口被占用时会自动让位，不顶掉已跑的实例。
+- 令牌：默认在 `<安装目录>\state\token`（环境变量 `AGENTCTL_STATE` 可改位置），
+  **首次启动自动生成**；客户端用 `--bearer-token-env-var AGENTCTL_MCP_TOKEN`。
+  自己启动时最省事：
+
+  ```powershell
+  $env:AGENTCTL_MCP_TOKEN = (Get-Content .\state\token -Raw).Trim()
+  ```
+
 - 体检：`curl -s http://127.0.0.1:8761/v1/health`
-- 端到端自测：`python -X utf8 agent-ctl\work\_mcp_http_test.py`
-  （initialize / tools/list / tools/call / 错 token 401 / GET 405）
+- 端到端自测：`agentctl.cmd selftest`（安装口径）；干净克隆的整链冒烟见
+  `tools\smoke_clean_clone.py`（clone → 打包 → 安装 → bench → selftest，6 步）。
 - 协议：`POST /mcp`，JSON-RPC 2.0，请求头 `Authorization: Bearer <token>`；
   响应头带 `Mcp-Session-Id: agentctl-mcp-1`（常量会话）。
 

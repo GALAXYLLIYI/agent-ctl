@@ -5,6 +5,11 @@
 
 Windows 上的「桌面动作闸门」：**人类签发通行证 → AI 执行 GUI 动作 → 全程留证据 → 急停文件一键全停。**
 
+> **TL;DR (English)** — A Windows-only **desktop action gate** for AI agents:
+> *human issues a pass → the agent acts → every action leaves evidence → one kill switch.*
+> Experimental 0.x personal project: no SLA, API may change. Needs **Windows 10/11 x64 + Python 3.12 + git**.
+> **Default-deny by design** (nothing moves until a human issues a pass); scope is deliberately narrow — see「适用范围（很有限）」below.
+
 | 状态 | 协议 | 平台 | 授权 |
 |---|---|---|---|
 | **实验性（0.x，API 可能变）** | **Apache License 2.0** | Windows 10/11 x64（实测） | **默认关闭**，需人工签发 |
