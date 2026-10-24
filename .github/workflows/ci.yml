@@ -1,0 +1,102 @@
+# .github/workflows/ci.yml —— AgentCtl 持续集成
+#
+# ★ 为什么 runner 只能是 Windows：
+#   本项目的控制链路走的是 Windows 原生接口（UIA / 抓屏 / WinRT OCR / 键鼠注入）。
+#   在 Linux/macOS 上这些判据不是「跑不过」，而是**根本没法测**（没有桌面会话）。
+#   ⇒ 这里只声明 windows runner，不做「多平台矩阵」那种好看但没意义的配置。
+#
+# ★ 为什么 gates 里**没有** `tests\run_all.py`：
+#   run_all.py 的文件头自己写明了「**别把它当 CI 判据使**」——
+#   它要交互桌面会话（要真弹窗、真抓屏、真抢全局热键），无头 runner 跑不了。
+#   把一个必然红的命令塞进 CI，只会让 CI 变成一片噪声。
+#   ⇒ 桌面类判据留给「有桌面的 Windows 上手工跑」，见 docs\开发环境.md。
+#
+# ★ 失败即红，没有「大概绿」：
+#   每条闸门非零退出就红。判据没跑起来 ≠ 通过。
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gates:
+    name: 闸门（无桌面依赖）
+    runs-on: windows-2022
+    timeout-minutes: 15
+    steps:
+      - name: 检出
+        uses: actions/checkout@v4
+
+      - name: 装 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 装最小依赖
+        # 只装闸门要用的（pyflakes）。全量 requirements.txt 里含 vendor 预编译轮子，
+        # CI 这几道闸门用不上，装了反而慢、还可能在 runner 上装不上。
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "pyflakes>=3"
+
+      - name: 语法 · 全部 src/agentctl 能编译
+        run: python -X utf8 -m compileall -q src/agentctl
+
+      - name: 静态 · 致命项为零
+        run: python -X utf8 tools/lint_gate.py
+
+      - name: 契约 · tools.json 可读且全层级无重复键
+        run: python -X utf8 tools/check_contract.py
+
+      - name: 提交前扫描 · 暂存区无手机号/密钥/个人绝对路径
+        # ★ 扫的是 **git 索引** ⇒ 先 git add -A，否则它扫了个空索引、等于没扫。
+        run: |
+          git add -A
+          python -X utf8 tools/presubmit_scan.py
+
+      # ★ 这里**故意没有** tools\scan_repo.py：
+      #   它与 presubmit_scan 的「什么算泄露」是两份真源，按 .gitignore 的白名单口径
+      #   被**刻意排除在仓外**（见 .gitignore 里 ⑤ 那段的核对结论）。
+      #   CI 跑一个干净克隆上根本不存在的文件 = 每次必红。
+      #   泄露扫描这一项，由 presubmit_scan 独家负责。
+
+  known-red:
+    name: 观察位（已知红 · 不阻塞）
+    runs-on: windows-2022
+    timeout-minutes: 25
+    # ★ 故意 continue-on-error：下面这几条**在开发机上现在就是红的**
+    #   （2026-10-24 实测：selftest 报「act.py 无静默动作」；
+    #     可移植性判据报「副本里跑不起来 _T1_W2 / _T1_窗3_自证」）。
+    #   闸门长期红着会训练所有人无视它 ⇒ 这里只挂个观察位，修绿了再挪进 gates。
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 装全量依赖
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: 自检 · legacy selftest
+        run: python -X utf8 legacy_tools/selftest.py
+
+      - name: 可移植性 · 换条路径还跑不跑得起来
+        run: python -X utf8 tests/_M_可移植性判据.py
+
+      # ★ tools\selfcheck_minrepo.py 不在仓（.gitignore 白名单刻意没放行它）⇒ 这里跑不了。
+      #   它在开发机上报「清单条数 52 ≠ len(CRITERIA) 53」，已记进 docs\开发环境.md 的 C 层。

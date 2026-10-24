@@ -86,6 +86,16 @@ tools/*
 #        ⇒ 总退出码 2（不是绿）。已在回执写明，等主控定夺。
 !tools/presubmit_scan.py
 !tools/验收_发版.py
+#   ⑥ tools\check_contract.py —— 契约体检（tools.json 可读 + 全层级无重复键 + 字段齐 + 工具名唯一）。
+#      · .github\workflows\ci.yml 的 gates job 直接调它 ⇒ 不在仓 = CI 干净克隆上必崩。
+#      · 依赖：只用标准库、无仓内 import、不写死本机路径 ⇒ 依赖齐。
+#      · 为什么需要单独一份：json.load 遇重复键**后者覆盖前者、不报错**；契约是 agent 直接读的
+#        API 说明，静默少一条工具比直接报错更坏。
+!tools/check_contract.py
+#   ⑦ tools\dev_env.ps1 —— 贡献者一键开发环境（建 .venv、装依赖、跑无桌面依赖的闸门）。
+#      · docs\开发环境.md 与 README 的「开发环境」一节都指向它 ⇒ 不在仓 = 悬空引用。
+#      · 依赖：只用标准库 + pip ⇒ 依赖齐。
+!tools/dev_env.ps1
 # ⛔ 2026-10-23（新单 I · M19P5）**核不过 ⇒ 没放行**的几个 —— 别再往里加（核对结论）：
 #   · tools\申请授权.py —— 写死仓外路径（F:\<用户名>\…\某上游项目\tools）；
 #     真源已于 2026-10-18 收进 legacy_tools\_src\，它仍指老位置 ⇒ 干净克隆上必然跑不起来；
