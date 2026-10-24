@@ -28,7 +28,8 @@ work/
 *.gif
 
 # 临时脚本与本机指针
-probe.py
+# ★ 2026-10-24：probe.py **移出忽略**（台账登记它、gen_legacy 需要它；内容是只读探针，
+#   19 行、无敏感信息）。以前忽略它 ⇒ 干净克隆少一个文件、打包直接失败。
 build/local_legacy_home.txt
 src/agentctl/panel_pos.json
 
@@ -143,7 +144,6 @@ docs/视觉线_识别矩阵_评估.md
 !docs/基线摘要与开工任务书.md
 verify/
 baseline/
-probe.py
 run-service.bat
 
 # ── legacy_tools/ 进仓，但它的运行产物不进 ──
@@ -195,3 +195,6 @@ desktop.ini
 #   门禁 5「让看不到本机的人凭文本判红绿」就只是口号。只放这两份；work\ 仍整体排除。
 !docs/测试索引_判据对照.md
 !docs/判据有效性清单_20261017.md
+
+# 仓库根目录的临时探针（legacy_tools 里那两个要进仓）
+/probe.py

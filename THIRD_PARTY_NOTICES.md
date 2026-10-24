@@ -206,5 +206,5 @@ Apache-2.0 §4(a) 要求：分发本作品时，**必须附上本许可的副本
 
 ---
 
-Copyright (c) 2026 <作者署名占位：用户待定，主控收口时替换>
+Copyright (c) 2026 GALAXYLLIYI
 本项目采用 Apache License 2.0，详见 [`LICENSE`](LICENSE)。

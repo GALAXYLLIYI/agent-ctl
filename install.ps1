@@ -67,8 +67,11 @@ $OutputEncoding = [Text.Encoding]::UTF8
 #     $RepoZip="https://codeload.github.com/$Owner/agent-ctl/zip/refs/heads/main"
 $Owner = 'GALAXYLIYI'
 $RepoHost = 'https://gitee.com'
-$DefaultZip = "$RepoHost/$Owner/agent-ctl/releases/latest/download/agentctl.zip"
-$RepoZip = "$RepoHost/$Owner/agent-ctl/repository/archive/main.zip"
+# ★ 2026-10-24（开源评审 P0 修复）：**Gitee 不认 GitHub 的 `releases/latest/download`**，
+#   实测 404；正确形式是带 tag 的 `/releases/download/<tag>/agentctl.zip`。
+#   源码包 `archive/main.zip` 在 Gitee 返回的是 HTML 页面（不是 zip），解压必炸 ⇒ 回退已删除。
+#   现在：先问 Gitee API 要最新 release 的 tag（匿名可用），再拼 URL；取不到就明确报错教用户 -Zip。
+$RepoSlug = "$Owner/agent-ctl"
 # >>> PY-GATE-BEGIN（M19P3-W3 · 2026-10-24 · 可执行版：判据会原样抽出这段跑）
 #   ★ 判据 `tests\_P3_W3_发布链_判据.py` 把下面这段**逐字抽出来**用 pwsh 跑：
 #     喂一个版本号进去 ⇒ 落在 [3.12, 3.13) 退出 0；落在窗口外退出**非 0**。
@@ -217,6 +220,20 @@ $null = New-Item -ItemType Directory -Force -Path $tmp
 $tmpZip = Join-Path $tmp 'agentctl.zip'
 $extract = Join-Path $tmp 'x'
 
+function Resolve-ReleaseTag {
+    # Gitee 的 /releases/latest 返回「最新 release」；查不到再退回列表第一条。
+    foreach ($api in @(
+            "https://gitee.com/api/v5/repos/$RepoSlug/releases/latest",
+            "https://gitee.com/api/v5/repos/$RepoSlug/releases?per_page=1")) {
+        try {
+            $r = Invoke-RestMethod -Uri $api -UseBasicParsing -TimeoutSec 20
+            if ($r -is [array]) { if ($r.Count -gt 0 -and $r[0].tag_name) { return $r[0].tag_name } }
+            elseif ($r.tag_name) { return $r.tag_name }
+        } catch { }
+    }
+    return $null
+}
+
 function Get-Package {
     if ($Zip) {
         if ($Zip -match '^https?://') {
@@ -229,15 +246,20 @@ function Get-Package {
         }
         return
     }
-    Say "尝试 Release 包：$DefaultZip"
-    try {
-        Invoke-WebRequest -Uri $DefaultZip -OutFile $tmpZip -UseBasicParsing -ErrorAction Stop
-        return
-    } catch {
-        Say "Release 还没有（$(($_.Exception.Message -split "`n")[0])），改用源码包。"
+    $tag = Resolve-ReleaseTag
+    $urls = @()
+    if ($tag) { $urls += "$RepoHost/$RepoSlug/releases/download/$tag/agentctl.zip" }
+    $urls += "$RepoHost/$RepoSlug/releases/latest/download/agentctl.zip"   # GitHub 风格兜底
+    foreach ($u in $urls) {
+        Say "尝试 Release 包：$u"
+        try {
+            Invoke-WebRequest -Uri $u -OutFile $tmpZip -UseBasicParsing -ErrorAction Stop
+            return
+        } catch {
+            Say "  失败：$(($_.Exception.Message -split "`n")[0])"
+        }
     }
-    Say "下载源码包：$RepoZip"
-    Invoke-WebRequest -Uri $RepoZip -OutFile $tmpZip -UseBasicParsing
+    throw "取不到 Release 包（可能是网络，或还没有 Release）。请到 Releases 页下载 agentctl.zip，再运行：.\install.ps1 -Zip .\agentctl.zip"
 }
 
 try { Get-Package } catch {
