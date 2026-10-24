@@ -93,7 +93,9 @@ BASE_ACT = "91AE6D554048912F8CA21DC113AD077F"
 INVARIANTS = {
     "contract/tools.json": "10F2E60B1E6119534159389182C2FB68",
     # ★ M20 core 甲案（a19fbad）后的 core.py：判决层「加长观测」是**合法变更** ⇒ 指纹更新
-    "src/agentctl/core.py": "863B1509834E3F6FE4AAF42D120FADF1",
+    # ★ 2026-10-24 N5-W11：加长观测预算 300→900（可配 AGENTCTL_ACT_EXT_OBSERVE_MS）是**合法变更**
+    #   ⇒ 863B1509… → F8669E4C…（只改这一个常量与注释；三态语义/HYSTERESIS/尺寸守卫一字未动）
+    "src/agentctl/core.py": "F8669E4C7217BF38D631065ADBA0DB0A",
     "src/agentctl/action_guard_policy.json": "73F5F0DD2C1B7729032EAB3707D934FD",
     # ★ M19P-S2（AUTHDIR 收编，678a19f）后的两份闸门：解析口径收编是**合法变更** ⇒ 指纹更新
     "src/agentctl/gate.py": "C79B13507F11F84D73A0C896197CD9B4",

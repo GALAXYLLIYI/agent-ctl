@@ -67,63 +67,6 @@
       "sha256": "2a8d1bfd58bd97b49a957e67e00147363dad74318f74711717fa8a6807df7b1e"
     },
     {
-      "name": "M20_core加长观测",
-      "desc": "core 判决层「加长观测」：判「确认没变」之前用 core 自己的尺子再看 ≤300ms（framecache.WAIT_BUDGET_MS，不新增数字）",
-      "evidence": "提交 a19fbad（已推 Gitee）；施工前基线 MD5 5BB4A068…（= 旧 INVARIANTS 指纹）",
-      "lines": {
-        "% (before.size, _img.size))": 1,
-        "ACT_EXT_OBSERVE_MS = framecache.WAIT_BUDGET_MS": 1,
-        "_after, _df = _obs[\"after\"], _obs[\"df\"]": 2,
-        "_diff_ignore_cfg(args),": 2,
-        "_ig = ignore if isinstance(ignore, dict) else ACT_DIFF_IGNORE_DEFAULT": 1,
-        "_img = r.get(\"图\")": 1,
-        "_new_df = _act_diff_of(before, _img, win_off, ignore)": 1,
-        "_obs = _act_extend_observe(hwnd, _before, _after, _df, _before_off,": 2,
-        "_obs = {\"做了\": False, \"原因\": \"\", \"耗时ms\": 0.0, \"轮次\": 0, \"结果\": None}": 1,
-        "_obs[\"做了\"] = True": 1,
-        "_obs[\"原因\"] = \"加长观测异常：%s: %s\" % (type(e).__name__, e)": 1,
-        "_obs[\"原因\"] = \"取不到基线尺寸 ⇒ 不升级\"": 1,
-        "_obs[\"原因\"] = \"复核判差未确认变化 ⇒ 判词不动\"": 1,
-        "_obs[\"原因\"] = \"末帧≠基线（或没测出来）⇒ 不加长观测（零额外等待）\"": 1,
-        "_obs[\"原因\"] = \"没有基线帧/末帧 ⇒ 无从比对 ⇒ 不加长观测\"": 1,
-        "_obs[\"原因\"] = \"测到变化但没拿到帧 ⇒ 判词不动\"": 1,
-        "_obs[\"原因\"] = \"画面退化 ⇒ 没测出来 ⇒ 不加长观测（保持 code=5）\"": 1,
-        "_obs[\"原因\"] = \"窗口内没有测到变化 ⇒ 判词不动（仍 code=8「确认没变」）\"": 1,
-        "_obs[\"原因\"] = \"窗口内测到变化 ⇒ 改判成功（code=0）\"": 1,
-        "_obs[\"原因\"] = (\"新帧与基线口径/尺寸不同（%s vs %s）⇒ 不升级\"": 1,
-        "_obs[\"结果\"] = r.get(\"changed\")": 1,
-        "_obs[\"耗时ms\"] = float(r.get(\"耗时ms\") or 0.0)": 1,
-        "_obs[\"说明\"] = r.get(\"说明\") or \"\"": 1,
-        "_obs[\"轮次\"] = int(r.get(\"轮次\") or 0)": 1,
-        "_out = {\"after\": after, \"df\": df, \"观测\": _obs}": 1,
-        "_out[\"after\"] = _img": 1,
-        "_out[\"df\"] = _new_df": 1,
-        "budget_ms: int = ACT_EXT_OBSERVE_MS) -> dict:": 1,
-        "budget_ms=int(budget_ms),": 1,
-        "caret_px=int(_ig.get(\"caret_px\", 8) or 0),": 1,
-        "def _act_extend_observe(hwnd: int, before, after, df: dict, win_off=None,": 1,
-        "degraded=bool(_eff_info and _eff_info.get(\"degraded\") is True))": 2,
-        "except Exception as e:": 1,
-        "except Exception:": 1,
-        "if (_new_df or {}).get(\"changed\") is not True:": 1,
-        "if (df or {}).get(\"changed\") is not False:": 1,
-        "if _img is None:": 1,
-        "if _obs[\"观测\"].get(\"做了\"):": 2,
-        "if before is None or after is None:": 1,
-        "if before.size != _img.size:": 1,
-        "if degraded:": 1,
-        "if r.get(\"changed\") is not True:": 1,
-        "ignore=None, degraded: bool = False,": 1,
-        "min_area_px=int(_ig.get(\"min_area_px\", 24) or 0))": 1,
-        "poll_ms=framecache.WAIT_POLL_MS,": 1,
-        "r = framecache.wait_change(int(hwnd), before,": 1,
-        "r[\"data\"] = {**(r.get(\"data\") or {}), \"加长观测\": _obs[\"观测\"]}": 2,
-        "return _out": 10,
-        "try:": 2
-      },
-      "sha256": "77d40e066b229f766a3c63767f8889524ca829e0b814eb8ed45e5966937f766c"
-    },
-    {
       "name": "M20_act安全批",
       "desc": "M20 act 安全批（ae62a18，OpenCode 审计 §九 的安全/崩溃级三条）：X1 干跑打字闸 / X2 滚动干跑闸 / X3 root=None 兜底",
       "evidence": "提交 ae62a18（已入仓）；基线 = M19P2 交卷态 0BA9D046…（git ae62a18^）",
@@ -302,7 +245,7 @@
       "sha256": "0d978c8f4387edfdd812e15f6923dde39887d4afd7fe85782b882a056fa8a9b1"
     }
   ],
-  "ledger_sha256": "ee3558bd892d4ad2269a3f17c8e362026461bd9252fbb6d0db12c63bd1cbcca9",
+  "ledger_sha256": "7f48c5f3f0e407288c2b6c36768eb572afbdd40d1a108e3a2136052dcbff0a6f",
   "files": {
     "act.py": {
       "target": "legacy_tools/_src/act.py",
@@ -325,13 +268,11 @@
       "target": "src/agentctl/core.py",
       "baseline": {
         "kind": "file",
-        "path": "baseline_core_pre_M20.py",
-        "md5": "5BB4A068CA1A89837A09F9C875FA36CE",
-        "git_ref": "a19fbad^:src/agentctl/core.py"
+        "path": "baseline_core_20261024.py",
+        "md5": "F8669E4C7217BF38D631065ADBA0DB0A",
+        "note": "2026-10-24 轮换：M20 甲案 + W11 加长观测900 一并冻结为基线"
       },
-      "segments": [
-        "M20_core加长观测"
-      ]
+      "segments": []
     },
     "src/agentctl/gate.py": {
       "target": "src/agentctl/gate.py",
@@ -438,6 +379,7 @@
     },
     "legacy_tools/_src/auth_popup.py": {
       "AUTHDIR = os.path.join(BASE, \"_auth\")": 1
-    }
+    },
+    "core.py": {}
   }
 }
