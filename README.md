@@ -55,11 +55,11 @@ Copyright (c) 2026 <作者署名占位：用户待定，主控收口时替换>
 | 仓 | 地址 | 状态 | 角色 |
 |---|---|---|---|
 | **GitHub** | https://github.com/GALAXYLLIYI/agent-ctl | 私有（开源准备中） | **主仓**：开发、Issue、PR 以这里为准 |
-| **Gitee** | https://gitee.com/GALAXYLIYI/agent-ctl | **公开（试开源）** | **镜像**：每次推送同步，国内可直连安装 |
+| **Gitee** | https://gitee.com/GALAXYLIYI/agent-ctl | **私有（试开源已收，发布日再开）** | **镜像**：每次推送同步 |
 
-> 现在能直接装的是 **Gitee 镜像**；GitHub 转公开后两边的安装命令通用。
+> 两个仓现在**都是私有**：安装需要仓库访问权限。正式发布日再按发布清单把镜像转公开。
 
-试开源镜像（Gitee）：
+私有仓（需权限）：
 
 ```powershell
 git clone https://gitee.com/GALAXYLIYI/agent-ctl ; cd agent-ctl ; pwsh -File .\install.ps1
