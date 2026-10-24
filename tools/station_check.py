@@ -29,7 +29,18 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, os.path.join(ROOT, "src"))
 
-RUNTIME_ACT = r"<工作区>\Documents\dsh-viewer-plugin\tools\act.py"
+# ★ 2026-10-24 脱敏：原来这里写死本机绝对路径（会泄露工作区）。改成**运行时定位**：
+#   ① env AGENTCTL_LIVE_ACT 直接指文件；② 否则读 build/local_legacy_home.txt 指针（本机部署用）；
+#   ③ 都拿不到 ⇒ 空串，下面各检查如实报「live 找不到 ⇒ 验不了」，不假装通过。
+_live_act = (os.environ.get("AGENTCTL_LIVE_ACT") or "").strip()
+if not _live_act:
+    try:
+        _ptr = open(os.path.join(ROOT, "build", "local_legacy_home.txt"), encoding="utf-8").read().strip()
+        if _ptr:
+            _live_act = os.path.join(_ptr, "act.py")
+    except OSError:
+        _live_act = ""
+RUNTIME_ACT = _live_act
 REPO_ACT = os.path.join(ROOT, "legacy_tools", "act.py")
 
 
