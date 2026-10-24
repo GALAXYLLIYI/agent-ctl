@@ -18,5 +18,5 @@ r"""agentctl —— 本机电脑控制的统一控制面
    补上它就正常了。这是一条值钱的教训：**冻结前先确保每个包都有 __init__.py**。
 """
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 __all__ = ["core", "gate", "store", "clock", "clip", "server", "mcp", "cli"]
