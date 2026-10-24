@@ -476,30 +476,40 @@ def main():
 
     attempt("9 · ★P0-1：环境性拒绝（没证/没租约/被挡/缺凭据）**不计入** fail_streak，也不拉闸", c9)
 
-    # ══ 10 · 真失败照旧：护栏不许松 ═══════════════════════════════════
+    # ══ 10 · ★W12 口径：no_effect 不进 fail_streak；同点连戳仍抓 ═══════
     def c10():
         clear_brake()
         ag.reset_state()
         FLAG = os.environ["AGENTCTL_BRAKE_FLAG"]
+        # ① 7 次 no_effect、**每次换目标**（= 正常人点输入框/打字，画面零变化）
         raw = []
-        flag_after = {}
         for i in range(1, 8):
-            raw.append(ag.guard().observe(actor="窗G", tool="ctl_click", args={"hwnd": 1234, "xy": [600 + i, 700]}, ok=False, failure_class="no_effect"))
-            flag_after[i] = os.path.exists(FLAG)
+            raw.append(ag.guard().observe(actor="输入者", tool="ctl_type",
+                                          args={"hwnd": 1234, "xy": [600 + i, 700]},
+                                          ok=False, failure_class="no_effect"))
         hits = [h for h in raw if h]
-        if not hits:
-            return False, "连续 7 次真失败（画面没变）一次都没触发（护栏松了）"
-        if flag_after[6]:
-            return False, "★第 1 次命中就拉闸（两级被压成一级）"
-        if hits[0].get("threshold_name") != "fail_streak":
-            return False, "阈值名不对：%r" % hits[0].get("threshold_name")
-        if hits[-1].get("stage") != "brake":
-            return False, "第 7 次应拉闸，实测 %r" % (hits[-1].get("stage"))
-        if not flag_after[7]:
-            return False, "★真失败第二次命中后急停旗子不存在（护栏没拉）"
-        return True, "真失败（no_effect）连续 7 次：第 6 次只提示、第 7 次拉闸（护栏没松）"
+        if hits:
+            return False, "★7 次 no_effect（换目标）仍触发：%s" % _brief(hits[0])
+        if os.path.exists(FLAG):
+            return False, "★7 次 no_effect（换目标）把急停拉下来了（W12 回归：输入框正常零变化）"
+        # ② 但同一坐标连戳 6 次 no_effect ⇒ 同目标连击必须照抓（防乱点没丢）
+        clear_brake()
+        ag.reset_state()
+        got = []
+        for _ in range(6):
+            got.append(ag.guard().observe(actor="输入者", tool="ctl_click",
+                                          args={"hwnd": 1234, "xy": [777, 888]},
+                                          ok=False, failure_class="no_effect"))
+        g_hits = [h for h in got if h]
+        if not g_hits:
+            return False, "同点 6 次 no_effect 没被同目标判据抓住（防乱点丢了）"
+        if g_hits[0].get("threshold_name") != "same_target_streak":
+            return False, "同点连戳应由 same_target_streak 抓，实测 %r" % g_hits[0].get("threshold_name")
+        if not os.path.exists(FLAG):
+            return False, "★同点连戳 6 次没拉闸（第二次命中应拉闸）"
+        return True, "no_effect 换目标不进 fail_streak（0 命中）；同点连戳仍由 same_target 两级拉闸"
 
-    attempt("10 · 真失败（动作发出去了但没生效）**照旧**两级拉闸（护栏没松）", c10)
+    attempt("10 · ★W12：no_effect 换目标不进 fail_streak；同点连戳仍被抓（护栏没松）", c10)
 
     # ══ 11 · 接线：core 动作出口把 failure_class 传进去了 ═════════════
     def c11():

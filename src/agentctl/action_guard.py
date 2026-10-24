@@ -62,9 +62,13 @@ _FALLBACK = {
     "hint_ttl_sec": 600,
     "action_tools": ["ctl_click", "ctl_type", "ctl_fill", "ctl_focus", "ctl_browser"],
     # ★ P0-1（2026-10-21）：哪些失败性质**计入** fail_streak。
-    #   默认只算「动作发出去了但没生效」与「真异常」——
     #   环境性拒绝（没证 / 没租约 / 被挡 / 缺凭据 / 前台不对）重试无意义，不该算信号。
-    "fail_counted_classes": ["no_effect", "action_failed"],
+    # ★ W12（2026-10-24）：**no_effect（code=8）不再计入 fail_streak** ——
+    #   点空输入框/往输入框打字时画面本来就零变化（光标闪烁被 caret 过滤），把它当
+    #   「actor 在崩」的证据会误拉急停（实测 6~7 次就停）。防「反复戳同一点」仍由
+    #   same_target_counted_classes（默认仍含 no_effect）兜住。
+    "fail_counted_classes": ["action_failed"],
+    "same_target_counted_classes": ["no_effect", "action_failed"],
     "blocked_event": True,
 }
 
@@ -291,19 +295,26 @@ class ActionGuard:
         tgt = target_key(args)
 
         # ── ★ P0-1（2026-10-21）：这次失败**算不算数**，先算清楚 ──
-        #   counted = True  ⇒ 动作**真的发出去了**（成功 / 发出去了没生效 / 真异常）
-        #                    ⇒ 进 fail_streak，也进同目标连击
-        #   counted = False ⇒ 环境性拒绝（没证 / 没租约 / 被挡 / 缺凭据 / 前台不对）
-        #                    ⇒ **一个像素都没发出去**：重试它没有意义，
-        #                      更不该被算成「agent 在乱点」的信号
-        #   failure_class=None ⇒ 调用方没给性质 ⇒ **按旧口径**（counted=True，向后兼容）
+        #   counted      = 进 **fail_streak**（「这个 actor 整体在崩」的证据）
+        #   counted_same = 进 **同目标连击**（「在同一个点上反复戳」的证据）
+        #   ★ 2026-10-24（W12）：两条判据**分开算**。起因是实测急停误触发：
+        #     点 QQ 空输入框 / 往输入框打字时，画面本来就零变化（光标闪烁被 caret 过滤）⇒
+        #     core 报 code=8（no_effect）⇒ 旧口径把它同时算进 fail_streak 与同目标连击
+        #     ⇒ 正常操作点 6~7 次就拉急停。
+        #     ⇒ 现在：no_effect **不再进 fail_streak**，但仍进同目标连击（真「反复戳同一点」照抓）。
+        #   环境性拒绝（没证/没租约/被挡…）两条都不进。
         counted_classes = pol.get("fail_counted_classes")
+        same_classes = pol.get("same_target_counted_classes")
         if not isinstance(counted_classes, (list, tuple)):
             counted_classes = _FALLBACK.get("fail_counted_classes")
+        if not isinstance(same_classes, (list, tuple)):
+            same_classes = counted_classes
         if failure_class is None:
             counted = True
+            counted_same = True
         else:
             counted = str(failure_class) in [str(x) for x in (counted_classes or [])]
+            counted_same = str(failure_class) in [str(x) for x in (same_classes or [])]
 
         # ── 判据 1：同目标连击 ──
         hit_tgt = ""
@@ -320,13 +331,13 @@ class ActionGuard:
             # ★ P0-1：动作**没发出去**的尝试不算「连点同一处」——
             #   连点的危险信号是「agent 在同一个点上反复戳」，
             #   而被闸门当场拦下（压根没戳）恰恰是闸门在正常工作。
-            if counted:
+            if counted_same:
                 n = ((rec.get("n") or 0) + 1) if rec else 1
                 _state["same"][key] = {"n": n, "last": now}
             else:
                 n = (rec.get("n") or 0) if rec else 0
             _state["same"][(actor, "#last")] = {"n": 0, "last": now, "t": tgt}
-            if counted and n >= int(pol.get("same_target_streak") or 5):
+            if counted_same and n >= int(pol.get("same_target_streak") or 5):
                 hit_tgt = tgt
 
         # ── 判据 2：连续失败（成功一次即清零）──

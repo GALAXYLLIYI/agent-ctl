@@ -96,7 +96,9 @@ INVARIANTS = {
     # ★ 2026-10-24 N5-W11：加长观测预算 300→900（可配 AGENTCTL_ACT_EXT_OBSERVE_MS）是**合法变更**
     #   ⇒ 863B1509… → F8669E4C…（只改这一个常量与注释；三态语义/HYSTERESIS/尺寸守卫一字未动）
     "src/agentctl/core.py": "F8669E4C7217BF38D631065ADBA0DB0A",
-    "src/agentctl/action_guard_policy.json": "73F5F0DD2C1B7729032EAB3707D934FD",
+    # ★ W12（2026-10-24）：动作面刹车策略拆分 fail/same_target 两类计数 ⇒ 策略 json 合法变更
+    #   73F5F0DD… → BB104E5D…
+    "src/agentctl/action_guard_policy.json": "BB104E5DC164A1F1EA4C310EC5C2AF88",
     # ★ M19P-S2（AUTHDIR 收编，678a19f）后的两份闸门：解析口径收编是**合法变更** ⇒ 指纹更新
     "src/agentctl/gate.py": "C79B13507F11F84D73A0C896197CD9B4",
     "legacy_tools/gate.py": "04F4A1A22BA04B0030B170620B8E9CD7",
