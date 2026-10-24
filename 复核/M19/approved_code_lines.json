@@ -8,86 +8,6 @@
   "updated": "2026-10-23",
   "segments": [
     {
-      "name": "M19′",
-      "desc": "等生效三态口径（_budget_verdict）+ 两个预算耗尽出口复用已算判差",
-      "evidence": "work\\_M19_语义修复_20221023\\backup_before → backup_after",
-      "lines": {
-        "def _budget_verdict(last_d):": 1,
-        "if last_d.get(\"changed\") is True:": 1,
-        "if not last_d:": 1,
-        "last_d = None": 1,
-        "last_d = d": 1,
-        "return False": 2,
-        "return None": 1,
-        "return {\"生效\": _budget_verdict(last_d), \"轮次\": rounds,": 2
-      },
-      "sha256": "513fadd91eb3e9880327bc670755170342a4755d7ad2a714f3d978b168101c32"
-    },
-    {
-      "name": "M19P",
-      "desc": "M19P 任务②：退出码三态映射助手 _rc_from_changed + W1/W2/W3 三个调用点",
-      "evidence": "M19P 交卷（主控复核输出_M19P交付后.txt）",
-      "lines": {
-        "def _rc_from_changed(changed, dry=False):": 1,
-        "if changed is None:": 1,
-        "if changed is True:": 1,
-        "if dry:": 1,
-        "return 0": 2,
-        "return 5": 1,
-        "return 8": 1,
-        "return _rc_from_changed(changed)": 2,
-        "return _rc_from_changed(changed, dry=dry)": 1
-      },
-      "sha256": "8bed167dc0e539f538e6b2aba12e2f5887ec27c03140af2030cf3e1ba261fad7"
-    },
-    {
-      "name": "M19P2",
-      "desc": "同族两处：X1 do_type 的 UIA 读回 / X2 do_drag 的选区读回",
-      "evidence": "窗口c 2026-10-23 11:25:20 交卷；主控 11:34:36 复核；提交 9dd051a",
-      "lines": {
-        "changed = None if sel is None else (True if len(sel) > 0 else False)": 1,
-        "changed = True if ok else False": 1,
-        "changed, ok, nl_only = None, False, False": 1,
-        "elif sel is None:": 1,
-        "else \"✅ 读回逐字符一致\") if ok else \"❌ 读回不一致\"": 1,
-        "else:": 2,
-        "f\"（{len(before)} → {len(after) if after is not None else 'None'} 字）\")": 1,
-        "if after is None:": 1,
-        "if dry:": 1,
-        "log(f\"{'（演练）' if dry else ''}✋ 拖拽 [{frm} → {to}] 窗口「{info['title']}」\" + tail)": 1,
-        "mark = \"❓ 读不回来＝**没测出来**（本次不报成功，请重新观测后重试）\"": 1,
-        "mark = (\"✅ 读回逐字符一致（仅换行表示不同）\" if nl_only": 1,
-        "nl_only = (after != want)": 1,
-        "ok = (after == want) or (_norm_nl(after) == _norm_nl(want))": 1,
-        "return _rc_from_changed(changed, dry=dry)": 2,
-        "tail = \"\"": 1,
-        "tail = \"　选中了 %d 字：「%s」\" % (len(sel), sel[:30])": 1,
-        "tail = \"　选区**读不回来**＝**没测出来**（本次不报成功，请重新观测后重试）\"": 1
-      },
-      "sha256": "2a8d1bfd58bd97b49a957e67e00147363dad74318f74711717fa8a6807df7b1e"
-    },
-    {
-      "name": "M20_act安全批",
-      "desc": "M20 act 安全批（ae62a18，OpenCode 审计 §九 的安全/崩溃级三条）：X1 干跑打字闸 / X2 滚动干跑闸 / X3 root=None 兜底",
-      "evidence": "提交 ae62a18（已入仓）；基线 = M19P2 交卷态 0BA9D046…（git ae62a18^）",
-      "lines": {
-        "else:": 2,
-        "f\"{'（演练：光标未移动）' if dry else ''}] 窗口「{info['title']}」\")": 1,
-        "if not dry:": 1,
-        "if root is None:": 1,
-        "if scan_code:": 1,
-        "log(f\"{'（演练）' if dry else ''}🖱 滚动 [SendInput 滚轮 {amount} 格，光标置于 ({x},{y})\"": 1,
-        "n_scan, fb_chars = send_text_scan(text)": 1,
-        "r = info[\"rect\"]": 1,
-        "send_text(text)": 1,
-        "time.sleep(0.12)": 1,
-        "user32.SetCursorPos(x, y)": 1,
-        "x, y, rr, ok_rect = (r[0] + r[2]) // 2, (r[1] + r[3]) // 2, r, True": 1,
-        "x, y, rr, ok_rect = _center(root)": 1
-      },
-      "sha256": "aa861c7d39a8200ba4a98c8e2301f07a6ec210c701d1bea404be8f60c0d8b74b"
-    },
-    {
       "name": "M19P-S2_authdir",
       "desc": "M19P-S2（src/agentctl/authdir.py）：AUTHDIR 收编为单一解析",
       "evidence": "提交 678a19f（已入仓）",
@@ -109,113 +29,19 @@
         "v = (os.environ.get(ENV_KEY) or \"\").strip()": 1
       },
       "sha256": "b7f47c82edd5c9cbe5ae6e01f29bb308859aaccdb890d3509424e7850bdcf1a7"
-    },
-    {
-      "name": "M19P3_谎报成功三条",
-      "desc": "F3 日志诚实度(changed is None 说清没测出来，rc 维持 0) + F5 read 读失败不再 return 0(落 9/5/4/5) + F7 do_type 前置读失败与真的没有文本区分开(落 9/5/5) + 新助手 _read_fail_rc(how) 四因落码",
-      "evidence": "work/_M19P3_谎报成功三条_20221023/真代码行清单_待追加账本.txt；判据 tests/_P3_M19P3_谎报成功三条_判据.py",
-      "lines": {
-        "\"再重跑；真要盲打须显式加 --force-send。\"))": 1,
-        "_rc, _kind = _read_fail_rc(how)": 1,
-        "_rd_rc, _rd_kind = _read_fail_rc(how)": 1,
-        "def _read_fail_rc(how):": 1,
-        "else (\"　✔ 页面已变化\" if changed else \"　⚠ 页面无变化\"))": 1,
-        "ev = (\"　⚠⚠ 判不出来（指纹取不到）＝**没测出来**\" if changed is None": 1,
-        "extra=(\"本次是**读失败**（不是「目标没有文本区」）⇒ \"": 1,
-        "h = (how or \"\")": 1,
-        "if _kind != \"no_ctrl\":": 1,
-        "if before is None:": 1,
-        "if h.startswith(\"找不到文本编辑区\"):": 1,
-        "if h.startswith(\"未获授权\"):": 1,
-        "if h.startswith(\"目标窗口不响应\"):": 1,
-        "if h.startswith(\"读不到文本\"):": 1,
-        "if txt is None:": 1,
-        "log(f\"⛔ 读取失败（{_rd_kind}）：{how}\")": 1,
-        "return 4, \"no_ctrl\"": 1,
-        "return 5, \"hung\"": 1,
-        "return 5, \"unknown\"": 1,
-        "return 5, \"unreadable\"": 1,
-        "return 9, \"unauthorized\"": 1,
-        "return _rd_rc": 1,
-        "return _tell_next(_rc, f\"打不了字：{how}\", hwnd,": 1
-      },
-      "sha256": "878681f8338ee401209014f5f6479aa361f61884ae83cbb83bd58031dad1ab50"
-    },
-    {
-      "name": "M19P4_致命项两条",
-      "desc": "删掉顶层 import 块里重复的 import sys（模块顶部已 import 过）+ 补 import tempfile（_pf() 用 tempfile.gettempdir() 却没 import ⇒ 开 profile 时 NameError 崩在半路）",
-      "evidence": "首次跑完整 pack_dist 被 pyflakes 常驻门槛拦下（act.py:185 redefinition of unused sys / act.py:1072 undefined name tempfile）；判据 tests/_P3_M19P4_致命项_判据.py",
-      "lines": {
-        "import tempfile": 1
-      },
-      "sha256": "d43509b5b46ac2c84a03c687cd0a4a5e512940556135083b8871d2e62411e7e8"
-    },
-    {
-      "name": "M20_act安全批（X4/X5）",
-      "desc": "M20 act 安全批 · X4（do_click 的就绪闸真被读）/ X5（targets 失败与空列表显式落码）—— 窗口 e · 2026-10-24 · N1-W4 交卷",
-      "evidence": "N1-W4 交卷 work\\通宵_20261024\\交卷\\W4_act安全批.md；判据 tests\\_P3_W4_act安全批_判据.py（四跑法 0/1/0/0）；worktree night/e（未合并入 main）",
-      "lines": {
-        "\"      下一步：等界面停下（或先 scroll 到位）再重试。\")": 1,
-        "\"可操作区(④)\": bands, **_targets_meta(ts)},": 1,
-        "\"可操作区(④)\": {}, **_targets_meta([], err=e.why)},": 1,
-        "\"失败原因\": (err or \"\"),": 1,
-        "\"已截断\": bool(len(ts) >= limit)}": 1,
-        "\"枚举失败\": bool(err),": 1,
-        "5, f\"**反竞态拒绝**：控件「{c.Name}」{_rdy_why}\", hwnd,": 1,
-        "_rdy_ok = (_rdy or {}).get(\"就绪\")": 1,
-        "_rdy_why = (\"界面在动（预算内没稳）\" if _rdy_ok is False": 1,
-        "auto, root = _uia(hwnd)": 1,
-        "class TargetsUnavailable(Exception):": 1,
-        "def __init__(self, why, rc, kind):": 1,
-        "def _targets_meta(ts, limit=40, err=None):": 1,
-        "def _targets_rc(ts, limit=40):": 1,
-        "def targets(hwnd, limit=40, with_geo=False, strict=False):": 1,
-        "else \"就绪没测出来（抓不到画面）\")": 1,
-        "ensure_ascii=False, indent=1))": 1,
-        "except Exception as e:": 1,
-        "except TargetsUnavailable as e:": 1,
-        "extra=\"就绪轮询说界面还没稳 ⇒ 宁可不点也不点错。\\n\"": 1,
-        "if _rdy_ok is not True:": 1,
-        "if not ts:": 1,
-        "if strict:": 2,
-        "print(json.dumps({\"窗口\": info, \"白名单\": \"OK\", \"可交互控件\": [],": 1,
-        "raise": 1,
-        "raise TargetsUnavailable(\"UIA 枚举失败：%s\" % (e,), 5, \"uia_failed\")": 1,
-        "raise TargetsUnavailable(\"未获授权（没有通行证/感知授权）\", 9, \"unauthorized\")": 1,
-        "return 0": 1,
-        "return 4": 1,
-        "return _targets_rc(ts)": 2,
-        "return _tell_next(": 1,
-        "return _tell_next(e.rc, f\"列不出可点控件：{e.why}\", a.hwnd)": 1,
-        "return {\"可交互控件数\": len(ts),": 1,
-        "self.kind = kind": 1,
-        "self.rc = rc": 1,
-        "self.why = why": 1,
-        "super().__init__(why)": 1,
-        "try:": 2,
-        "ts, geo = targets(a.hwnd, with_geo=True, strict=True)": 1
-      },
-      "sha256": "0d978c8f4387edfdd812e15f6923dde39887d4afd7fe85782b882a056fa8a9b1"
     }
   ],
-  "ledger_sha256": "b2e5db22f1ee44879e7202c4577d68bc0ef491999e2263ba2f0098586e0b23ac",
+  "ledger_sha256": "cf3d5edfd2748094b9d406b5c828988796ff885e0cfc872f5440787acc820a17",
   "files": {
     "act.py": {
       "target": "legacy_tools/_src/act.py",
       "baseline": {
         "kind": "file",
         "path": "../backup_before/act_1_src__legacy_tools__act.py",
-        "md5": "91AE6D554048912F8CA21DC113AD077F"
+        "md5": "3030D4B6C56C9F8046AC73F62BE52D77",
+        "note": "2026-10-24 措辞清理（用户→用户）后重落基线；旧段清单随之退场"
       },
-      "segments": [
-        "M19′",
-        "M19P",
-        "M19P2",
-        "M20_act安全批",
-        "M19P3_谎报成功三条",
-        "M19P4_致命项两条",
-        "M20_act安全批（X4/X5）"
-      ]
+      "segments": []
     },
     "core.py": {
       "target": "src/agentctl/core.py",
@@ -232,7 +58,7 @@
       "baseline": {
         "kind": "file",
         "path": "baseline_gate_src_20261024.py",
-        "md5": "C79B13507F11F84D73A0C896197CD9B4",
+        "md5": "C46F32739E06DFE277862F611DA73847",
         "note": "2026-10-24 重写历史（路径脱敏）后重新落基线：原 git_ref 678a19f^ 已不存在"
       },
       "segments": [],
@@ -243,7 +69,7 @@
       "baseline": {
         "kind": "file",
         "path": "baseline_gate_legacy_20261024.py",
-        "md5": "04F4A1A22BA04B0030B170620B8E9CD7",
+        "md5": "E874CA6C28F82C0A565FEC6ACF41F153",
         "note": "2026-10-24 重写历史（路径脱敏）后重新落基线：原 git_ref 678a19f^ 已不存在"
       },
       "segments": [],
@@ -285,37 +111,7 @@
     "ledger_sha256": "整本指纹 = sha256(逐行「FILE\\t文件\\ttarget\\t基线md5\\t段名列表」与「SEG\\t段名\\t段规范化文本」，全部按顺序用 \\n 连接)"
   },
   "removed": {
-    "act.py": {
-      "\"可操作区(④)\": bands},": 1,
-      "+ (\"\" if dry else f\"　选中了 {len(sel) if sel is not None else '?'} 字：\"": 1,
-      "auto, root = _uia(hwnd)": 1,
-      "def targets(hwnd, limit=40, with_geo=False):": 1,
-      "else \"✅ 读回逐字符一致\") if ok else \"❌ 读回不一致\"": 1,
-      "else:": 1,
-      "ev = \"\" if changed is None else (\"　✔ 页面已变化\" if changed else \"　⚠ 页面无变化\")": 1,
-      "f\"「{(sel or '')[:30]}」\"))": 1,
-      "f\"（{len(before)} → {len(after) if after else 'None'} 字）\")": 1,
-      "if scan_code:": 1,
-      "import sys": 1,
-      "log(f\"{'（演练）' if dry else ''}✋ 拖拽 [{frm} → {to}] 窗口「{info['title']}」\"": 1,
-      "log(f\"{'（演练）' if dry else ''}🖱 滚动 [SendInput 滚轮 {amount} 格，光标置于 ({x},{y})] 窗口「{info['title']}」\")": 1,
-      "mark = (\"✅ 读回逐字符一致（仅换行表示不同）\" if nl_only": 1,
-      "n_scan, fb_chars = send_text_scan(text)": 1,
-      "nl_only = (after != want)": 1,
-      "ok = (after == want) or (_norm_nl(after) == _norm_nl(want))": 1,
-      "return 0": 2,
-      "return 0 if (changed is True) else 8": 1,
-      "return 0 if (dry or (sel is not None and len(sel) > 0)) else 8": 1,
-      "return 0 if (dry or changed is True) else 8": 1,
-      "return 0 if (dry or ok) else 8": 1,
-      "return 0 if changed is True else 8": 1,
-      "return {\"生效\": False, \"轮次\": rounds,": 2,
-      "send_text(text)": 1,
-      "time.sleep(0.12)": 1,
-      "ts, geo = targets(a.hwnd, with_geo=True)": 1,
-      "user32.SetCursorPos(x, y)": 1,
-      "x, y, rr, ok_rect = _center(root)": 1
-    },
+    "act.py": {},
     "src/agentctl/gate.py": {},
     "legacy_tools/_src/gate.py": {},
     "legacy_tools/_src/auth_popup.py": {},

@@ -182,7 +182,11 @@ import ctypes.wintypes as wt
 import datetime
 import json
 import os
-import sys
+# ★ M19P4（2026-10-23 主控）：补 `import tempfile` —— `_prof()` 用 `tempfile.gettempdir()`
+#   却没 import ⇒ **开 profile 时必崩 NameError**（pyflakes 判致命 ⇒ 发包被拦）。
+#   同时删掉下面那个重复的 `import sys`：模块顶部（:14）已经 import 过 sys，
+#   两处重复定义会被 pyflakes 判 "redefinition of unused 'sys'"（同样致命）。
+import tempfile
 import threading
 import time
 
@@ -1326,6 +1330,61 @@ def _wait_ready(hwnd, base_img, budget_ms=POLL_BUDGET_MS, need=POLL_HYSTERESIS,
         _t.sleep(POLL_INTERVAL_MS / 1000.0)
 
 
+def _budget_verdict(last_d):
+    """★ M19'（2026-10-23）等生效**预算耗尽**时的三态判据 —— 两个出口**共用**这一份口径。
+
+    ★ 要修的语义缺陷（改前两个出口都硬写 `"生效": False`）：
+      core 侧把 False 判成 **code=8「确认没变」**、只有 None 才走 **code=5「没测出来」**
+      ⇒ 「我没机会看到」被当成「我看到了、确实没变」⇒ **agent 不重试** ⇒ 流程静默停住。
+
+    ★ 入参是**已经算好**的判差 `last_d`（= `_img_diff(base_img, last)` 的结果）：
+      **绝不重算**。`_img_diff` 在 1632x1191 全尺寸帧上实测 **13.84ms/次**
+      （主控 2026-10-23 实测 20 次平均）⇒ 重算一次就是预算耗尽路径每次动作白加 ~13.8ms，
+      总耗时变成 450+13.8=**463.8ms**，破坏 act.py 自己写的
+      「总耗时 ≤ 预算（**永远不慢于改前的固定 sleep**）」不变式。
+      循环里每次采样后已经算过一次判差（`d = _img_diff(base_img, cur)`），
+      而此刻 `last is cur` ⇒ **直接复用那一份**，零额外开销。
+
+    ★ 口径（**两个预算耗尽出口完全一致** ⇒ 杜绝两处漂移）：
+      · last_d is None（从未采到帧）        ⇒ False（保持改前行为，不让退化路径漂移）
+      · last_d.get('changed') is True      ⇒ None（没测出来）⇒ core 判 code=5 ⇒ agent 会重试
+      · 其余（含 changed False / None）     ⇒ False（确认没变）⇒ core 判 code=8（语义不变）
+
+    ★ 判 None 而不是判 True：闪烁（变一帧又变回）因此**永远不会被判成功**
+      （None ⇒ code=5 ⇒ 重试，不是成功）。
+    """
+    if not last_d:
+        return False
+    if last_d.get("changed") is True:
+        return None
+    return False
+
+
+def _rc_from_changed(changed, dry=False):
+    """★ M19P（2026-10-23）「变了没」⇒ **退出码三态映射**（三处漏网共用这一份口径）。
+
+    · changed is True  ⇒ rc=0（变了）
+    · changed is None  ⇒ rc=5（**没测出来**／判不了）—— 指纹取不到时**不许**说「确认没变」
+    · changed is False ⇒ rc=8（**确认没变**）
+    · dry=True         ⇒ rc=0（演练不算失败；**dry 分支不动**）
+
+    ★ 要修的缺陷（改前三处都是 `return 0 if changed is True else 8` 一类写法）：
+      `changed is None` 的含义是「**前后图指纹取不到**」＝**没测出来**，
+      却被当成「确认没变」报出去 ⇒ **违反 `core.py:2881` 自己写的铁律**
+      （「没测出来」与「没变」必须**分开**；unknown 永不当成功，也**不当「没变」**）。
+
+    ★ 口径（`core.py` 的 `_map_rc`）：act 的 rc=5 ⇒ 信封 code=5（CODE_UNSTABLE，重新观测）；
+      act 的 rc=8 ⇒ 信封 code=8（CODE_NO_CHANGE，确认没变）⇒ agent 侧**倾向重试**的是前者。
+    """
+    if dry:
+        return 0
+    if changed is True:
+        return 0
+    if changed is None:
+        return 5
+    return 8
+
+
 def _wait_effect(hwnd, base_img, budget_ms=POLL_BUDGET_MS, need=POLL_HYSTERESIS,
                  capture=None):
     """**变化即停**：连续 `need` 帧都判「变了」⇒ 动作生效了，可以收工。
@@ -1333,6 +1392,10 @@ def _wait_effect(hwnd, base_img, budget_ms=POLL_BUDGET_MS, need=POLL_HYSTERESIS,
     ★ 这取代了原来的 `time.sleep(_settle(450))`（动作后等界面反应）。
     ★ 返回 {生效: True/False/None, 轮次, 耗时ms, 图}
       None = 没测出来；False = 预算内**没看到**变化（= 老的「页面无变化」口径）。
+    ★ M19'（2026-10-23）：**预算耗尽**的两个出口都走 `_budget_verdict`（共用一份口径，
+      **复用循环里已算好的判差 last_d，不重算**）⇒
+      最后一帧与基线**不同** ⇒ None（没测出来 ⇒ core 判 code=5 ⇒ agent 会重试）；
+      **相同** ⇒ False（确认没变 ⇒ code=8）；从未采到帧 ⇒ False（保持改前行为）。
     ★ **不落盘**：轮询期只在内存里采样；最后那张由调用方决定要不要落盘。
     """
     import time as _t
@@ -1345,13 +1408,14 @@ def _wait_effect(hwnd, base_img, budget_ms=POLL_BUDGET_MS, need=POLL_HYSTERESIS,
     streak = 0
     rounds = 0
     last = None
+    last_d = None          # ★ M19'：最后一帧**已经算好的**判差（预算耗尽时直接复用，不重算）
     first_img = None       # ★ M12：第一次「变化」那一帧（回传给 core 当证据）
     deadline = t0 + max(0.0, float(budget_ms) / 1000.0)
     while True:
         rounds += 1
         # ★ 同上：预算检查在采样之前 ⇒ 总耗时 ≤ 预算（**永远不慢于改前的固定 sleep**）
         if _t.perf_counter() >= deadline:
-            return {"生效": False, "轮次": rounds,
+            return {"生效": _budget_verdict(last_d), "轮次": rounds,
                     "耗时ms": (_t.perf_counter() - t0) * 1000.0, "图": last,
                     "退化": _is_degraded(last), "首变图": first_img,
                     "口径": _frame_scope(last or base_img)}
@@ -1363,6 +1427,7 @@ def _wait_effect(hwnd, base_img, budget_ms=POLL_BUDGET_MS, need=POLL_HYSTERESIS,
                     "口径": _frame_scope(last or base_img)}
         last = cur
         d = _img_diff(base_img, cur)
+        last_d = d           # ★ M19'：存下来给「预算耗尽」出口复用（**不重算判差**）
         if d.get("changed") is True:
             streak += 1
             if first_img is None:
@@ -1375,7 +1440,7 @@ def _wait_effect(hwnd, base_img, budget_ms=POLL_BUDGET_MS, need=POLL_HYSTERESIS,
                     "退化": _is_degraded(cur), "首变图": first_img,
                     "口径": _frame_scope(cur)}
         if _t.perf_counter() >= deadline:
-            return {"生效": False, "轮次": rounds,
+            return {"生效": _budget_verdict(last_d), "轮次": rounds,
                     "耗时ms": (_t.perf_counter() - t0) * 1000.0, "图": last,
                     "退化": _is_degraded(last), "首变图": first_img,
                     "口径": _frame_scope(last or base_img)}
@@ -1777,7 +1842,27 @@ def _need_perceive(note):
         return False
 
 
-def targets(hwnd, limit=40, with_geo=False):
+class TargetsUnavailable(Exception):
+    """★ W4（2026-10-24）X5：`targets` 枚举失败 —— **显式失败标记**，不再用空列表兼任。
+
+    ★ 为什么需要它：改前 `targets()` 在两种**失败**下都返回 `[]` ——
+      「没通行证」（`_need_perceive` 没过）与「真的没有可交互控件」**分不开**；
+      而 `_uia` 失败是直接抛异常（不在 `targets` 内捕获，`main` 也没有 try）⇒
+      ① 失败被报成**成功 + 空列表**（静默假成功）② 崩溃时 rc=1（没约定的码）。
+    ★ rc 口径（**都用现成码，不新增码表**）：
+      · 未获授权（没通行证）⇒ 9（契约：停下，向用户申请）
+      · UIA 枚举失败 / 窗口不响应 ⇒ 5（没测出来，稍后重试）
+    ★ 既有调用方（drill.py 等）**不受影响**：它们走默认 strict=False，行为与改前逐字节一致。
+    """
+
+    def __init__(self, why, rc, kind):
+        super().__init__(why)
+        self.why = why
+        self.rc = rc
+        self.kind = kind
+
+
+def targets(hwnd, limit=40, with_geo=False, strict=False):
     """列出可交互的控件（只读，但同样要过闸）。
 
     ★ 返回值形状（2026-10-10 加 ④ 时为兼容而保留）：
@@ -1786,10 +1871,20 @@ def targets(hwnd, limit=40, with_geo=False):
       `with_geo=True` → 返回 `(可点控件列表, 全树几何列表)`，供 ④ 推断带状区。
     **默认不改形状**是刻意的：为了加一个输出字段而改掉函数返回类型，
     等于把所有既有调用方一起打破（drill.py 就有两处）。
+    ★ W4（2026-10-24）X5：新增 `strict` —— **失败不再用空列表兼任**：
+      strict=True 时，枚举失败抛 `TargetsUnavailable`（带 rc）；
+      strict=False（默认）时**行为与改前逐字节一致**（既有调用方零影响）。
     """
     if not _need_perceive("列可点控件"):
+        if strict:
+            raise TargetsUnavailable("未获授权（没有通行证/感知授权）", 9, "unauthorized")
         return ([], []) if with_geo else []
-    auto, root = _uia(hwnd)
+    try:
+        auto, root = _uia(hwnd)
+    except Exception as e:
+        if strict:
+            raise TargetsUnavailable("UIA 枚举失败：%s" % (e,), 5, "uia_failed")
+        raise
     out = []
 
     def walk(c, d=0):
@@ -1831,6 +1926,35 @@ def targets(hwnd, limit=40, with_geo=False):
     except Exception:
         geo = []
     return out, geo
+
+
+def _targets_rc(ts, limit=40):
+    """★ W4（2026-10-24）X5：列控件的结果 → 退出码。
+
+    ★ **空列表不再是成功**（改前 `main` 一律 `return 0`）：
+      「真的没有可交互控件」是一个**事实**，但它必须落成**明确的失败码**
+      （4 找不到控件）⇒ 调用方不会把「没列出来」与「列出来是空的」当成同一种「成功」。
+    ★ 与审计建议的关系：审计 P5 说「空列表本身可以是合法结果」（更软的口径），
+      工单 W4 要求「空列表也返回成功 ⇒ 改判为明确的『没目标』失败码」⇒ 采纳工单口径；
+      「枚举失败」与「真的没有」则用「枚举失败 / 已截断」标记分开（见 `_targets_meta`）。
+    ★ 不新增错误码：只用现成的 4（契约：重新 ctl_windows + ctl_tree 看现状）。
+    """
+    if not ts:
+        return 4
+    return 0
+
+
+def _targets_meta(ts, limit=40, err=None):
+    """★ W4（2026-10-24）X5：列表结果的**自描述元信息** ——
+    让人和机器能分辨三种「空」：枚举失败 / 被 limit 截断 / 真的没有可交互控件。
+
+    ★ 审计 P5 的原话：「它无法区分『枚举成功但确实没有』与『枚举失败/被截断』」
+      ⇒ 这几个标记就是那个区分。
+    """
+    return {"可交互控件数": len(ts),
+            "枚举失败": bool(err),
+            "失败原因": (err or ""),
+            "已截断": bool(len(ts) >= limit)}
 
 
 def _scan_all_geometry(c, acc, d=0, maxd=8):
@@ -2484,7 +2608,8 @@ def do_keys(hwnd, vk=0x41, ctrl=False, times=1, dry=False, wait=0.06, scan_code=
     after = evidence(hwnd, "after")
     fp0, fp1 = _img_fp(before.get("文件") or ""), _img_fp(after.get("文件") or "")
     changed = None if (fp0 is None or fp1 is None) else (fp1 != fp0)
-    ev = "" if changed is None else ("　✔ 页面已变化" if changed else "　⚠ 页面无变化")
+    ev = ("　⚠⚠ 判不出来（指纹取不到）＝**没测出来**" if changed is None
+          else ("　✔ 页面已变化" if changed else "　⚠ 页面无变化"))
     log(f"⌨ 按键 [vk=0x{vk:X}{' +Ctrl' if ctrl else ''} ×{times}"
         f"{' 扫描码' if scan_code else ''}] 窗口「{info['title']}」"
         f"　前图={before.get('文件') or '无'} 后图={after.get('文件') or '无'}" + ev)
@@ -2561,7 +2686,9 @@ def do_fill(hwnd, xy, text, dry=False, clear=True):
     log(f"⌨ 填字段 [{len(text)}字{'，含中文' if any(ord(c) > 127 for c in text) else ''}"
         f"{'，已先清空' if clear else ''}] 坐标({x},{y}) 窗口「{info['title']}」"
         f"　前图={b0.get('文件') or '无'} 后图={b1.get('文件') or '无'}" + ev)
-    return 0 if changed is True else 8
+    # ★ M19P（2026-10-23）：**三态映射**（W1）—— 指纹取不到（changed=None）＝**没测出来**，
+    #   不许再报 rc=8「确认没变」（core.py:2881 铁律）；rc=5 ⇒ agent 侧倾向重新观测/重试。
+    return _rc_from_changed(changed)
 
 
 # ─────────────────── 证据 ───────────────────
@@ -2754,6 +2881,21 @@ def do_click(hwnd, name=None, xy=None, dry=False, force_coord=False, retry=0,
                         extra="这是刻意设计的护栏：动的手指比读到的坐标慢，宁可不点也不点错。\n"
                               "      下一步：等界面停下（或先 scroll 到位）再重试；"
                               "滚动类控件可改用 UIA Scroll（本工具默认就会优先走它）。")
+                # ★ W4（2026-10-24）X4：`_rdy` 原来**算了却从不看** ——
+                #   反竞态只看「矩形有没有变」⇒「界面还在动但矩形恰好没变」照样点下去
+                #   ⇒ M7 的就绪轮询（连续 N 帧没变才动手）这个护栏形同虚设。
+                #   现在**真的读它**：就绪=True 才动手；
+                #   False=预算内没稳（界面还在动）、None=没测出来（抓不到画面）⇒ 一律拒（rc=5）。
+                #   ★ 为什么 None 也拒：本仓铁律「unknown 永不当成功」——「没测出来」≠「稳了」。
+                #   ★ dry 分支不受影响（这一整段就在 `if not dry:` 里）。
+                _rdy_ok = (_rdy or {}).get("就绪")
+                if _rdy_ok is not True:
+                    _rdy_why = ("界面在动（预算内没稳）" if _rdy_ok is False
+                                else "就绪没测出来（抓不到画面）")
+                    return _tell_next(
+                        5, f"**反竞态拒绝**：控件「{c.Name}」{_rdy_why}", hwnd,
+                        extra="就绪轮询说界面还没稳 ⇒ 宁可不点也不点错。\n"
+                              "      下一步：等界面停下（或先 scroll 到位）再重试。")
             if use_post:
                 method = "PostMessage 后台投递（不抢前台焦点）"
                 if not dry:
@@ -3047,7 +3189,17 @@ def do_scroll(hwnd, amount, dry=False, force_wheel=False):
     _fg = ensure_foreground(hwnd, "滚动(滚轮)", dry=dry)
     if _fg:
         return _fg
-    x, y, rr, ok_rect = _center(root)
+    # ★ M20（2026-10-23 · X3）：**root=None 时不许 `_center(None)` 崩掉**（崩溃级缺陷）。
+    #   `_uia` 超时/失败时上面把 root 置 None（注释写「直接走路线 P」），
+    #   但这里**无条件** `_center(root)` ⇒ `ctrl.BoundingRectangle` → AttributeError
+    #   ⇒ 进程 rc=1 ⇒ **路线 P 的前台兜底永远走不到**。
+    #   护栏：root 为 None 时直接用**窗口矩形中心**（与下面 ok_rect=False 的兜底同一口径）；
+    #   **root 正常时的路径一字不改**（仍走 `_center(root)` 的控件矩形中心）。
+    if root is None:
+        r = info["rect"]
+        x, y, rr, ok_rect = (r[0] + r[2]) // 2, (r[1] + r[3]) // 2, r, True
+    else:
+        x, y, rr, ok_rect = _center(root)
     if not ok_rect:                       # 根控件矩形为空时，退回窗口矩形中心
         r = info["rect"]
         x, y = (r[0] + r[2]) // 2, (r[1] + r[3]) // 2
@@ -3056,14 +3208,20 @@ def do_scroll(hwnd, amount, dry=False, force_wheel=False):
         return _tell_next(
             5, f"**坐标类**：滚轮落点 ({x},{y}) 不在窗口矩形 {r} 内", hwnd,
             extra=_dpi_report(hwnd))
-    user32.SetCursorPos(x, y)
-    time.sleep(0.12)
+    # ★ M20（2026-10-23 · X2）：**dry-run 不许移动鼠标光标**（安全级缺陷）。
+    #   改前 `wheel` 被 dry 护住了，`user32.SetCursorPos(x, y)` 却没有
+    #   ⇒ 演练也会把**用户的光标**挪到窗口中心（演练不该动用户的手）。
+    #   护栏：挪光标 + 随后的停顿 + 滚轮**一起**进 `if not dry:`；
+    #   **非 dry 路径一字不改**（挪光标 → 停顿 → 滚轮，顺序与参数照旧）。
     if not dry:
+        user32.SetCursorPos(x, y)
+        time.sleep(0.12)
         # 注意符号：MOUSEEVENTF_WHEEL 的 data **正值 = 向上滚**（远离用户）。
         # 所以"下滚 amount 格"（amount 为负）要发负值 —— 写成 wheel(-120*amount) 会方向反掉，
         # 表现是"数值一点不动"，因为已经在顶了。这个错被判据抓出来过一次。
         wheel(120 * amount)
-    log(f"{'（演练）' if dry else ''}🖱 滚动 [SendInput 滚轮 {amount} 格，光标置于 ({x},{y})] 窗口「{info['title']}」")
+    log(f"{'（演练）' if dry else ''}🖱 滚动 [SendInput 滚轮 {amount} 格，光标置于 ({x},{y})"
+        f"{'（演练：光标未移动）' if dry else ''}] 窗口「{info['title']}」")
     return 0
 
 
@@ -3178,6 +3336,33 @@ def read_doc(hwnd):
         return c, c.GetTextPattern().DocumentRange.GetText(-1), "TextPattern"
     except Exception as e:
         return c, None, f"读不到文本：{str(e)[:60]}"
+
+
+def _read_fail_rc(how):
+    """★ M19P3（2026-10-23）：`read_doc` 失败原因的落码 —— **四种原因不压成一个码**。
+
+    · "未获授权"（`_need_perceive` 没过闸）  ⇒ rc=9（没通行证）
+    · "目标窗口不响应（IsHungAppWindow=1）"  ⇒ rc=5（窗口不稳定 ⇒ 稍后重试）
+    · "找不到文本编辑区"                      ⇒ rc=4（**真的**没有这个控件）
+    · "读不到文本：…"（取值失败）            ⇒ rc=5（**没测出来**）
+    · 其它未知原因                            ⇒ rc=5（**没测出来**，不许当成功）
+
+    ★ 为什么必须分开：改前 `read_doc` 的四种失败全被压成 rc=4「找不到文本区」，
+      而契约 §2.1 给 code=4 的处方是「重新 ctl_windows + ctl_tree 看现状」
+      ⇒ 对「窗口挂了」「读不到值」都是**错处方** ⇒ agent 会照着绕圈。
+    ★ 返回 (rc, kind)：kind 是给调用方分辨「能不能走网页表单模式」的机读标记 ——
+      **只有** kind == "no_ctrl"（真的没有文本区）才允许 --force-send 盲打。
+    """
+    h = (how or "")
+    if h.startswith("未获授权"):
+        return 9, "unauthorized"
+    if h.startswith("目标窗口不响应"):
+        return 5, "hung"
+    if h.startswith("找不到文本编辑区"):
+        return 4, "no_ctrl"
+    if h.startswith("读不到文本"):
+        return 5, "unreadable"
+    return 5, "unknown"
 
 
 def read_selection(hwnd):
@@ -3320,8 +3505,24 @@ def do_type(hwnd, text, dry=False, allow_if_starts_with=None, force_send=False,
         # ★ 核验降级说明必须留痕：无元素直发**没有 UIA 回读**可比，
         #   「画面没变」判 8 而不是默默当成功。
         log("   核验：前后截图比对（无 UIA 回读可比）；判不了=unknown 不算失败")
-        return 0 if (changed is True) else 8
+        # ★ M19P（2026-10-23）：**三态映射**（W2）—— 指纹取不到（changed=None）＝**没测出来**，
+        #   不许再报 rc=8「确认没变」（core.py:2881 铁律）；rc=5 ⇒ agent 侧倾向重新观测/重试。
+        return _rc_from_changed(changed)
     c, before, how = read_doc(hwnd)
+    if before is None:
+        # ★ M19P3（2026-10-23）：**读失败与「真的没有文本区」分开**（四种失败原因不压成一个码）。
+        #   改前 `before is None` 一律落 rc=4「找不到文本区」⇒ 把真因（未获授权 / 窗口不响应 /
+        #   读不到文本）掩盖成另一个错；而 code=4 的处方（契约 §2.1）是「重新 ctl_windows +
+        #   ctl_tree 看现状」⇒ 对挂掉的窗口 / 取不到值**都是错处方** ⇒ agent 会照着绕圈。
+        #   ★ 只有 kind == "no_ctrl"（**真的**没有文本区）才允许走下面的网页表单模式；
+        #     读失败**不许**盲打（网页表单模式是「用户须明确授权」的兜底，不是读失败的出口）。
+        _rc, _kind = _read_fail_rc(how)
+        if _kind != "no_ctrl":
+            return _tell_next(_rc, f"打不了字：{how}", hwnd,
+                              extra=("本次是**读失败**（不是「目标没有文本区」）⇒ "
+                                     "**不许**改用网页表单模式盲打。\n"
+                                     "      先按上面那行真因处置（等窗口恢复 / 重新授权 / 换个目标），"
+                                     "再重跑；真要盲打须显式加 --force-send。"))
     if before is None and not force_send:
         return _tell_next(4, f"打不了字：{how}", hwnd,
                           extra="打字需要 UIA 文本区来做「只往空文档打」的安全阀。\n"
@@ -3333,10 +3534,17 @@ def do_type(hwnd, text, dry=False, allow_if_starts_with=None, force_send=False,
         b0 = {} if dry else evidence(hwnd, "typesend0")
         before = ""
         n_scan, fb_chars = 0, []
-        if scan_code:
-            n_scan, fb_chars = send_text_scan(text)
-        else:
-            send_text(text)
+        # ★ M20（2026-10-23 · X1）：**dry-run 不许真的把字打出去**（安全级缺陷）。
+        #   演练语义是「只算不做」；改前这里 `send_text_scan(text)` / `send_text(text)`
+        #   **没有 dry 闸门**（只有 b0/b1 用了 `{} if dry else evidence(...)` 护住）
+        #   ⇒ `--force-send --dry-run` 会**真的把字打进目标窗口**。
+        #   护栏：发送这一段整体进 `if not dry:`；**非 dry 路径一字不改**
+        #   （调用次数、顺序、参数、返回码口径全部照旧）。
+        if not dry:
+            if scan_code:
+                n_scan, fb_chars = send_text_scan(text)
+            else:
+                send_text(text)
         time.sleep(_settle(450))
         b1 = {} if dry else evidence(hwnd, "typesend1")
         f0, f1 = _img_fp(b0.get("文件") or ""), _img_fp(b1.get("文件") or "")
@@ -3349,7 +3557,9 @@ def do_type(hwnd, text, dry=False, allow_if_starts_with=None, force_send=False,
         if scan_code:
             log(f"   扫描码注入：{n_scan}/{len(text)} 字符走了扫描码；"
                 f"回退 UNICODE 的字符：{''.join(fb_chars) or '无'}")
-        return 0 if (dry or changed is True) else 8
+        # ★ M19P（2026-10-23）：**三态映射**（W3）—— 指纹取不到（changed=None）＝**没测出来**，
+        #   不许再报 rc=8「确认没变」（core.py:2881 铁律）；**dry 分支不动**（演练恒 rc=0）。
+        return _rc_from_changed(changed, dry=dry)
     # ★ 最关键的一道保险：只往空文档（或带训练标记的靶文档）里打字，绝不可能污染用户的真实文件
     if before.strip() != "" and not (allow_if_starts_with and before.startswith(allow_if_starts_with)):
         # ① rc=7 必须**自带下一步**：报出当前字符数 + 清空命令原文。
@@ -3375,15 +3585,26 @@ def do_type(hwnd, text, dry=False, allow_if_starts_with=None, force_send=False,
     time.sleep(_settle(450))
     _, after, _ = read_doc(hwnd)
     want = before + text
-    ok = (after == want) or (_norm_nl(after) == _norm_nl(want))
-    nl_only = (after != want)
-    mark = ("✅ 读回逐字符一致（仅换行表示不同）" if nl_only
-            else "✅ 读回逐字符一致") if ok else "❌ 读回不一致"
+    # ★ M19P2（2026-10-23）：**三态映射**（同族第①处 · do_type 元素段 · UIA 读回）——
+    #   读回**失败**（after is None）＝「**没测出来**」，不许写成「确认没变」
+    #   （core.py:2881 铁律：「没测出来」与「没变」必须**分开**）；
+    #   改前这里还会 `_norm_nl(None)` 直接 AttributeError **崩掉**（更糟）。
+    #   「读到了但不一致」才是 rc=8。口径复用 M19P 的 `_rc_from_changed`
+    #   （True⇒0 / None⇒5 / False⇒8），**dry 分支不动**。
+    if after is None:
+        changed, ok, nl_only = None, False, False
+        mark = "❓ 读不回来＝**没测出来**（本次不报成功，请重新观测后重试）"
+    else:
+        ok = (after == want) or (_norm_nl(after) == _norm_nl(want))
+        nl_only = (after != want)
+        changed = True if ok else False
+        mark = ("✅ 读回逐字符一致（仅换行表示不同）" if nl_only
+                else "✅ 读回逐字符一致") if ok else "❌ 读回不一致"
     log(f"{'（演练）' if dry else ''}⌨ 打字 [{len(text)} 字"
         f"{'（含中文）' if any(ord(x) > 127 for x in text) else ''}] "
         f"窗口「{info['title']}」 {mark} "
-        f"（{len(before)} → {len(after) if after else 'None'} 字）")
-    return 0 if (dry or ok) else 8
+        f"（{len(before)} → {len(after) if after is not None else 'None'} 字）")
+    return _rc_from_changed(changed, dry=dry)
 
 
 def do_drag(hwnd, frm, to, dry=False):
@@ -3428,10 +3649,19 @@ def do_drag(hwnd, frm, to, dry=False):
         drag(frm, to)
     time.sleep(_settle(400))
     sel = read_selection(hwnd) if not dry else None
-    log(f"{'（演练）' if dry else ''}✋ 拖拽 [{frm} → {to}] 窗口「{info['title']}」"
-        + ("" if dry else f"　选中了 {len(sel) if sel is not None else '?'} 字："
-                          f"「{(sel or '')[:30]}」"))
-    return 0 if (dry or (sel is not None and len(sel) > 0)) else 8
+    # ★ M19P2（2026-10-23）：**三态映射**（同族第②处 · do_drag · 选区读回）——
+    #   读回**失败**（sel is None）＝「**没测出来**」，不许写成「确认没变」
+    #   （core.py:2881 铁律）；「读到了但是空选区」才是 rc=8。
+    #   口径复用 M19P 的 `_rc_from_changed`（True⇒0 / None⇒5 / False⇒8）。
+    changed = None if sel is None else (True if len(sel) > 0 else False)
+    if dry:
+        tail = ""
+    elif sel is None:
+        tail = "　选区**读不回来**＝**没测出来**（本次不报成功，请重新观测后重试）"
+    else:
+        tail = "　选中了 %d 字：「%s」" % (len(sel), sel[:30])
+    log(f"{'（演练）' if dry else ''}✋ 拖拽 [{frm} → {to}] 窗口「{info['title']}」" + tail)
+    return _rc_from_changed(changed, dry=dry)
 
 
 def main():
@@ -3600,6 +3830,14 @@ def main():
                           "前80字": (txt or "")[:80], "选中": (sel or "")[:60],
                           "选中字数": len(sel) if sel is not None else None},
                          ensure_ascii=False, indent=1))
+        if txt is None:
+            # ★ M19P3（2026-10-23）：**读失败不许报成功** —— 改前无论读没读到都 `return 0`
+            #   ⇒ 调用方拿到「读取成功、字符数为 null」的自相矛盾回执。
+            #   四种失败原因各落各的码（不许压成一个）：未获授权⇒9 / 窗口不响应⇒5 /
+            #   真的没有文本区⇒4 / 读不到文本⇒5。
+            _rd_rc, _rd_kind = _read_fail_rc(how)
+            log(f"⛔ 读取失败（{_rd_kind}）：{how}")
+            return _rd_rc
         return 0
 
     if a.action == "targets":
@@ -3611,7 +3849,17 @@ def main():
         info, why = check_target(a.hwnd)
         if why:
             return _tell_deny(why, a.hwnd)
-        ts, geo = targets(a.hwnd, with_geo=True)
+        # ★ W4（2026-10-24）X5：枚举失败**显式落码**，不再用空列表兼任 ——
+        #   改前：_need_perceive 没过 ⇒ targets 返回 [] ⇒ 这里照旧 return 0
+        #   （调用方把「没列出来」当成「列出来了、就是没有」⇒ 静默假成功）；
+        #   _uia 失败 ⇒ 异常直接穿出 main ⇒ rc=1（没约定的码）。
+        try:
+            ts, geo = targets(a.hwnd, with_geo=True, strict=True)
+        except TargetsUnavailable as e:
+            print(json.dumps({"窗口": info, "白名单": "OK", "可交互控件": [],
+                              "可操作区(④)": {}, **_targets_meta([], err=e.why)},
+                             ensure_ascii=False, indent=1))
+            return _tell_next(e.rc, f"列不出可点控件：{e.why}", a.hwnd)
         bands = _bands(a.hwnd, geo)
         if a.compact:
             print(f"窗口：{info['title']}　前台={info['foreground']}　可交互控件 {len(ts)} 个")
@@ -3641,11 +3889,11 @@ def main():
             print("     拖拽推荐点     : %s" % json.dumps(bands.get("拖拽推荐点", {}),
                                                         ensure_ascii=False))
             print("     坐标系         : %s" % bands.get("坐标系"))
-            return 0
+            return _targets_rc(ts)
         print(json.dumps({"窗口": info, "白名单": "OK", "可交互控件": ts,
-                          "可操作区(④)": bands},
+                          "可操作区(④)": bands, **_targets_meta(ts)},
                          ensure_ascii=False, indent=1))
-        return 0
+        return _targets_rc(ts)
     if a.action == "click":
         xy = tuple(int(v) for v in a.xy.split(",")) if a.xy else None
         if not a.name and not xy:

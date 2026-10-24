@@ -91,7 +91,8 @@ PROD = os.path.join(ROOT, "legacy_tools", "act.py")
 
 BASE_ACT = "91AE6D554048912F8CA21DC113AD077F"
 INVARIANTS = {
-    "contract/tools.json": "10F2E60B1E6119534159389182C2FB68",
+    # ★ 2026-10-24 措辞清理（用户→用户）：contract 与两份闸门属**合法文案变更** ⇒ 指纹更新
+    "contract/tools.json": "DA7976AA52B029DE7167D9E87C5D6EA8",
     # ★ M20 core 甲案（a19fbad）后的 core.py：判决层「加长观测」是**合法变更** ⇒ 指纹更新
     # ★ 2026-10-24 N5-W11：加长观测预算 300→900（可配 AGENTCTL_ACT_EXT_OBSERVE_MS）是**合法变更**
     #   ⇒ 863B1509… → F8669E4C…（只改这一个常量与注释；三态语义/HYSTERESIS/尺寸守卫一字未动）
@@ -101,8 +102,8 @@ INVARIANTS = {
     #   73F5F0DD… → BB104E5D…
     "src/agentctl/action_guard_policy.json": "BB104E5DC164A1F1EA4C310EC5C2AF88",
     # ★ M19P-S2（AUTHDIR 收编，678a19f）后的两份闸门：解析口径收编是**合法变更** ⇒ 指纹更新
-    "src/agentctl/gate.py": "C79B13507F11F84D73A0C896197CD9B4",
-    "legacy_tools/gate.py": "04F4A1A22BA04B0030B170620B8E9CD7",
+    "src/agentctl/gate.py": "C46F32739E06DFE277862F611DA73847",
+    "legacy_tools/gate.py": "E874CA6C28F82C0A565FEC6ACF41F153",
     # ★ M20 引入的保护：甲案只**引用** framecache 的既有常量（WAIT_BUDGET_MS=300），没改它
     "src/agentctl/framecache.py": "AB7788D98580C179CCE77F4AEC7750E3",
     # ★ 新纳入保护：M19P-S2 新建的 AUTHDIR 规则正文（三处**逐字节全等** = 141022EA…）

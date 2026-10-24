@@ -2,12 +2,12 @@
  "_note": "gen_legacy 双基线台账：dirs[产物目录(相对仓库根)].files[文件] = {A0: 上次写产物时的规范化md5(去BOM/换行统一), T0: 生成时真源的规范化md5}。★必须进 git（G3 边界③）；手改 A0 等于共谋 —— 防线会失效，改台账唯一合法途径是跑一次生成。键与 src 用相对路径：本文件进仓，不得携带本机绝对路径（R2 (c) 类）。",
  "dirs": {
   "legacy_tools": {
-   "updated": "2026-10-24 11:31:39",
+   "updated": "2026-10-24 15:33:26",
    "src": "legacy_tools/_src",
    "files": {
     "gate.py": {
-     "A0": "04f4a1a22ba04b0030b170620b8e9cd7",
-     "T0": "04f4a1a22ba04b0030b170620b8e9cd7",
+     "A0": "e874ca6c28f82c0a565fec6acf41f153",
+     "T0": "e874ca6c28f82c0a565fec6acf41f153",
      "bytes_out": 29266
     },
     "gate_lock.py": {
@@ -16,8 +16,8 @@
      "bytes_out": 4876
     },
     "act.py": {
-     "A0": "cc4e5933b30b92adcae358a98be24764",
-     "T0": "cc4e5933b30b92adcae358a98be24764",
+     "A0": "3030d4b6c56c9f8046ac73f62be52d77",
+     "T0": "3030d4b6c56c9f8046ac73f62be52d77",
      "bytes_out": 216212
     },
     "perceive.py": {
@@ -193,12 +193,12 @@
    }
   },
   "../dsh-viewer-plugin/tools": {
-   "updated": "2026-10-24 11:31:40",
+   "updated": "2026-10-24 15:34:15",
    "src": "legacy_tools/_src",
    "files": {
     "gate.py": {
-     "A0": "04f4a1a22ba04b0030b170620b8e9cd7",
-     "T0": "04f4a1a22ba04b0030b170620b8e9cd7",
+     "A0": "e874ca6c28f82c0a565fec6acf41f153",
+     "T0": "e874ca6c28f82c0a565fec6acf41f153",
      "bytes_out": 29266
     },
     "gate_lock.py": {
@@ -207,8 +207,8 @@
      "bytes_out": 4876
     },
     "act.py": {
-     "A0": "cc4e5933b30b92adcae358a98be24764",
-     "T0": "cc4e5933b30b92adcae358a98be24764",
+     "A0": "3030d4b6c56c9f8046ac73f62be52d77",
+     "T0": "3030d4b6c56c9f8046ac73f62be52d77",
      "bytes_out": 216212
     },
     "perceive.py": {
