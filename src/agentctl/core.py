@@ -2633,14 +2633,17 @@ ACT_DIFF_IGNORE_DEFAULT = {"caret_px": framecache.DIFF_CARET_PX,
                            "min_area_px": framecache.DIFF_MIN_AREA}
 
 # ★ M20（甲案 · core 侧接线）：「加长观测」的预算（毫秒）。
-#   ★ **不新增数字**：直接引用 `framecache.WAIT_BUDGET_MS`（既有的「变化即停」默认预算，
-#     `framecache.py:107` = 300）⇒ act.py / framecache.py / gate.py / 契约
-#     **一个预算/阈值常量都没动**（本单只**引用**既有常量）。
-#   ★ 为什么 300ms 够（两条入口都覆盖）：
-#     ① act 侧等满 `POLL_BUDGET_MS=800`（`act.py:1115`）⇒ 观测窗口 800 → ~1,130ms；
-#     ② core 回落 `wait_change(300)` 那条路（`core.py:2957-2959`）⇒ 300 → ~630ms
-#     ⇒ 覆盖「点了之后 200~500ms 才响应」这一段（主控核稿 §七 的慢应用场景）。
-ACT_EXT_OBSERVE_MS = framecache.WAIT_BUDGET_MS   # = 300
+#   ★ M19P5（2026-10-24 · N5-W11）：从「引用既有常量 300」改成 **可配置、默认 900**。
+#     为什么必须改（真机长跑实测）：act 侧有效覆盖约 **431ms**，core 再加 300 ⇒ 约 **731ms**；
+#     靶场 `ms=900` 的慢响应**落在那条线外** ⇒ 判「确认没变」`code=8`（长跑里 slow@900 稳定 8）。
+#     ⇒ 加长观测预算提到 900 ⇒ 总覆盖 ≈ 431+900 = 1331ms ⇒ 900ms 那一档被救回（code=0）。
+#   ★ **可配置**：环境变量 `AGENTCTL_ACT_EXT_OBSERVE_MS`（毫秒）⇒ 现场/靶场可调，不必改代码。
+#   ★ **谁付这个钱**：**只有 `df.changed is False` 那一格**（= 即将判「确认没变」）才花；
+#     快路径（真变了 ⇒ 直接成功）**零额外等待**（`_act_extend_observe` 根本不进来，见 :3009）。
+#     ⇒ 代价 = 「确认没变」的动作从 +300ms 变成 +900ms（**慢的只是本来就没反应的那些**）。
+#   ★ **不动三态语义**：一直不变仍 code=8（确认没变）、没测出来/退化仍 code=5；
+#     HYSTERESIS（滞回 2 帧）、尺寸/口径守卫一律不动 ⇒ 只是把「看多久」变长，不放宽任何判定。
+ACT_EXT_OBSERVE_MS = int(os.environ.get("AGENTCTL_ACT_EXT_OBSERVE_MS") or 900)
 
 # ★ M6-①（2026-10-22）：**帧复用总开关**。
 #   False ⇒ 一次观测都不复用（退回改前行为：每步都重扫、每次都现拍）。

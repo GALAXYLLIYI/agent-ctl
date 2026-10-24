@@ -21,7 +21,7 @@ r"""M20 判据 · core 判决层「加长观测」（甲案）—— **判据先
     与 `time.sleep(秒)` ⇒ `FakeTime` 内部按**毫秒**记账，对外 `perf_counter()/time()`
     仍返回**秒**（与真 time 同单位）⇒ 300ms 预算的比较才是对的。
 
-★ 本判据实现的断言（**12 条**，每条一行标签 + PASS/FAIL）：
+★ 本判据实现的断言（**14 条**，每条一行标签 + PASS/FAIL；M19P5 新增 A13/A14）：
   A1  末帧≠基线 ⇒ code=0 且**零额外等待**（假钟一毫秒都没走、`capture_client` 一次没被调）
   A2  末帧==基线 且窗口内变化 ⇒ **不再是 code=8**（改判成功；滞回 HYSTERESIS=2 ⇒ 轮次=4）
   A3  末帧==基线 且**一直不变** ⇒ **仍是 code=8**（「确认没变」语义保住）
@@ -30,10 +30,12 @@ r"""M20 判据 · core 判决层「加长观测」（甲案）—— **判据先
   A6  **采样失败**（首轮判差就失败）⇒ **仍是 code=5** 且不做观测
   A7  观测**自己**抓不到帧 ⇒ **判词不动**（仍 code=8；施工图决策 D2）
   A8  **口径/尺寸不同** ⇒ **不升级**（防假成功）
-  A9  **预算恒等**：加长观测预算 = 既有常量 `framecache.WAIT_BUDGET_MS`（不许新增数字）
-  A10 **加长观测不超预算**（假钟账：300 ≤ 耗时 ≤ 336.2ms）
+  A9  **加长观测预算 = 默认 900ms 且可配**（env `AGENTCTL_ACT_EXT_OBSERVE_MS`；M19P5 改）
+  A10 **加长观测不超预算**（假钟账：900 ≤ 耗时 ≤ 961.2ms）
   A11 **快路径逐字节不变**（未触发 ⇒ 回执不加「加长观测」键）
   A12 **端到端（`_act` 级）**：末帧==基线 + 窗口内变化 ⇒ 回执 code=0（改前 8）
+  A13 **慢应用 900ms 才变 ⇒ 加长观测后 code=0**（假时钟离线；旧 300ms 预算下同一脚本仍是 8）
+  A14 **明确越界（≈1500ms 才变）⇒ 仍 code=8**（不许无限等；边界不许被"救"成成功）
 
 ★ 与 M19 / M19P2 现有判据的关系（**本单不改那两个文件**）：
   · `tests\_P3_M19_语义修复_判据.py` 测 **act 侧**三态（预算耗尽 ⇒ 没测出来）；
@@ -105,14 +107,34 @@ CAPTURE_MS = 24.0        # 客户区 PrintWindow 抓帧
 DIFF_MS = 12.2           # 判差
 POLL_MS = float(framecache.WAIT_POLL_MS)      # 25
 GRACE_MS = float(framecache.WAIT_GRACE_MS)    # 50
-BUDGET_MS = float(framecache.WAIT_BUDGET_MS)  # 300
+BUDGET_MS = float(framecache.WAIT_BUDGET_MS)  # 300（act 侧/framecache 的既有预算，**没动**）
 ROUND_MS = CAPTURE_MS + DIFF_MS + POLL_MS     # 61.2ms / 轮
 MAX_OBSERVE_MS = BUDGET_MS + CAPTURE_MS + DIFF_MS    # 336.2ms（预算 + 最后一轮超支）
+
+# ★ M19P5（2026-10-24 · N5-W11）：core 的**加长观测**预算改成「可配置、默认 900」。
+#   ⇒ 判据的期望值跟着走**产品常量**（core.ACT_EXT_OBSERVE_MS），现场用 env 调了也自洽。
+OBS_BUDGET_MS = float(getattr(core, "ACT_EXT_OBSERVE_MS", 900))          # 默认 900
+# ★ 上界按**真实账**算（framecache.wait_change：先 50ms 宽限期，再「抓帧→判差→查预算→睡」）：
+#   最后一轮只算 capture+diff（36.2ms），退出时最多比预算多**一轮**（61.2ms）⇒ 上界 = 预算 + 一轮。
+MAX_OBSERVE_MS_NEW = OBS_BUDGET_MS + ROUND_MS                         # 961.2ms
+# ★ 旧预算（改前的 300）—— A13 用它做**对照**：同一脚本在 300 窗口下必须仍是 code=8
+#   ⇒ 证明这一刀真的把窗口拉长了，而不是"判据自己放水"。
+OLD_BUDGET_MS = 300.0
+# ★ 慢应用档的换算（**假时钟口径，量的是"加长观测窗内"的时刻**）：
+#   真机口径：act 侧有效覆盖 ≈ 431ms，core 再加观测窗 ⇒ 总覆盖 ≈ 431 + 观测窗。
+#   ⇒ 「应用侧 900ms 才变」≈ 观测窗内第 469ms ⇒ 落在 [0,900) 内、旧 [0,300) 外 ⇒ 被救回。
+#   ⇒ 「应用侧 ≈1500ms 才变」≈ 观测窗内第 1069ms ⇒ 越界 ⇒ 仍 code=8（不许无限等）。
+#   （卡片写「1300ms 才变 ⇒ 仍 code=8」；按卡片自己的算术 431+900=1331，1300 落在窗内
+#     ⇒ A14 取在**明确越界**的一侧，免得判据踩在 31ms 的刀尖上；口径差异已在交卷写明。）
+SLOW_APP_MS = 900          # 应用侧慢响应（真机档位）
+SLOW_WINDOW_ROUND = 8      # 观测窗内：第 8 轮才出现变化（≈490ms，旧 300 窗口抓不到）
+BEYOND_APP_MS = 1500       # 应用侧：明确越界
+BEYOND_WINDOW_ROUND = 15   # 观测窗内：第 15 轮才出现变化（≈980ms > 900 ⇒ 抓不到）
 
 _REAL_DIFF = framecache.diff_images            # 真判差（装桩前先抓在手里）
 _REAL_VERDICT = core._picture_verdict          # 真判词（注入 I3 时绕开它）
 
-# ── 12 条断言的标签（每条一行标签 + PASS/FAIL）───────────────────────────
+# ── 14 条断言的标签（每条一行标签 + PASS/FAIL）───────────────────────────
 A1_LABEL = "A1 末帧≠基线 ⇒ code=0 且零额外等待"
 A2_LABEL = "A2 末帧==基线且窗口内变化 ⇒ 不再是 code=8（改判成功）"
 A3_LABEL = "A3 末帧==基线且一直不变 ⇒ 仍是 code=8"
@@ -121,10 +143,12 @@ A5_LABEL = "A5 退化 ⇒ 仍是 code=5 且不做观测"
 A6_LABEL = "A6 采样失败 ⇒ 仍是 code=5 且不做观测"
 A7_LABEL = "A7 观测自己抓不到帧 ⇒ 判词不动（仍 code=8）"
 A8_LABEL = "A8 口径/尺寸不同 ⇒ 不升级（防假成功）"
-A9_LABEL = "A9 预算恒等（加长观测不许新增数字）"
-A10_LABEL = "A10 加长观测不超预算（假钟账）"
+A9_LABEL = "A9 加长观测预算 = 默认 900ms 且可配（env）"
+A10_LABEL = "A10 加长观测不超预算（假钟账：900 ≤ 耗时 ≤ 961.2ms）"
 A11_LABEL = "A11 快路径逐字节不变（不加「加长观测」键）"
 A12_LABEL = "A12 端到端（_act 级）：末帧==基线+窗口内变化 ⇒ code=0"
+A13_LABEL = "A13 慢应用 900ms 才变 ⇒ 加长观测后 code=0（旧 300 窗口仍是 8）"
+A14_LABEL = "A14 明确越界（≈1500ms 才变）⇒ 仍 code=8（不许无限等）"
 
 _MISSING = "产品未实现 `core._act_extend_observe`（甲案未落地）⇒ 本条无法验证"
 
@@ -295,11 +319,13 @@ def _verdict_code(df, degraded=False):
     return (out or {}).get("code")
 
 
-def _run_extend(ext, script, before=None, after=None, df=None, degraded=False):
+def _run_extend(ext, script, before=None, after=None, df=None, degraded=False,
+                budget_ms=None):
     """在假环境里跑一次「加长观测」；返回 (obs, env, df)。
 
     ★ `df` 若不给，就**在装桩之前**用真判差算好（这样它不占假钟 ⇒
       A1 的「假钟一毫秒都没走」才成立）。
+    ★ `budget_ms` 给了就**显式**传进去 ⇒ 用来做「旧 300ms 窗口」的对照实验（A13）。
     """
     before = BASE if before is None else before
     after = BASE if after is None else after
@@ -309,8 +335,12 @@ def _run_extend(ext, script, before=None, after=None, df=None, degraded=False):
     restore = env.install()
     try:
         try:
-            obs = ext(int(FAKE_HWND), before, after, df, (0, 0), None,
-                      degraded=degraded)
+            if budget_ms is None:
+                obs = ext(int(FAKE_HWND), before, after, df, (0, 0), None,
+                          degraded=degraded)
+            else:
+                obs = ext(int(FAKE_HWND), before, after, df, (0, 0), None,
+                          degraded=degraded, budget_ms=int(budget_ms))
         except TypeError:
             obs = ext(int(FAKE_HWND), before, after, df, (0, 0), None, degraded)
     finally:
@@ -374,8 +404,9 @@ def product_status():
     n_def = 1 if "def _act_extend_observe(" in src else 0
     n_call = src.count("_act_extend_observe(") - n_def
     return [
-        ("① 常量 ACT_EXT_OBSERVE_MS = framecache.WAIT_BUDGET_MS",
-         bool(re.search(r"ACT_EXT_OBSERVE_MS\s*=\s*framecache\.WAIT_BUDGET_MS", src))),
+        ("① 常量 ACT_EXT_OBSERVE_MS = 可配置、默认 900（env AGENTCTL_ACT_EXT_OBSERVE_MS）",
+         bool(re.search(r"ACT_EXT_OBSERVE_MS\s*=\s*int\(os\.environ\.get\(\s*"
+                        r"\"AGENTCTL_ACT_EXT_OBSERVE_MS\"\s*\)\s*or\s*900\s*\)", src))),
         ("② 函数 def _act_extend_observe(", n_def == 1),
         ("③ _act 两处调用点（改动点③/④）", n_call >= 2),
         ("④ 回执留痕「加长观测」两处（改动点⑤A/⑤B）",
@@ -386,7 +417,7 @@ def product_status():
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# 四 · 12 条断言（每条一行标签 + PASS/FAIL）
+# 四 · 14 条断言（每条一行标签 + PASS/FAIL）
 # ══════════════════════════════════════════════════════════════════════════
 def _a1(ext):
     """末帧≠基线 ⇒ code=0 且**零额外等待**。"""
@@ -434,17 +465,21 @@ def _a3(ext):
 
 
 def _a4(ext):
-    """闪烁（只 1 帧变）⇒ 仍是 code=8（抗假阳性红线）。"""
+    """闪烁（只 1 帧变）⇒ 仍是 code=8（抗假阳性红线）。
+
+    ★ M19P5：脚本**必须够长**（900ms 窗口要跑 ~15 轮）⇒ 否则假抓帧返回 None
+      ⇒ 观测会走「抓不到帧」那条路（结果=None），测的就不是"闪烁"而是"抓不到帧"了。
+    """
     if ext is None:
         return False, _MISSING
     df = core._act_diff_of(BASE, BASE, (0, 0), None)
-    obs, env, _ = _run_extend(ext, script=[BASE, CHG, BASE, BASE, BASE, BASE], df=df)
+    obs, env, _ = _run_extend(ext, script=[BASE, CHG] + [BASE] * 40, df=df)
     o = obs.get("观测") or {}
     code = _verdict_code(obs.get("df") or {})
     ok = (o.get("结果") is False and (obs.get("df") or {}).get("changed") is False
           and code == 8)
-    return ok, ("观测.结果=%s（HYSTERESIS=2 挡住单帧闪）判差=%s code=%s"
-                % (o.get("结果"), (obs.get("df") or {}).get("changed"), code))
+    return ok, ("观测.结果=%s（HYSTERESIS=2 挡住单帧闪）判差=%s code=%s 假钟=%.1fms"
+                % (o.get("结果"), (obs.get("df") or {}).get("changed"), code, env.clock.t))
 
 
 def _a5(ext):
@@ -504,28 +539,54 @@ def _a8(ext):
 
 
 def _a9(ext):
-    """预算恒等：加长观测预算 = 既有常量（不许新增数字）。"""
+    """加长观测预算：**默认 900ms** 且**可配**（env `AGENTCTL_ACT_EXT_OBSERVE_MS`）。
+
+    ★ M19P5（2026-10-24 · N5-W11）：这一条的口径**由主控改写** ——
+      改前是「预算恒等 = framecache.WAIT_BUDGET_MS（不许新增数字）」，
+      现在是「默认 900（可配）」⇒ 真机长跑里 slow@900 那一档才救得回来。
+    ★ 「可配」怎么验（**不起子进程**）：把源码里那**同一条表达式**在**假 os.environ**
+      下求值 ⇒ 设 1200 得 1200、不设得 900 ⇒ 证明 env 那条路真的通。
+    """
     has = hasattr(core, "ACT_EXT_OBSERVE_MS")
     val = getattr(core, "ACT_EXT_OBSERVE_MS", None)
-    same = (val == framecache.WAIT_BUDGET_MS)
-    is300 = (val == 300)
     src = _read_core_src()
-    literal = bool(re.search(r"ACT_EXT_OBSERVE_MS\s*=\s*framecache\.WAIT_BUDGET_MS", src))
-    ok = bool(has and same and is300 and literal)
-    return ok, ("存在=%s 值=%s（既有 WAIT_BUDGET_MS=%s）源码直引既有常量=%s"
-                % (has, val, framecache.WAIT_BUDGET_MS, literal))
+    m = re.search(r"^ACT_EXT_OBSERVE_MS\s*=\s*(.+)$", src, re.M)
+    expr = (m.group(1).strip() if m else "")
+    form_ok = bool(re.search(r"AGENTCTL_ACT_EXT_OBSERVE_MS", expr))
+    default_ok = (val == 900)
+    env_ok = False
+    env_detail = "没取到表达式"
+    try:
+        def _eval_with(v):
+            class _O(object):
+                environ = ({"AGENTCTL_ACT_EXT_OBSERVE_MS": v} if v is not None else {})
+
+            return eval(expr, {"os": _O})
+
+        v_set = _eval_with("1200")
+        v_unset = _eval_with(None)
+        env_ok = (int(v_set) == 1200 and int(v_unset) == 900)
+        env_detail = "env=1200⇒%s ｜ env 未设⇒%s" % (v_set, v_unset)
+    except Exception as e:
+        env_detail = "求值失败：%s: %s" % (type(e).__name__, e)
+    ok = bool(has and form_ok and default_ok and env_ok)
+    return ok, ("存在=%s 值=%s（默认须 900）源码 env 可配=%s ｜ %s"
+                % (has, val, form_ok, env_detail))
 
 
 def _a10(ext):
-    """加长观测不超预算（假钟账）：300 ≤ 耗时 ≤ 336.2ms。"""
+    """加长观测不超预算（假钟账）：900 ≤ 耗时 ≤ 936.2ms（**跟着产品常量走**）。"""
     if ext is None:
         return False, _MISSING
     df = core._act_diff_of(BASE, BASE, (0, 0), None)
-    obs, env, _ = _run_extend(ext, script=[BASE] * 20, df=df)
+    obs, env, _ = _run_extend(ext, script=[BASE] * 40, df=df)
     el = env.clock.t
-    ok = (BUDGET_MS - 1e-9) <= el <= (MAX_OBSERVE_MS + 1e-9)
-    return ok, ("假钟耗时=%.1fms（须在 [%.0f, %.1f]ms：等满预算且不多超一轮）"
-                % (el, BUDGET_MS, MAX_OBSERVE_MS))
+    lo = OBS_BUDGET_MS - 1e-9
+    hi = MAX_OBSERVE_MS_NEW + 1e-9
+    ok = (lo <= el <= hi)
+    return ok, ("假钟耗时=%.1fms（须在 [%.0f, %.1f]ms：等满预算且不多超一轮；产品预算=%s）"
+                % (el, OBS_BUDGET_MS, MAX_OBSERVE_MS_NEW,
+                   getattr(core, "ACT_EXT_OBSERVE_MS", "?")))
 
 
 def _a11(ext):
@@ -564,6 +625,61 @@ def _a12(ext):
     return ok, ("code=%s data.after.diff.changed=%s 加长观测.做了=%s 假钟=%.1fms"
                 % ((r or {}).get("code"), diff.get("changed"),
                    obs.get("做了"), env.clock.t))
+
+
+def _a13(ext):
+    """★ M19P5（2026-10-24 · N5-W11）**慢应用 900ms 才变 ⇒ 加长观测后 code=0**。
+
+    ★ 同一段脚本跑两遍（**这才是"窗口变长救回了它"的证明**）：
+      ① 用产品默认预算（900）⇒ 应救回（观测到变化 ⇒ code=0）；
+      ② 把预算显式压回**旧值 300** ⇒ 同一段脚本**抓不到**变化 ⇒ 仍 code=8。
+      ⇒ 差值就是这一刀的全部收益；只测①会分不清"是窗口变长了"还是"判据放水了"。
+    ★ 换算（假时钟量的是**观测窗内**的时刻）：act 侧有效覆盖 ≈431ms ⇒
+      「应用侧 900ms 才变」≈ 观测窗内第 469ms ⇒ 落在 [0,900) 内、旧 [0,300) 外。
+    """
+    if ext is None:
+        return False, _MISSING
+    df = core._act_diff_of(BASE, BASE, (0, 0), None)
+    script = [BASE] * SLOW_WINDOW_ROUND + [CHG] * 12
+    obs, env, _ = _run_extend(ext, script=script, df=df)
+    o = obs.get("观测") or {}
+    code_new = _verdict_code(obs.get("df") or {})
+    obs_old, env_old, _ = _run_extend(ext, script=script, df=df,
+                                      budget_ms=OLD_BUDGET_MS)
+    o_old = obs_old.get("观测") or {}
+    code_old = _verdict_code(obs_old.get("df") or {})
+    ok = (o.get("做了") is True and o.get("结果") is True
+          and (obs.get("df") or {}).get("changed") is True and code_new == 0
+          and code_old == 8)
+    return ok, ("新预算(%sms)⇒观测结果=%s code=%s（假钟 %.0fms）｜ 旧预算(%sms)⇒结果=%s code=%s"
+                " ｜ 变化出现在观测窗内第 %d 轮（≈%.0fms）"
+                % (getattr(core, "ACT_EXT_OBSERVE_MS", "?"), o.get("结果"), code_new,
+                   env.clock.t, OLD_BUDGET_MS, o_old.get("结果"), code_old,
+                   SLOW_WINDOW_ROUND, (SLOW_WINDOW_ROUND + 1) * ROUND_MS))
+
+
+def _a14(ext):
+    """★ M19P5 **明确越界 ⇒ 仍 code=8**（不许无限等；边界不许被"救"成成功）。
+
+    ★ 变化出现在观测窗内第 15 轮（≈980ms）⇒ **超出 900ms 预算** ⇒ 抓不到 ⇒
+      判词不动 ⇒ 仍 code=8（「确认没变」语义一点没丢）。
+    ★ 口径（★ 已写进交卷，请主控确认）：卡片写「1300ms 才变 ⇒ 仍 code=8」，
+      但按卡片自己的算术（act 431 + core 900 = 1331）**1300ms 落在窗内** ⇒
+      本条取在**明确越界**的一侧（应用侧 ≈1500ms），免得判据踩在 31ms 的刀尖上。
+    """
+    if ext is None:
+        return False, _MISSING
+    df = core._act_diff_of(BASE, BASE, (0, 0), None)
+    script = [BASE] * BEYOND_WINDOW_ROUND + [CHG] * 12
+    obs, env, _ = _run_extend(ext, script=script, df=df)
+    o = obs.get("观测") or {}
+    code = _verdict_code(obs.get("df") or {})
+    ok = (o.get("做了") is True and o.get("结果") is False
+          and (obs.get("df") or {}).get("changed") is False and code == 8)
+    return ok, ("观测.结果=%s（变化落在第 %d 轮 ≈%.0fms > 预算 %sms ⇒ 抓不到）判差=%s code=%s"
+                % (o.get("结果"), BEYOND_WINDOW_ROUND, (BEYOND_WINDOW_ROUND + 1) * ROUND_MS,
+                   getattr(core, "ACT_EXT_OBSERVE_MS", "?"),
+                   (obs.get("df") or {}).get("changed"), code))
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -651,8 +767,8 @@ def battery(ext=_AUTO, level="all"):
     ★ `ext` 默认=_AUTO ⇒ **每次调用时**从 `core._act_extend_observe` 取实现
       ⇒ 注入替身（挂在这个属性上）立刻生效。
     ★ `level`：
-      · "all"（正跑 / 产品真代码模式）⇒ **12 条全跑**。
-      · "func"（注入自证）⇒ 只跑**由被注入符号决定**的那几条（A1~A8/A10/A11）。
+      · "all"（正跑 / 产品真代码模式）⇒ **14 条全跑**。
+      · "func"（注入自证）⇒ 只跑**由被注入符号决定**的那几条（A1~A8/A10/A11/A13/A14）。
         A9（产品常量 `ACT_EXT_OBSERVE_MS`）与 A12（产品接线：`_act` 里那两处调用）
         **不由被注入的符号决定** ⇒ 属产品层，只在正跑/产品模式里评。
     """
@@ -660,7 +776,8 @@ def battery(ext=_AUTO, level="all"):
         _fn = getattr(core, "_act_extend_observe", None)
         ext = _fn if callable(_fn) else None
     plan = [(A1_LABEL, _a1), (A2_LABEL, _a2), (A3_LABEL, _a3), (A4_LABEL, _a4),
-            (A5_LABEL, _a5), (A6_LABEL, _a6), (A7_LABEL, _a7), (A8_LABEL, _a8)]
+            (A5_LABEL, _a5), (A6_LABEL, _a6), (A7_LABEL, _a7), (A8_LABEL, _a8),
+            (A13_LABEL, _a13), (A14_LABEL, _a14)]
     if level == "all":
         plan.append((A9_LABEL, _a9))
     plan.append((A10_LABEL, _a10))
@@ -703,7 +820,7 @@ def do_normal():
     for name, ok in product_status():
         print("  [%s] %s" % ("在" if ok else "缺", name), flush=True)
     rows = battery(level="all")
-    show_rows("12 条断言（产品真代码）", rows)
+    show_rows("%d 条断言（产品真代码）" % len(rows), rows)
     bad = [r for r in rows if not r[1]]
     print()
     if bad:
@@ -716,7 +833,7 @@ def do_normal():
         else:
             print("★ 判据是活的（能抓住「甲案做错了」）。", flush=True)
         return 1
-    print("【绿】全过（12 条断言）", flush=True)
+    print("【绿】全过（%d 条断言）" % len(rows), flush=True)
     return 0
 
 
