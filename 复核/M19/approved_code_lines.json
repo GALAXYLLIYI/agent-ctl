@@ -245,7 +245,7 @@
       "sha256": "0d978c8f4387edfdd812e15f6923dde39887d4afd7fe85782b882a056fa8a9b1"
     }
   ],
-  "ledger_sha256": "7f48c5f3f0e407288c2b6c36768eb572afbdd40d1a108e3a2136052dcbff0a6f",
+  "ledger_sha256": "3c9d776a68e42565c6c06e6f4f5a445f0b190a09007b8b9e0fa29094a3c6d94f",
   "files": {
     "act.py": {
       "target": "legacy_tools/_src/act.py",
@@ -269,8 +269,8 @@
       "baseline": {
         "kind": "file",
         "path": "baseline_core_20261024.py",
-        "md5": "F8669E4C7217BF38D631065ADBA0DB0A",
-        "note": "2026-10-24 轮换：M20 甲案 + W11 加长观测900 一并冻结为基线"
+        "md5": "00F5422AD07C73726E750A0C34E48ED1",
+        "note": "2026-10-24 二次轮换：W12 刹车口径 + W15 措辞口径"
       },
       "segments": []
     },
