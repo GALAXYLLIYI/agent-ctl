@@ -28,6 +28,8 @@ import json
 import os
 import secrets
 import sys
+import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -279,6 +281,26 @@ class MCPHandler(BaseHTTPRequestHandler):
         return self._json({"ok": True, "code": 0, "data": {"released": True}})
 
 
+def _daemon_watchdog():
+    """每 30s 确认急停监听还在；不在就拉起（组件活着 = 热键/弹窗必须活着）。
+
+    ★ 为什么放在 mcp_http 而不是登录自启：用户要求「agent 使用组件时自动运行」，
+      不占开机启动项；组件退出后它也跟着没人管（下次启动会再补）。
+    """
+    from agentctl import service as _svc
+    while True:
+        time.sleep(30)
+        try:
+            r = _svc.ensure_daemon()
+            if r.get("started"):
+                mcp._log("急停监听不在 ⇒ 已自动拉起 pid=%s" % r.get("pid"))
+        except Exception as e:                                # noqa: BLE001
+            try:
+                mcp._log("急停监听看护异常：%r" % (e,))
+            except Exception:
+                pass
+
+
 def serve(port: int = PORT):
     # ★ 幂等：端口已被占用 ⇒ 说明已有一个实例在跑（登录自启 + 手动启动会撞车）。
     #   直接退出，别抛栈、也别把已跑着的服务顶掉。
@@ -301,6 +323,14 @@ def serve(port: int = PORT):
         ctrl_border.start_follow("mcp")
     except Exception as e:
         sys.stderr.write("[border] 接线异常（服务照常）：%r\n" % e)
+    # ★ 2026-10-24：急停监听随组件启动 + 看护（用户要求：不占开机自启）
+    try:
+        from agentctl import service as _svc
+        _svc.ensure_daemon()
+        threading.Thread(target=_daemon_watchdog, name="daemon-watchdog", daemon=True).start()
+        print("  急停监听：%s" % _svc.daemon_status_line(), flush=True)
+    except Exception as e:
+        sys.stderr.write("[daemon] 接线异常（服务照常）：%r\n" % e)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

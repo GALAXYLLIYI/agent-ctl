@@ -438,8 +438,25 @@ def _pid_alive(pid):
 #
 # 为什么用 run() 而不是复制一份逻辑：AgentCtl.exe brake-daemon 走的也是 run()，
 #   这里**只做入口转发**，不新增第二份实现 —— 一个功能两份实现，迟早只维护一份。
+def _pidfile():
+    base = os.environ.get("AGENTCTL_STATE") or os.path.join(
+        os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"), "AgentCtl", "state")
+    return os.path.join(base, "brake_daemon.pid")
+
+
 def main(argv=None) -> int:
-    """`python -m agentctl.brake_daemon` 的入口，等价 `AgentCtl.exe brake-daemon`。"""
+    """`python -m agentctl.brake_daemon` 的入口，等价 `AgentCtl.exe brake-daemon`。
+
+    ★ 2026-10-24：启动时写 pid 文件（service/面板据此判断「急停监听在不在」），
+      退出时删掉。pid 文件只是**线索**，不是锁——判活仍以进程是否存在为准。
+    """
+    pf = _pidfile()
+    try:
+        os.makedirs(os.path.dirname(pf), exist_ok=True)
+        with open(pf, "w", encoding="utf-8") as f:
+            f.write(str(os.getpid()))
+    except OSError:
+        pf = None
     try:
         return run()
     except KeyboardInterrupt:
@@ -457,6 +474,12 @@ def main(argv=None) -> int:
         except Exception:
             pass
         return 3
+    finally:
+        if pf:
+            try:
+                os.remove(pf)
+            except OSError:
+                pass
 
 
 if __name__ == "__main__":
