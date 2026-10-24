@@ -163,6 +163,26 @@ def main() -> int:
             print(f"  {t['name']:<18} {t.get('description', '')[:56]}{flag}")
         return 0
     cmd = argv[0]
+    # ★ 2026-10-24：`service` 是**进程管理**，不是 ctl_* 工具 —— 必须在工具分发前拦。
+    #   为什么：MCP HTTP / 急停监听跑在 pythonw 下（无窗口无托盘），
+    #   以前停它只能开任务管理器按 PID 杀。两个动作：status / stop。
+    if cmd == "service":
+        from . import service as _svc
+        sub = (argv[1] if len(argv) > 1 else "status").lower()
+        if any(a in ("-h", "--help") for a in argv[1:]):
+            print("用法: python -m agentctl.cli service [status|stop]\n"
+                  "  status  看 8761 有没有在听、PID 是多少\n"
+                  "  stop    停掉监听 8761 的进程（含子进程；急停旗子不受影响）")
+            return 0
+        if sub == "status":
+            print(_svc.status_line())
+            return 0
+        if sub in ("stop", "stop-mcp"):
+            r = _svc.stop()
+            print(json.dumps(r, ensure_ascii=False, indent=1))
+            return 0 if not r["listening_after"] else 1
+        print("未知 service 子命令：%s（可用：status / stop）" % sub, file=sys.stderr)
+        return 2
     tool = ALIAS.get(cmd, cmd if cmd.startswith("ctl_") else "ctl_" + cmd)
     # ★ W4-B：单工具参数表。**必须在 dispatch 之前**拦截 ——
     #   以前 `click --help` 会真的走完动作路径（有证时真点一下），这是自伤。

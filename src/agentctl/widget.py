@@ -36,6 +36,7 @@ from agentctl.gate import (BRAKE_FLAG, brake_engaged, HOME as TOOLS,   # noqa: E
 #   这里只显示「刚才有一次一级命中」；真拉了急停的话上面那行「急停」已经是红的了。
 from agentctl import action_guard                                    # noqa: E402
 from agentctl import panel_yield                                    # noqa: E402（面板让位通道）
+from agentctl import service as _service                           # noqa: E402（后台服务状态/停止）
 
 # ★ 面板是**只读挂件**，所以老脚本目录定位不到时它照样得能开窗 ★
 #   理由：面板显示的是「急停有没有拉下」——这是最该让用户随时看得见的东西。
@@ -753,18 +754,20 @@ def run(hook=None):
                                     ('lease', '租约'),
                                     ('task', '任务'),
                                     # ★ P2：动作面异常提示（没有提示时显示「正常」）
-                                    ('anomaly', '异常'))):
+                                    ('anomaly', '异常'),
+                                    # ★ 2026-10-24：后台服务状态（pythonw 下跑，任务栏看不见）
+                                    ('service', '服务'))):
         lab(body, cap, DIM, F_ROW).grid(row=i, column=0, sticky='w', pady=3)
         v = lab(body, '—', FG, F_ROW)
         v.grid(row=i, column=1, sticky='w', padx=(16, 0), pady=3)
         rows[key] = v
 
     # ★ P2：多了一行 ⇒ 分隔线与「最近动作」各往下挪一行（行号是写死的，改行数必须一起挪）
-    tk.Frame(body, bg='#33353f', height=1).grid(row=7, column=0, columnspan=2, sticky='ew', pady=11)
-    lab(body, '最近动作', DIM, F_LOG).grid(row=8, column=0, sticky='nw')
+    tk.Frame(body, bg='#33353f', height=1).grid(row=8, column=0, columnspan=2, sticky='ew', pady=11)
+    lab(body, '最近动作', DIM, F_LOG).grid(row=9, column=0, sticky='nw')
     # 固定一行：第一版让它自动换行，长日志把下面的按钮顶出窗口了（按钮看不见 = 等于没有）
     last_val = lab(body, '—', FG, F_LOG, justify='left')
-    last_val.grid(row=8, column=1, sticky='w', padx=(16, 0))
+    last_val.grid(row=9, column=1, sticky='w', padx=(16, 0))
 
     # ── 按钮区（2026-10-04 用户：「能点击的吧，加上个终止按键」）──
     # ⚠ 三个按钮都只是**调用现成工具**（brake.py / auth_popup.py），
@@ -795,6 +798,23 @@ def run(hook=None):
             return
         ok, msg = do_brake('release')
         toast(('✅ ' if ok else '⛔ ') + msg, bad=not ok)
+        root.after(300, tick)
+
+    def on_stop_service(silent=False):
+        if not silent:
+            from tkinter import messagebox
+            if not messagebox.askokcancel(
+                    '停止 MCP 服务',
+                    'MCP HTTP 会退出，agent 之后无法再调用工具（可重新启动）。\n\n继续？',
+                    icon='warning'):
+                return
+        try:
+            r = _service.stop()
+            ok = not r.get('listening_after')
+            toast(('✅ 已停 PID %s' % ('、'.join(map(str, r.get('stopped') or [])) or '—'))
+                  if ok else '⛔ 仍在监听（权限？）', bad=not ok)
+        except Exception as e:
+            toast('⛔ 停服务失败：%s' % e, bad=True)
         root.after(300, tick)
 
     def on_auth():
@@ -850,6 +870,7 @@ def run(hook=None):
     # ★ P1：第三方强制吊销的**人**侧入口。同一个单写者租约任一时刻只有一张，
     #   所以是「一个按钮 + 显示是谁」，而不是每张租约一个按钮。
     mkbtn(bar, '✂ 掐掉租约', WARN, on_revoke).pack(side='left', padx=6)
+    mkbtn(bar, '⏻ 退出服务', DIM, on_stop_service).pack(side='left')
 
     # ── 超星/学习通 客观题（2026-10-20 新增，17:5x 按用户要求撤下）──────
     #   面板不再提供「作业」按钮：题目面板会盖住待答页面，反而碍事。
@@ -889,6 +910,18 @@ def run(hook=None):
         body.pack(fill='both', expand=True, padx=10, pady=(8, 2))
 
     def tick():
+        # ★ 托盘事件（另一个线程只往队列里塞名字，这里在主线程执行）
+        if tray is not None:
+            ev = tray.poll()
+            if ev == 'show':
+                try:
+                    root.deiconify(); root.lift(); root.attributes('-topmost', True)
+                except Exception:
+                    pass
+            elif ev == 'stop':
+                on_stop_service(silent=True)
+            elif ev == 'quit':
+                on_close()
         # ★ 面板让位：core 写 yield=true 就收起来（别挡 agent 的路），写回来就弹回去。
         #   兜底：core 中途崩了没写回来，until 过期后 is_yielded() 变 False ⇒ 自己回来。
         try:
@@ -961,7 +994,25 @@ def run(hook=None):
         else:
             rows['anomaly'].config(text='正常', fg=DIM)
         _task_tick(rows['task'])
-        last_val.config(text=_one_line(tail_gate_log(1), 52))
+        # ★ 服务状态：netstat 有成本 ⇒ 每 10 个 tick（约 5 秒）刷一次，其余用缓存
+        try:
+            _svc['n'] = _svc.get('n', 0) + 1
+            if _svc['n'] % 10 == 1 or 'line' not in _svc:
+                _svc['line'] = _service.status_line()
+        except Exception:
+            _svc['line'] = '服务状态未知'
+        rows['service'].config(text=_svc.get('line') or '—',
+                               fg=OK if '运行中' in (_svc.get('line') or '') else DIM)
+        # ★ 控制结束提示：面板从“收起”回到“可见”= 一轮控制结束
+        now = time.time()
+        if _ctl.get('was_yielded') and not _yielded['on']:
+            _ctl['done_at'] = now
+        _ctl['was_yielded'] = _yielded['on']
+        if _ctl.get('done_at') and now - _ctl['done_at'] < 12:
+            last_val.config(text='✔ 控制已结束 · %s'
+                            % time.strftime('%H:%M:%S', time.localtime(_ctl['done_at'])), fg=OK)
+        else:
+            last_val.config(text=_one_line(tail_gate_log(1), 52))
         refresh_hotkey()
         root.after(REFRESH_MS, tick)
 
@@ -986,6 +1037,14 @@ def run(hook=None):
     for _w in (root, hdr, close_btn):
         _w.bind('<Button-3>', show_menu)
 
+    _svc, _ctl = {}, {}
+    tray = None
+    if not os.environ.get('AGENTCTL_NO_TRAY'):
+        try:
+            from agentctl import tray as _tray
+            tray = _tray.install('AgentCtl 面板')
+        except Exception:
+            tray = None
     tick()
     if hook is not None:
         try:
