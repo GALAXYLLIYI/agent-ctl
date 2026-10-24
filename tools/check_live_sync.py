@@ -12,7 +12,7 @@ r"""check_live_sync.py —— **live 漂移自动闸**：live（本机真在跑�
   · 真源     = `legacy_tools\_src\`（`tools\gen_legacy.py` 的 `SRC` 默认；2026-10-18 起从仓外收进仓内）
   · 仓内产物 = `legacy_tools\`（`gen_legacy.py --out legacy_tools` 的产物；发包时**再现场生成一份**）
   · live     = **本机真正在跑的那份** = `build\local_legacy_home.txt` 指针指向的目录
-               （本机当前指向 `<工作区>/Documents/dsh-viewer-plugin/tools`；
+               （本机当前指向本机 live 目录，路径由指针层/环境变量决定；
                  指针文件本身 **未 tracked** —— 它是本机状态，不是仓内产物）
 
 ★ 为什么必须自动闸

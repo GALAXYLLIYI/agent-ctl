@@ -53,9 +53,9 @@ def find_git(explicit):
     g = shutil.which("git")
     if g:
         return g
-    for c in (r"<工作区>\桌面\cc\Git\cmd\git.exe",):   # 本机 git 不在 PATH（2026-10-12 实测）
-        if os.path.exists(c):
-            return c
+    env_git = os.environ.get("AGENTCTL_GIT_EXE")
+    if env_git and os.path.exists(env_git):   # 本机 git 不在 PATH 时用环境变量指
+        return env_git
     return None
 
 
