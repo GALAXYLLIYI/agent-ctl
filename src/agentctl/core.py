@@ -1351,10 +1351,12 @@ CAUSAL_VERDICTS = ("met", "no_effect_in_region", "changed_outside_target", "unkn
 
 
 # ★★ P0-1 失败分类（2026-10-21；Codex 实跑 + MiniMax Code / ZCode 两份评审一致认定）：
-#   把「失败」拆成三类 —— 这是 action_guard 的 fail_streak 能不能当信号的分水岭。
+#   把「失败」拆成四类 —— 这是 action_guard 的 fail_streak 能不能当信号的分水岭。
 #     rejected_env   动作**根本没发出去**（没证 / 没租约 / 被别的窗挡 / 缺凭据 /
-#                    前台不对 / 找不到控件）：重试没有意义（再点一次还是被挡），
+#                    找不到控件）：重试没有意义（再点一次还是被挡），
 #                    但**不该**被算成「agent 在乱点」。
+#     unobservable   「看不清」：没测出来 / 采样退化（code=5）。2026-10-25 从 rejected_env
+#                    里拆出来（**只贴标签，计数口径不变**）；区别于环境不满足：它的处方是重新观测。
 #     no_effect     发出去了但画面没变（code=8）：这才是「点了但没点到」。
 #     action_failed  真异常（服务内部错误、动作抛异常）：同样该急停。
 #   ★ 2026-10-21 实测事故链（现场取证）：同一坐标连续 8 次**环境性**失败
@@ -1365,19 +1367,26 @@ CAUSAL_VERDICTS = ("met", "no_effect_in_region", "changed_outside_target", "unkn
 FAILURE_CLASS_REJECTED_ENV = "rejected_env"
 FAILURE_CLASS_NO_EFFECT = "no_effect"
 FAILURE_CLASS_ACTION_FAILED = "action_failed"
+#: ★ 2026-10-25：「看不清」（没测出来 / 采样退化）单独一类。
+#   与 rejected_env 的共同点：两条连击 **都不计入**；不同点：它不是环境不满足，
+#   处方是**重新观测**（而不是换招/换序）。混在一个桶里 ⇒ 事后查不出「到底哪种没成」。
+FAILURE_CLASS_UNOBSERVABLE = "unobservable"
 
-#: 前置拒绝码 —— 共同点是**动作一个像素都没发出去**
-_REJECTED_ENV_CODES = frozenset((3, 4, 5, 7, 9, 10, 11, 12, 13))
+#: 前置「看不清」码（5 = gate.CODE_UNSTABLE）—— 只贴标签，计数口径与 rejected_env 相同
+_UNOBSERVABLE_CODES = frozenset((5,))
+#: 前置拒绝码 —— 共同点是**动作一个像素都没发出去**（5 已拆到 unobservable，这里不再含）
+_REJECTED_ENV_CODES = frozenset((3, 4, 7, 9, 10, 11, 12, 13))
 #: 发出去了但没变化
 _NO_EFFECT_CODES = frozenset((8,))
 
 
 def failure_class(r: dict) -> str | None:
-    """把一次调用的失败归到三类之一；成功 ⇒ None。
+    """把一次调用的失败归到四类之一；成功 ⇒ None。
 
     ★ **判不出来的一律按 action_failed（真失败）算** —— 宁可多算不可漏算：
       漏算 = 护栏松了（该急停没急停）；多算 = 只是保守（回到改前口径）。
     ★ 口径**只贴标签、不改判定**：不改任何 code 数值、不改放行条件。
+    ★ 2026-10-25：code=5（没测出来/采样退化）⇒ **unobservable**（原来归 rejected_env）。
     """
     if not isinstance(r, dict) or r.get("ok"):
         return None
@@ -1385,6 +1394,8 @@ def failure_class(r: dict) -> str | None:
         code = int(r.get("code"))
     except (TypeError, ValueError):
         return FAILURE_CLASS_ACTION_FAILED
+    if code in _UNOBSERVABLE_CODES:
+        return FAILURE_CLASS_UNOBSERVABLE
     if code in _NO_EFFECT_CODES:
         return FAILURE_CLASS_NO_EFFECT
     if code in _REJECTED_ENV_CODES:

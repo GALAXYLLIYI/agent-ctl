@@ -29,9 +29,22 @@
         "v = (os.environ.get(ENV_KEY) or \"\").strip()": 1
       },
       "sha256": "b7f47c82edd5c9cbe5ae6e01f29bb308859aaccdb890d3509424e7850bdcf1a7"
+    },
+    {
+      "name": "T3_unobservable_core",
+      "desc": "T3：code=5 从 rejected_env 拆成 unobservable（只贴标签，计数口径不变）",
+      "evidence": "tests/_P3_看不清不计刹车_判据.py（正常 rc=0 / --inject rc=1）",
+      "lines": {
+        "FAILURE_CLASS_UNOBSERVABLE = \"unobservable\"": 1,
+        "_REJECTED_ENV_CODES = frozenset((3, 4, 7, 9, 10, 11, 12, 13))": 1,
+        "_UNOBSERVABLE_CODES = frozenset((5,))": 1,
+        "if code in _UNOBSERVABLE_CODES:": 1,
+        "return FAILURE_CLASS_UNOBSERVABLE": 1
+      },
+      "sha256": "3fc85e6f2c0abe49eb91c7a41da18edd971a4df974bdb9fa33344771827dcb41"
     }
   ],
-  "ledger_sha256": "55a8765e88efc2374b036b8f437ad6ea1af9d59b9bd9818aa9540e0936dc6900",
+  "ledger_sha256": "46ae0b0cddfa5b0b32121a83ba3944d7553d700a095f89b3d9c20bb5ffc73fd1",
   "files": {
     "act.py": {
       "target": "legacy_tools/_src/act.py",
@@ -49,9 +62,12 @@
         "kind": "file",
         "path": "baseline_core_20261024.py",
         "md5": "00F5422AD07C73726E750A0C34E48ED1",
-        "note": "2026-10-24 二次轮换：W12 刹车口径 + W15 措辞口径"
+        "note": "2026-10-25 T3：基线仍是 W15 后版本；本刀只追加段与旧侧，不换基线"
       },
-      "segments": []
+      "segments": [
+        "T3_unobservable_core"
+      ],
+      "desc": ""
     },
     "src/agentctl/gate.py": {
       "target": "src/agentctl/gate.py",
@@ -115,6 +131,8 @@
     "src/agentctl/gate.py": {},
     "legacy_tools/_src/gate.py": {},
     "legacy_tools/_src/auth_popup.py": {},
-    "core.py": {}
+    "core.py": {
+      "_REJECTED_ENV_CODES = frozenset((3, 4, 5, 7, 9, 10, 11, 12, 13))": 1
+    }
   }
 }

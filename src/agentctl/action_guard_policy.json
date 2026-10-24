@@ -12,7 +12,7 @@
   "_fail_streak说明": "同一 actor 连续失败 N 次算命中（成功一次即清零）。★ P0-1（2026-10-21）：只计「动作真的发出去了但没生效」与「真异常」——环境性拒绝（没证/没租约/被挡/缺凭据/前台不对）**不计入**，见 fail_counted_classes。",
 
   "fail_counted_classes": ["action_failed"],
-  "_fail_counted_classes说明": "哪些失败性质计入 **fail_streak**（「这个 actor 整体在崩」的证据）。★ 2026-10-24（W12）起 **no_effect（code=8）不再计入**——点空输入框/往输入框打字时画面本来就零变化（光标闪烁被 caret 过滤），把它当崩溃证据会误拉急停（实测：连点 6~7 次空输入框就停）。防「反复戳同一点」改由 same_target_counted_classes 兜（默认仍含 no_effect）。rejected_env（前置拒绝：3/4/5/7/9/10/11/12/13）两条判据都不计入。",
+  "_fail_counted_classes说明": "哪些失败性质计入 **fail_streak**（「这个 actor 整体在崩」的证据）。★ 2026-10-24（W12）起 **no_effect（code=8）不再计入**——点空输入框/往输入框打字时画面本来就零变化（光标闪烁被 caret 过滤），把它当崩溃证据会误拉急停（实测：连点 6~7 次空输入框就停）。防「反复戳同一点」改由 same_target_counted_classes 兜（默认仍含 no_effect）。★ 2026-10-25 起「看不清」（code=5）从 rejected_env 拆成 unobservable（**只贴标签**）。rejected_env（前置拒绝：3/4/7/9/10/11/12/13）与 unobservable（看不清：5）两条判据都**不计入**。",
 
   "same_target_counted_classes": ["no_effect", "action_failed"],
   "_same_target_counted_classes说明": "哪些失败性质计入 **同目标连击**（「在同一个点上反复戳」的证据）。★ 默认仍含 no_effect：连点同一点 5 下本身就是危险信号，不该因为「画面没变」被放过。与 fail_counted_classes 分开，是为了让「输入类正常零变化」不被误判成「整体在崩」。",
