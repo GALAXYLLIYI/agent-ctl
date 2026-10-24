@@ -75,6 +75,14 @@ notepad install.ps1      # 看一眼
 
 离线：`python -X utf8 tools\pack_dist.py` 生成 `dist\agentctl.zip`，目标机 `.\install.ps1 -Zip .\agentctl.zip`。更新=重跑同一条命令；`.\uninstall.ps1` 卸载（数据保留），`-Purge` 全清。旧版详细安装/构建/已知问题见 `docs\README_旧版存档_v1.2.md`。
 
+下载压缩包时**先核哈希再装**（发布页会同时提供 `agentctl.zip.sha256`）：
+
+```powershell
+Get-FileHash .\agentctl.zip -Algorithm SHA256
+# 与 .sha256 文件里的第一列逐字符比对；不一致就别装、重新下载
+```
+
+
 ## 默认关闭（装完什么都不通，这是设计）
 
 - **默认无通行证 ⇒ 一切动作一律被拒**：`ctl_authorize` 之前，所有写动作都返回未授权；急停 flag 一票否决。

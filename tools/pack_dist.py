@@ -447,6 +447,11 @@ def main() -> int:
 
     os.replace(tmp, out)
 
+    # ★ 2026-10-24：随包写 sha256（开源后别人下载要先核哈希；格式与 sha256sum 兼容）
+    _digest = hashlib.sha256(out.read_bytes()).hexdigest()
+    _sha = out.with_suffix(out.suffix + ".sha256")
+    _sha.write_text("%s  %s\n" % (_digest, out.name), encoding="utf-8")
+
     print("打包完成：%s" % out)
     print("  文件 %d 个，原始 %.0f KB" % (st["files"], st["bytes"] / 1024))
     print("  zip 大小 %.0f KB" % (out.stat().st_size / 1024))
