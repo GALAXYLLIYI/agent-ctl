@@ -817,18 +817,55 @@ def run(hook=None):
             toast('⛔ 停服务失败：%s' % e, bad=True)
         root.after(300, tick)
 
+    def _ask_scopes():
+        """勾选式授权范围（★ 2026-10-24 用户：别让人手打 ABCD）。
+
+        返回 "ABCD" 这种串；取消/没勾返回 None。
+        单选框**默认勾 B**（点击滚动是最常用的一档）。
+        """
+        dlg = tk.Toplevel(root)
+        dlg.title('请求授权')
+        dlg.configure(bg=BG)
+        dlg.transient(root)
+        dlg.resizable(False, False)
+        lab(dlg, '要哪一档？（可多选）', FG, F_ROW).pack(anchor='w', padx=14, pady=(12, 4))
+        choices = [('A', 'A级 只读感知'), ('B', 'B级 点击滚动'),
+                   ('C', 'C级 打字快捷键'), ('D', 'D级 拖拽')]
+        vars_ = {}
+        box = tk.Frame(dlg, bg=BG)
+        box.pack(fill='x', padx=14, pady=4)
+        for code, text in choices:
+            v = tk.BooleanVar(value=(code == 'B'))
+            vars_[code] = v
+            tk.Checkbutton(box, text=text, variable=v, bg=BG, fg=FG,
+                           selectcolor='#2a2c36', activebackground=BG,
+                           activeforeground=FG, font=('Microsoft YaHei UI', -F_ROW),
+                           anchor='w').pack(fill='x', pady=2)
+        lab(dlg, '勾几档就签几档；至少要勾一档。', DIM, F_LOG).pack(anchor='w', padx=14)
+        picked = {'val': None}
+
+        def _ok():
+            s = ''.join(c for c, _ in choices if vars_[c].get())
+            if not s:
+                toast('⛔ 至少勾一档', bad=True)
+                return
+            picked['val'] = s
+            dlg.destroy()
+
+        btns = tk.Frame(dlg, bg=BG)
+        btns.pack(fill='x', padx=14, pady=(8, 12))
+        tk.Button(btns, text='确定授权', command=_ok, bg='#2a2c36', fg=OK,
+                  activebackground='#3a3d49', relief='flat', bd=0, padx=14, pady=6,
+                  cursor='hand2', font=('Microsoft YaHei UI', -F_ROW)).pack(side='right')
+        tk.Button(btns, text='取消', command=dlg.destroy, bg='#2a2c36', fg=DIM,
+                  activebackground='#3a3d49', relief='flat', bd=0, padx=14, pady=6,
+                  cursor='hand2', font=('Microsoft YaHei UI', -F_ROW)).pack(side='right', padx=8)
+        dlg.grab_set()
+        root.wait_window(dlg)
+        return picked['val']
+
     def on_auth():
-        from tkinter import simpledialog
-        scope = simpledialog.askstring(
-            '请求授权', '要哪一档？\n\n'
-            '  A级 只读感知\n  B级 点击滚动\n  C级 打字快捷键\n  D级 拖拽\n\n'
-            '写法随你：\n'
-            '  B            单档\n'
-            '  ABCD         连写＝四档全要\n'
-            '  A,B,C        逗号分隔\n'
-            '  B级 点击滚动   照抄也行\n\n'
-            '（写错会明确报错，不会默默放行）',
-            initialvalue='B级 点击滚动', parent=root)
+        scope = _ask_scopes()
         if not scope:
             toast('已取消授权')
             return
