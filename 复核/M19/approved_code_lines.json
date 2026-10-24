@@ -111,53 +111,6 @@
       "sha256": "b7f47c82edd5c9cbe5ae6e01f29bb308859aaccdb890d3509424e7850bdcf1a7"
     },
     {
-      "name": "M19P-S2_gate_src",
-      "desc": "M19P-S2（src/agentctl/gate.py）：AUTHDIR 收编为单一解析",
-      "evidence": "提交 678a19f（已入仓）",
-      "lines": {
-        "AUTHDIR = _resolve_authdir()": 1,
-        "CAPTURE_DB = os.path.join(AUTHDIR, \"capture.json\")": 1,
-        "LEASE_DB = os.path.join(AUTHDIR, \"lease.json\")": 1,
-        "LOCKFILE = os.path.join(AUTHDIR, \"gate.lock\")": 1,
-        "LOG = os.path.join(AUTHDIR, \"gate_agentctl.log\")": 1,
-        "PASSFILE = os.path.join(AUTHDIR, \"auth_pass.json\")": 1,
-        "_authdir_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), \"authdir.py\")": 1,
-        "_mod = _ilu.module_from_spec(_spec)": 1,
-        "_resolve_authdir = _mod.resolve": 1,
-        "_spec = _ilu.spec_from_file_location(\"agentctl._authdir_shared\", _authdir_path)": 1,
-        "_spec.loader.exec_module(_mod)": 1,
-        "except ImportError:": 1,
-        "from agentctl.authdir import resolve as _resolve_authdir": 1,
-        "if _spec is None or _spec.loader is None:": 1,
-        "import importlib.util as _ilu": 1,
-        "raise ImportError(\"找不到共享规则模块 authdir.py：%s\" % _authdir_path)": 1,
-        "try:": 1
-      },
-      "sha256": "e034a0cc12a6677d6b3192711142712931a3a6f85492732833a7faace9976fba"
-    },
-    {
-      "name": "M19P-S2_gate_legacy",
-      "desc": "M19P-S2（legacy_tools/_src/gate.py）：AUTHDIR 收编为单一解析",
-      "evidence": "提交 678a19f（已入仓）",
-      "lines": {
-        "AUTHDIR = authdir.resolve()": 1,
-        "_HERE_DIR = os.path.dirname(os.path.abspath(__file__))": 1,
-        "if _HERE_DIR not in sys.path:": 1,
-        "import authdir": 1,
-        "sys.path.insert(0, _HERE_DIR)": 1
-      },
-      "sha256": "cd6144452f562fbc6390a03363159ec2c6c39fa92a14b249060f94a2aadffeb6"
-    },
-    {
-      "name": "M19P-S2_auth_popup",
-      "desc": "M19P-S2（legacy_tools/_src/auth_popup.py）：AUTHDIR 收编为单一解析",
-      "evidence": "提交 678a19f（已入仓）",
-      "lines": {
-        "AUTHDIR = gate.AUTHDIR": 1
-      },
-      "sha256": "d9f81af8fc148598c74fccdbe3f8f167e6dc28c9563a204167088a97fc4c6c2f"
-    },
-    {
       "name": "M19P3_谎报成功三条",
       "desc": "F3 日志诚实度(changed is None 说清没测出来，rc 维持 0) + F5 read 读失败不再 return 0(落 9/5/4/5) + F7 do_type 前置读失败与真的没有文本区分开(落 9/5/5) + 新助手 _read_fail_rc(how) 四因落码",
       "evidence": "work/_M19P3_谎报成功三条_20221023/真代码行清单_待追加账本.txt；判据 tests/_P3_M19P3_谎报成功三条_判据.py",
@@ -245,7 +198,7 @@
       "sha256": "0d978c8f4387edfdd812e15f6923dde39887d4afd7fe85782b882a056fa8a9b1"
     }
   ],
-  "ledger_sha256": "3c9d776a68e42565c6c06e6f4f5a445f0b190a09007b8b9e0fa29094a3c6d94f",
+  "ledger_sha256": "b2e5db22f1ee44879e7202c4577d68bc0ef491999e2263ba2f0098586e0b23ac",
   "files": {
     "act.py": {
       "target": "legacy_tools/_src/act.py",
@@ -277,37 +230,34 @@
     "src/agentctl/gate.py": {
       "target": "src/agentctl/gate.py",
       "baseline": {
-        "kind": "git",
-        "git_ref": "678a19f^:src/agentctl/gate.py",
-        "md5": "3FFAFB8E2774A1CF203FF2510D62F633"
+        "kind": "file",
+        "path": "baseline_gate_src_20261024.py",
+        "md5": "C79B13507F11F84D73A0C896197CD9B4",
+        "note": "2026-10-24 重写历史（路径脱敏）后重新落基线：原 git_ref 678a19f^ 已不存在"
       },
-      "segments": [
-        "M19P-S2_gate_src"
-      ],
+      "segments": [],
       "desc": "M19P-S2 受控文件：新线闸门（AUTHDIR 收编为单一解析）"
     },
     "legacy_tools/_src/gate.py": {
       "target": "legacy_tools/_src/gate.py",
       "baseline": {
-        "kind": "git",
-        "git_ref": "678a19f^:legacy_tools/_src/gate.py",
-        "md5": "DAB72156A6ED12B273D3D7DF1D5A26AA"
+        "kind": "file",
+        "path": "baseline_gate_legacy_20261024.py",
+        "md5": "04F4A1A22BA04B0030B170620B8E9CD7",
+        "note": "2026-10-24 重写历史（路径脱敏）后重新落基线：原 git_ref 678a19f^ 已不存在"
       },
-      "segments": [
-        "M19P-S2_gate_legacy"
-      ],
+      "segments": [],
       "desc": "M19P-S2 受控文件：老线闸门真源（只 import authdir，不复制规则）"
     },
     "legacy_tools/_src/auth_popup.py": {
       "target": "legacy_tools/_src/auth_popup.py",
       "baseline": {
-        "kind": "git",
-        "git_ref": "678a19f^:legacy_tools/_src/auth_popup.py",
-        "md5": "20FE4CB083C3924334662B66DA118736"
+        "kind": "file",
+        "path": "baseline_auth_popup_20261024.py",
+        "md5": "B9F278E84811DF9773EAD8A07CD556DF",
+        "note": "2026-10-24 重写历史（路径脱敏）后重新落基线：原 git_ref 678a19f^ 已不存在"
       },
-      "segments": [
-        "M19P-S2_auth_popup"
-      ],
+      "segments": [],
       "desc": "M19P-S2 受控文件：签发方真源（不再写死 BASE/_auth，改走 gate.AUTHDIR）"
     },
     "legacy_tools/_src/authdir.py": {
@@ -366,20 +316,9 @@
       "user32.SetCursorPos(x, y)": 1,
       "x, y, rr, ok_rect = _center(root)": 1
     },
-    "src/agentctl/gate.py": {
-      "AUTHDIR = os.path.join(HOME, \"_auth\") if HOME else None": 1,
-      "CAPTURE_DB = os.path.join(AUTHDIR, \"capture.json\") if AUTHDIR else None": 1,
-      "LEASE_DB = os.path.join(AUTHDIR, \"lease.json\") if AUTHDIR else None": 1,
-      "LOCKFILE = os.path.join(AUTHDIR, \"gate.lock\") if AUTHDIR else None": 1,
-      "LOG = os.path.join(AUTHDIR, \"gate_agentctl.log\") if AUTHDIR else None": 1,
-      "PASSFILE = os.path.join(AUTHDIR, \"auth_pass.json\") if AUTHDIR else None": 1
-    },
-    "legacy_tools/_src/gate.py": {
-      "AUTHDIR = os.environ.get(\"AGENTCTL_AUTHDIR\") or os.path.join(HERE, \"_auth\")": 1
-    },
-    "legacy_tools/_src/auth_popup.py": {
-      "AUTHDIR = os.path.join(BASE, \"_auth\")": 1
-    },
+    "src/agentctl/gate.py": {},
+    "legacy_tools/_src/gate.py": {},
+    "legacy_tools/_src/auth_popup.py": {},
     "core.py": {}
   }
 }
