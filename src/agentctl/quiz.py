@@ -309,6 +309,37 @@ def _act_apply(args) -> dict:
     return {"改动": applied, "题数": len(want), "说明": "已按 key 幂等灌入（未提交）"}
 
 
+def _as_key_list(v) -> list:
+    """期望/实际两边都归一成 [key...]：列表原样用；字符串走 _key_set（判断题 true/false 不拆）。"""
+    if isinstance(v, (list, tuple, set)):
+        return [str(x) for x in v if str(x)]
+    return _key_set(v)
+
+
+def _verify_compare(want: dict, now: dict) -> tuple[list, int]:
+    """纯函数：期望 {qid: [key...]} vs 实际 {qid: keys字符串} ⇒ (不一致明细, 顺序差异计数)。
+
+    ★ 判等口径（2026-10-24，事件 #2341）：
+      · **集合不同 ⇒ 不一致**（漏选/错选照抓，绝不放宽）；
+      · **集合相同、仅顺序不同 ⇒ 不算错**，只计「顺序差异」（让人看见，但不判 FAIL）。
+    为什么：答案表按 key 值排序，而页面按 DOM/显示序读回；多选只要两者顺序不同，旧口径
+    （字符串比较）就必误报 —— 实测 300 题里 48 道全这样，单选/判断 0 误报。
+    ⚠ 判断题 true/false 是一个整体 key，必须走 _key_set 不拆。
+    """
+    bad = []
+    order_diff = 0
+    for qid, keys in (want or {}).items():
+        exp_set = set(_as_key_list(keys))
+        got_raw = (now or {}).get(qid, "")
+        got_set = set(_as_key_list(got_raw))
+        exp_sorted = "".join(sorted(exp_set))
+        if exp_set != got_set:
+            bad.append({"qid": qid, "期望": exp_sorted, "实际": got_raw})
+        elif got_raw != exp_sorted:
+            order_diff += 1
+    return bad, order_diff
+
+
 def _act_verify(args) -> dict:
     port = int(args.get("port") or 9222)
     raw = _read_any(args.get("answers") or os.path.join(WORK_DIR, "answers.json"))
@@ -317,14 +348,10 @@ def _act_verify(args) -> dict:
     if not isinstance(cur, list):
         return {"错误": err or "读不到作答页", "不一致": 0}
     now = {x["qid"]: x["keys"] for x in cur}
-    bad = []
-    for qid, keys in want.items():
-        exp = "".join(sorted(keys))
-        got = now.get(qid, "")
-        if got != exp:
-            bad.append({"qid": qid, "期望": exp, "实际": got})
+    bad, order_diff = _verify_compare(want, now)
     unanswered = [x["qid"] for x in cur if not x.get("keys")]
     return {"题数": len(cur), "不一致": len(bad), "未作答": len(unanswered),
+            "顺序差异": order_diff,
             "明细": bad[:50], "判定": "PASS" if not bad else "FAIL"}
 
 
