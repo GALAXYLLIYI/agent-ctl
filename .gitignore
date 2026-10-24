@@ -211,3 +211,7 @@ desktop.ini
 
 # py_compile 的临时产物
 *.tmpc
+# ⑧ tools/ab_probe.py —— A/B 采集骨架（只采集、不判红绿；pyautogui 惰性 import，dryrun 完全离线）
+!tools/ab_probe.py
+# ⑨ tools/ab_target.py —— A/B 靶场（纯 tkinter 8 控件 + --selftest，供无鼠标验证）
+!tools/ab_target.py
