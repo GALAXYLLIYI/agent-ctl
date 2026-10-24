@@ -198,3 +198,6 @@ desktop.ini
 
 # 仓库根目录的临时探针（legacy_tools 里那两个要进仓）
 /probe.py
+
+# py_compile 的临时产物
+*.tmpc
