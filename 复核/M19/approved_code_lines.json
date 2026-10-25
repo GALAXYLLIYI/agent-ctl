@@ -61,9 +61,18 @@
         "xy = args.get(\"xy\")": 1
       },
       "sha256": "c7cc89b591465a086c63b18aa8e2d46b6e91b7e4af43d09e9eb7d773e91d5c4c"
+    },
+    {
+      "name": "gate_brake_tmp_thread",
+      "desc": "急停旗子 tmp 名加随机后缀（修同进程多线程并发 set_brake 5/1600 失败）",
+      "evidence": "W1 压测场景 D：修复前 1598/1600，修复后 1600/1600",
+      "lines": {
+        "tmp = \"%s.tmp.%d.%s\" % (BRAKE_FLAG, os.getpid(), secrets.token_hex(4))": 1
+      },
+      "sha256": "86c04e69f517d73798eaeff0ee2b0654e8224307f53c81c1894f1e84909e79e0"
     }
   ],
-  "ledger_sha256": "96002f0c3dbcd687cb75abcbb5cc31a1d5416a4865b28bcf8bf2811923875a93",
+  "ledger_sha256": "8822a575c884d4f485d8965eda8222f587e18f2df903bc427d6b8f654c228163",
   "files": {
     "act.py": {
       "target": "legacy_tools/_src/act.py",
@@ -96,7 +105,9 @@
         "md5": "C46F32739E06DFE277862F611DA73847",
         "note": "2026-10-24 重写历史（路径脱敏）后重新落基线：原 git_ref 678a19f^ 已不存在"
       },
-      "segments": [],
+      "segments": [
+        "gate_brake_tmp_thread"
+      ],
       "desc": "M19P-S2 受控文件：新线闸门（AUTHDIR 收编为单一解析）"
     },
     "legacy_tools/_src/gate.py": {
@@ -147,7 +158,9 @@
   },
   "removed": {
     "act.py": {},
-    "src/agentctl/gate.py": {},
+    "src/agentctl/gate.py": {
+      "tmp = \"%s.tmp.%d\" % (BRAKE_FLAG, os.getpid())": 1
+    },
     "legacy_tools/_src/gate.py": {},
     "legacy_tools/_src/auth_popup.py": {},
     "core.py": {

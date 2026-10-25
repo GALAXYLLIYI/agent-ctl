@@ -785,7 +785,10 @@ def set_brake(why: str = "未注明") -> tuple[bool, str]:
                 "（本文件是内部状态载体，不需要手工创建或删除。）\n"
                 % (stamp, why))
         # pid 进 tmp 名：并发进程不再抢同一个中间文件
-        tmp = "%s.tmp.%d" % (BRAKE_FLAG, os.getpid())
+        # ★ 2026-10-25（W1 并发压测发现）：**同进程多线程**仍会抢同一个 tmp 名
+        #   （实测 8 线程 × 100 次 set：5/1600 重试耗尽）⇒ 再加一段随机后缀，
+        #   让「进程内并发」也有各自的中间文件；失败口径不变（重试 5 次仍失败就明确报错）。
+        tmp = "%s.tmp.%d.%s" % (BRAKE_FLAG, os.getpid(), secrets.token_hex(4))
         last = None
         for attempt in range(5):
             try:

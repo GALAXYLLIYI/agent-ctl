@@ -102,7 +102,7 @@ INVARIANTS = {
     #   73F5F0DD… → BB104E5D…
     "src/agentctl/action_guard_policy.json": "34E470F8D97474C132926280CF4D173E",
     # ★ M19P-S2（AUTHDIR 收编，678a19f）后的两份闸门：解析口径收编是**合法变更** ⇒ 指纹更新
-    "src/agentctl/gate.py": "C46F32739E06DFE277862F611DA73847",
+    "src/agentctl/gate.py": "006B9209B2B7593445EB95D1F4C65626",
     "legacy_tools/gate.py": "226C9F722A674FD20370106F3D89AB1D",
     # ★ M20 引入的保护：甲案只**引用** framecache 的既有常量（WAIT_BUDGET_MS=300），没改它
     "src/agentctl/framecache.py": "AB7788D98580C179CCE77F4AEC7750E3",
