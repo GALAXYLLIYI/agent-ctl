@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -213,6 +214,10 @@ _state = {
     "blocked": {},  # actor -> {n 环境性拒绝次数, last, class}（★ P0-1：只留痕不计数）
 }
 
+# ★ 2026-10-25：进程内互斥。observe() 的「读计数→+1→写回」必须串行，
+#   否则 ThreadingHTTPServer 下并发请求会丢更新（判据 _P3_动作面并发_判据.py 钉这条）。
+_OBS_LOCK = threading.Lock()
+
 
 def reset_state() -> None:
     """清空所有计数。测试隔离用；生产里**没有**人调它（计数理应跨调用累计）。"""
@@ -271,6 +276,19 @@ class ActionGuard:
     # ── 主入口 ──────────────────────────────────────────────────────────
     def observe(self, *, actor: str = "", tool: str = "", args: dict | None = None,
                 ok: bool = True, failure_class: str | None = None) -> dict | None:
+        """★ 2026-10-25 并发修：本进程内**串行**执行状态读改写。
+
+        为什么：`mcp_http` 是 ThreadingHTTPServer（每请求一线程），
+        `_state` 的「读 n → +1 → 写回」不是原子操作 ⇒ 并发请求会丢更新，
+        而两级刹车（先 warn、连续两次才 brake）对计数精度敏感。
+        ⚠ 只护**进程内**；跨进程那一层仍由 gate 的文件锁负责（两把锁各管一层）。
+        """
+        with _OBS_LOCK:
+            return self._observe_locked(actor=actor, tool=tool, args=args, ok=ok,
+                                        failure_class=failure_class)
+
+    def _observe_locked(self, *, actor: str = "", tool: str = "", args: dict | None = None,
+                        ok: bool = True, failure_class: str | None = None) -> dict | None:
         """一次动作调一次。返回本次触发的证据（没触发 ⇒ None，**不影响动作本身**）。
 
         ★ P0-1（2026-10-21）新增 failure_class：
