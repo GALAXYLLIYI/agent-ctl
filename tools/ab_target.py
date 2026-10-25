@@ -142,6 +142,7 @@ class TargetApp:
                            for key in COMBO_KEYS}
         self.check_vars = {key: tk.BooleanVar(master=root, value=False) for key in CHECK_KEYS}
         self.entries = []
+        self.order = []          # ★ 键盘 Tab 走它：Entry/Combobox/Checkbutton/Button 全在列（真机实测 2026-10-25）
         self.status = None
 
     def values(self):
@@ -184,6 +185,7 @@ class TargetApp:
             entry = ttk.Entry(form, textvariable=self.text_vars[key], width=36)
             entry.grid(row=row, column=1, sticky="we", **pad)
             self.entries.append(entry)
+            self.order.append(entry)
             row += 1
 
         for key in COMBO_KEYS:
@@ -191,24 +193,41 @@ class TargetApp:
             combo = ttk.Combobox(form, textvariable=self.combo_vars[key],
                                  values=list(COMBO_OPTIONS[key]), state="readonly", width=34)
             combo.grid(row=row, column=1, sticky="we", **pad)
+            self.order.append(combo)
             row += 1
 
         for key in CHECK_KEYS:
-            ttk.Checkbutton(form, text=CHECK_LABELS[key], variable=self.check_vars[key],
-                            takefocus=True).grid(row=row, column=0, columnspan=2,
-                                                 sticky="w", **pad)
+            cb = ttk.Checkbutton(form, text=CHECK_LABELS[key], variable=self.check_vars[key],
+                                 takefocus=True)
+            cb.grid(row=row, column=0, columnspan=2, sticky="w", **pad)
+            self.order.append(cb)
             row += 1
 
         button = ttk.Button(form, text=SUBMIT_LABEL, command=self._on_submit, takefocus=True)
         button.grid(row=row, column=0, columnspan=2, sticky="we", pady=(10, 4))
+        self.order.append(button)
         row += 1
 
         self.status = ttk.Label(form, text="尚未提交（%s）" % os.path.basename(self.out_path),
                                 foreground="#555555")
         self.status.grid(row=row, column=0, columnspan=2, sticky="w", padx=6)
 
+        # ★ 2026-10-25 真机实测：ttk 默认的 Tab 遍历在这台机器上**不换焦点**
+        #   （pyautogui 连打三行全进文本1）⇒ 显式绑定，Tab/Shift-Tab 由我们按 order 走。
+        for w in self.order:
+            w.bind("<Tab>", lambda e, w=w: self._hop(w, 1))
+            w.bind("<Shift-Tab>", lambda e, w=w: self._hop(w, -1))
+
         root.after(80, self._focus_first)        # 焦点落在文本 1：键盘基线的起点
         root.lift()
+
+    def _hop(self, w, step):
+        try:
+            i = self.order.index(w)
+            self.order[(i + step) % len(self.order)].focus_set()
+        except ValueError:
+            pass
+        return "break"
 
 
 def build_app(root, out_path):
@@ -226,6 +245,8 @@ def main(argv=None):
                         help="不建窗、不碰鼠标，直接调提交逻辑写一次文件并退出 0")
     parser.add_argument("--auto-close", nargs="?", type=float, const=5.0, default=None,
                         metavar="SEC", help="建窗后 N 秒自动关闭（给非交互采集用；默认 5）")
+    parser.add_argument("--layout-out", default=None,
+                        help="把 8 个控件的屏幕坐标写成 JSON（给点击式基线用；默认不写）")
     args = parser.parse_args(argv)
 
     out_path = _resolve_path(args.out)
@@ -242,7 +263,21 @@ def main(argv=None):
 
     _enable_dpi_awareness()
     root = tk.Tk()
-    build_app(root, out_path)
+    app = build_app(root, out_path)
+    if args.layout_out:
+        def _dump_layout():
+            keys = list(TEXT_KEYS) + list(COMBO_KEYS) + list(CHECK_KEYS) + [SUBMIT_KEY]
+            lay = {}
+            for key, w in zip(keys, app.order):
+                try:
+                    lay[key] = [w.winfo_rootx(), w.winfo_rooty(),
+                                w.winfo_width(), w.winfo_height()]
+                except Exception:
+                    pass
+            with open(_resolve_path(args.layout_out), "w", encoding="utf-8") as f:
+                json.dump(lay, f, ensure_ascii=False, indent=1)
+            print("[OK] layout → %s（%d 个）" % (_resolve_path(args.layout_out), len(lay)), flush=True)
+        root.after(600, _dump_layout)
     if args.auto_close is not None:
         delay_ms = max(0, int(args.auto_close * 1000))
         root.after(delay_ms, root.destroy)
