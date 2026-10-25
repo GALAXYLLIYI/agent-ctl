@@ -1,131 +1,86 @@
-#!/usr/bin/env python
 # -*- coding: utf-8 -*-
+r"""证据复核器 · 判据（O1，2026-10-25 重写）
+
+为什么重写：OpenCode 交来的版本只是“跑 verifier 并把它的 rc 当自己的 rc”
+（正常跑输出 1、注入跑 97）——那不是判据，是转发。本版改成**显式断言**：
+  · 合法记录  ⇒ verifier rc=0
+  · 矛盾记录  ⇒ rc=1
+  · 不可复算  ⇒ rc=2 且报告含「不可独立复算」
+  · --inject  ⇒ 故意把矛盾记录期望成 0，判据必须红
+
+跑法：python -X utf8 tests\_P3_证据复核_判据.py [--inject]
+"""
 import json
 import os
 import subprocess
 import sys
 import tempfile
 
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(HERE)
+VERIFIER = os.path.join(ROOT, "tools", "verify_evidence.py")
+
+sys.path.insert(0, os.path.join(ROOT, "src"))
+from agentctl import evidence                                    # noqa: E402
+
+
+def _rec(**kw):
+    base = dict(actor="judge", target={"hwnd": 1}, frame_hash="aa11",
+                action={"tool": "ctl_click"}, wait_ms=100, verdict="met",
+                reasons=["ok"], evidence_refs=[],
+                recompute_spec={"DIFF_STEP": 4, "HYSTERESIS": 2, "need": 1},
+                recomputable=True)
+    base.update(kw)
+    return evidence.make_record(**base)
+
+
+def run_verifier(recs):
+    fd, p = tempfile.mkstemp(suffix=".json")
+    os.close(fd)
+    out = p + ".md"
+    try:
+        json.dump(recs, open(p, "w", encoding="utf-8"), ensure_ascii=False)
+        r = subprocess.run([sys.executable, "-X", "utf8", VERIFIER,
+                            "--evidence", p, "--out", out],
+                           cwd=ROOT, capture_output=True, text=True)
+        rep = open(out, encoding="utf-8").read() if os.path.exists(out) else ""
+        return r.returncode, rep
+    finally:
+        for x in (p, out):
+            try:
+                os.unlink(x)
+            except OSError:
+                pass
+
 
 def main():
-    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    src_path = os.path.join(repo_root, 'src')
-    if src_path not in sys.path:
-        sys.path.insert(0, src_path)
+    inject = "--inject" in sys.argv
+    fails = []
 
-    from agentctl import evidence
+    def check(name, cond, detail=""):
+        print(("  OK  " if cond else "  X   ") + name + (("  —— " + detail) if not cond else ""))
+        if not cond:
+            fails.append(name)
 
-    # Fixture 1: 合法结构记录 ⇒ 可复算且自洽
-    rec1 = evidence.make_record(
-        actor="DSH",
-        target={"hwnd": 1234},
-        frame_hash="ab12cd34",
-        action={"tool": "ctl_click"},
-        wait_ms=450,
-        verdict="met",
-        reasons=["matched"],
-        evidence_refs=["ref1"],
-        recompute_spec={"DIFF_STEP": 4, "HYSTERESIS": 2, "need": 1},
-        recomputable=True,
-        notes="ok",
-    )
+    rc0, _ = run_verifier([_rec()])
+    rc1, _ = run_verifier([_rec(verdict="not_met", reasons=["ok"])])
+    rc2, rep2 = run_verifier([_rec(recomputable=False)])
 
-    # Fixture 2: verdict 与 reasons 矛盾 ⇒ rc=1
-    # Make it pass validate but be inconsistent in structure
-    rec2 = dict(rec1)
-    rec2['verdict'] = "not_met"
-    rec2['reasons'] = ["matched"]  # contradictory
-    rec2['recomputable'] = True
-    # ensure it validates
-    evidence.validate(rec2)
-
-    # Fixture 3: recomputable:false ⇒ rc=2 且报告含“不可独立复算”
-    rec3 = evidence.make_record(
-        actor="DSH",
-        target={"hwnd": 5678},
-        frame_hash="ff00aa11",
-        action={"tool": "ctl_click"},
-        wait_ms=300,
-        verdict="met",
-        reasons=["matched"],
-        evidence_refs=["ref2"],
-        recompute_spec={"DIFF_STEP": 4, "HYSTERESIS": 2, "need": 1},
-        recomputable=False,
-        notes="pixel",
-    )
-
-    # Normal run
-    if '--inject' not in sys.argv:
-        fixtures = [rec1, rec2, rec3]
-        fd, path = tempfile.mkstemp(suffix='.json', prefix='evidence_')
-        os.close(fd)
-        try:
-            with open(path, 'w', encoding='utf-8') as f:
-                json.dump(fixtures, f, ensure_ascii=False)
-            fd2, out_path = tempfile.mkstemp(suffix='.md', prefix='rep_')
-            os.close(fd2)
-            try:
-                verifier = os.path.join(repo_root, 'tools', 'verify_evidence.py')
-                proc = subprocess.run([sys.executable, '-X', 'utf8', verifier, '--evidence', path, '--out', out_path], cwd=repo_root)
-                rc = proc.returncode
-                # Check report contains "不可独立复算"
-                try:
-                    with open(out_path, 'r', encoding='utf-8') as f:
-                        report = f.read()
-                    if '不可独立复算' not in report:
-                        print('REPORT_MISSING_PHRASE', flush=True)
-                        raise SystemExit(99)
-                except SystemExit:
-                    raise
-                except Exception:
-                    print('REPORT_READ_ERR', flush=True)
-                    raise SystemExit(98)
-                print(rc, flush=True)
-                raise SystemExit(rc)
-            finally:
-                try:
-                    os.unlink(out_path)
-                except Exception:
-                    pass
-        finally:
-            try:
-                os.unlink(path)
-            except Exception:
-                pass
+    if inject:
+        # ★ 注入：故意把“矛盾记录”期望成 rc=0 —— 判据必须红
+        check("注入·矛盾记录被期望成 0（应当红）", rc1 == 0, "actual rc=%s" % rc1)
     else:
-        # --inject: 把矛盾记录判成通过（应该必红）
-        bad = dict(rec2)
-        bad['verdict'] = "met"  # try to make it look ok
-        bad['reasons'] = ["matched"]
-        evidence.validate(bad)
-        fixtures_bad = [bad]
-        fd, path = tempfile.mkstemp(suffix='.json', prefix='evidence_bad_')
-        os.close(fd)
-        try:
-            with open(path, 'w', encoding='utf-8') as f:
-                json.dump(fixtures_bad, f, ensure_ascii=False)
-            fd2, out_path = tempfile.mkstemp(suffix='.md', prefix='rep_bad_')
-            os.close(fd2)
-            try:
-                verifier = os.path.join(repo_root, 'tools', 'verify_evidence.py')
-                proc = subprocess.run([sys.executable, '-X', 'utf8', verifier, '--evidence', path, '--out', out_path], cwd=repo_root)
-                rc = proc.returncode
-                print(rc, flush=True)
-                # Must be red (non-zero)
-                if rc == 0:
-                    raise SystemExit(97)
-                raise SystemExit(rc)
-            finally:
-                try:
-                    os.unlink(out_path)
-                except Exception:
-                    pass
-        finally:
-            try:
-                os.unlink(path)
-            except Exception:
-                pass
+        check("合法记录 ⇒ rc=0", rc0 == 0, "actual %s" % rc0)
+        check("矛盾记录 ⇒ rc=1", rc1 == 1, "actual %s" % rc1)
+        check("不可复算 ⇒ rc=2", rc2 == 2, "actual %s" % rc2)
+        check("报告含「不可独立复算」", "不可独立复算" in rep2)
+
+    print()
+    if fails:
+        print("【红】%d 项失败：%s" % (len(fails), fails))
+        raise SystemExit(1)
+    print("【绿】全部通过：三态退出码与报告措辞都对得上，且注入必红。")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
