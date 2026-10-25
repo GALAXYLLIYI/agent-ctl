@@ -84,7 +84,7 @@ Copyright (c) 2026 GALAXYLLIYI
 公开仓：
 
 ```powershell
-git clone https://gitee.com/GALAXYLIYI/computer-use-gate ; cd agent-ctl ; pwsh -File .\install.ps1
+git clone https://gitee.com/GALAXYLIYI/computer-use-gate ; cd computer-use-gate ; pwsh -File .\install.ps1
 ```
 
 一行装（先看清脚本再跑更稳）：

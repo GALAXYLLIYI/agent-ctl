@@ -36,8 +36,8 @@ classifiers = [
 dependencies = []
 
 [project.urls]
-Homepage = "https://gitee.com/GALAXYLIYI/agent-ctl"
-Repository = "https://gitee.com/GALAXYLIYI/agent-ctl"
+Homepage = "https://gitee.com/GALAXYLIYI/computer-use-gate"
+Repository = "https://gitee.com/GALAXYLIYI/computer-use-gate"
 
 [tool.setuptools]
 package-dir = { "" = "src" }
