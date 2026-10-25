@@ -45,16 +45,28 @@ print(agent.run("在记事本里写下 hello，并读回来确认"))
 3. **判词必须读**：三个值 `met / no_effect / unobservable`；**unobservable 绝不能当成功**。
 4. **急停在旗子级**：面板 / `Ctrl+Alt+Home` / 删旗子三条通道；MAF 的取消不能代替急停。
 
-## 四、验收（本机）
+## 四、验收（本机，2026-10-25 实测）
+
+```
+agent_framework 1.23.0 安装成功
+MCPStreamableHTTPTool(name="agentctl", url=..., static_headers={"Authorization": "Bearer ..."})
+→ connect() 成功
+→ tools = 25（ctl_task / ctl_focus / ctl_status / ctl_windows / ctl_shot / ctl_tree / ctl_screen / ctl_find ...）
+```
+
+两个坑（都写进示例里了）：
+
+1. **参数名是 `static_headers`，不是 `headers`**——传错会被吞进 `**kwargs`，连接时不带 Authorization，服务端直接 401/拒绝；
+2. 连接时 MAF 会打一条 `MCPDeprecationWarning: ping is removed as of 2026-07-28`——**无害**，它只影响 legacy ping。
+
+> ⚠ 依赖冲突提醒：安装 `agent-framework` 把 `mcp` 拉到了 **2.3.0**，与 `cnki-deepsearch`（要求 `mcp<2`）冲突。
+> 这是本机全局环境的副作用，不是 AgentCtl 的问题；需要时给 cnki 单独建 venv。
 
 ```powershell
 # 1) 服务在听
 python -X utf8 -m agentctl.cli service status
 
-# 2) token 能通（匿名不行）
-$env:AGENTCTL_MCP_TOKEN = (Get-Content .\state\token -Raw).Trim()
-
-# 3) 示例能构造出工具（不需要模型也能过 import/构造这一段）
+# 2) 示例能构造工具并连上（不需要模型、不碰桌面）
 python -X utf8 examples\agent_framework_agentctl.py --dry
 ```
 

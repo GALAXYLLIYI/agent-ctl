@@ -44,7 +44,9 @@ def build_tool():
     tool = MCPStreamableHTTPTool(
         name="agentctl",
         url=MCP_URL,
-        headers={"Authorization": "Bearer " + tok},
+        # ★ MAF 的签名里是 static_headers（不是 headers）；传错会被静默吞进 kwargs。
+        static_headers={"Authorization": "Bearer " + tok},
+        request_timeout=90,
     )
     return tool
 
