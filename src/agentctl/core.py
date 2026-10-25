@@ -55,6 +55,8 @@ from agentctl import popup_slot                          # noqa: E402（单例�
 #   改前一个是「legacy 帧文件的字节」、一个是「mss 实时抓屏的 RGB」，
 #   两个来源必然不等 ⇒ 内容寻址事实上不存在。口径与实测见 digest.py 开头。
 from agentctl import digest                               # noqa: E402
+# ★ 2026-10-25：并发原语（W2 交付）。只给“进程内”用；跨进程仍由 gate 的文件锁负责。
+from agentctl import sync as _sync                        # noqa: E402
 
 # ★ 老脚本目录**只从 gate 拿**（A 项，2026-10-04）★
 # 原来这里自己写死 <项目目录>
@@ -587,7 +589,7 @@ def _legacy(name: str, args: list[str], timeout: int = 60,
 
 
 # ────────────────────────── 工具实现 ──────────────────────────
-_INTEGRITY_CACHE: dict = {}
+_INTEGRITY_CACHE = _sync.LockedDict()          # 2026-10-25：并发安全（原 dict）
 
 
 def _my_integrity() -> dict:
@@ -5128,7 +5130,7 @@ CDP_BROWSER_CANDIDATES = (
     r"C:\Program Files\Google\Chrome\Application\chrome.exe",
     r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
 )
-_CDP_PROC = {}                    # port -> {pid, profile, exe, ws}（**只记我们自己起的**）
+_CDP_PROC = _sync.LockedDict()     # 2026-10-25：并发安全（原 dict）；port -> {pid, profile, exe, ws}
 
 
 def _cdp_http(path: str, port: int = CDP_DEFAULT_PORT,
@@ -6334,7 +6336,7 @@ SCREEN_SNAP_TTL_SEC = 30.0
 SCREEN_SNAP_MAX_HWNDS = 32
 # ★ 窗G3c：click.after 里 changed_objects 的条数上限（体验加成，给个硬顶防信封膨胀）
 SCREEN_AFTER_CHANGED_CAP = 8
-_SCREEN_SEEN = {}
+_SCREEN_SEEN = _sync.LockedDict()          # 2026-10-25：并发安全（原 dict）
 
 # ★ M6-①（2026-10-22）：**帧复用台账**。
 #   hwnd → {screen_version, capture_id, payload（上一屏的完整答案）, img（客户区画面）,
@@ -6343,7 +6345,7 @@ _SCREEN_SEEN = {}
 #     ① 「带 since 再看一次」：画面没变 ⇒ **直接回上一版答案**（不重扫 UIA）；
 #     ② 「观测 → 动作」：动作的「动作前」那一帧**复用**这里存的那张。
 #   ⚠ 只在**本进程**内存里（与 `_SCREEN_SEEN` 同生命周期）；换进程就没有基线 ⇒ 重扫。
-_SCREEN_FRAME_RESULT = {}
+_SCREEN_FRAME_RESULT = _sync.LockedDict()  # 2026-10-25：并发安全（原 dict）
 
 
 def _screen_snap_get(hwnd: int):
@@ -7719,3 +7721,19 @@ def tool_list() -> list[dict]:
     except Exception as e:
         out.append({"name": "_error", "description": f"读契约失败: {e}"})
     return out
+
+
+# ── 2026-10-25：同 actor 串行开关（默认**关**；AGENTCTL_SERIALIZE=1 才开）──────────
+# 为什么默认关：串行会让同一 actor 的并发调用排队，改变延迟特征；
+# 这个开关是给“同一个 agent 多线程 / 多路并发调用”的场景准备的，由使用方显式打开。
+# 口径：默认路径与改前一致（只多一层函数调用），不改变任何判定。
+_SYNC_SERIAL = _sync.SerialByActor()
+_ORIG_DISPATCH = dispatch
+
+
+def dispatch(tool: str, args: dict, *, actor: str = "", human: bool = False) -> dict:
+    """dispatch 的统一入口：默认透传；`AGENTCTL_SERIALIZE=1` 时同 actor 串行。"""
+    if os.environ.get("AGENTCTL_SERIALIZE", "") == "1":
+        with _SYNC_SERIAL.hold(actor or "unknown"):
+            return _ORIG_DISPATCH(tool, args, actor=actor, human=human)
+    return _ORIG_DISPATCH(tool, args, actor=actor, human=human)
