@@ -98,6 +98,7 @@ VERDICTS = (
     "没测出来",
     "闸门拒绝",
     "窗口指纹不匹配",
+    "窗口已消失",
 )
 
 #: `expect` 里比对的元素属性没有取到时用的哨兵（区别于「取到了但是 None」）。
@@ -373,6 +374,19 @@ def replay(skill, executor, guard=None) -> dict:
                 result["steps"].append(detail)
                 return _stop(result, "闸门拒绝", detail["reason"], i, t0)
 
+        # ★ 2026-10-25：动作前先确认目标窗还在（executor 可选提供 alive()）。
+        #   为什么加：T3 实测——窗口被杀后 locate 仍能命中残留节点、perform 又只看 ok，
+        #   结果“目标已消失”被报成完成（误报 3/3）。宁可不做，也不许在死窗口上表演成功。
+        if hasattr(executor, "alive"):
+            try:
+                if not executor.alive():
+                    detail["reason"] = "目标窗口已消失（执行器 alive()=False）"
+                    detail["ms"] = round((time.perf_counter() - ts) * 1000.0, 2)
+                    result["steps"].append(detail)
+                    return _stop(result, "窗口已消失", detail["reason"], i, t0)
+            except Exception:
+                pass        # alive() 自己坏了不构成“窗口在”的证据，但也不阻断老执行器
+
         # ② 定位：失败 ⇒ 立即停（不许在没找着的东西上动手）
         try:
             loc = _call_locate(executor, step["selector"])
@@ -402,6 +416,17 @@ def replay(skill, executor, guard=None) -> dict:
             result["steps"].append(detail)
             return _stop(result, "动作失败",
                          "第 %d 步动作失败：%s" % (i + 1, perf["reason"]), i, t0)
+
+        # ★ 2026-10-25：动作做完再看一眼窗口是否还在（防止“动作把窗口弄没了”也报成功）
+        if hasattr(executor, "alive"):
+            try:
+                if not executor.alive():
+                    detail["reason"] = "动作后目标窗口消失"
+                    detail["ms"] = round((time.perf_counter() - ts) * 1000.0, 2)
+                    result["steps"].append(detail)
+                    return _stop(result, "窗口已消失", detail["reason"], i, t0)
+            except Exception:
+                pass
 
         # ④ 期望：没测出来 / 不满足 ⇒ 停（都不许当成功）
         ok_exp, verdict, why = _check_expect(step.get("expect"), perf["element"])
