@@ -78,7 +78,7 @@ KNOWN_ACTIONS = (
 )
 
 #: 步骤字段顺序。
-STEP_FIELDS = ("action", "selector", "expect")
+STEP_FIELDS = ("action", "selector", "expect", "args")
 
 #: 步骤里必填的字段（`expect` 可为 `None`/空 dict = 只定位不判期望）。
 STEP_REQUIRED = ("action", "selector")
@@ -147,6 +147,13 @@ def _check_step(where: str, step) -> None:
         if not isinstance(step["expect"], dict):
             raise ValueError("%s 的 expect 必须是 dict 或 None，给的是 %s"
                              % (where, _typename(step["expect"])))
+    # ★ 2026-10-25：可选 args（动作参数，如 ctl_type 的 text）。缺省 = 该动作没有参数。
+    #   为什么要加：结构里原先只有 action/selector/expect，"打字打什么"没处放
+    #   ⇒ 技能永远回放不了输入类动作（只测了点击）。
+    if "args" in step and step["args"] is not None:
+        if not isinstance(step["args"], dict):
+            raise ValueError("%s 的 args 必须是 dict 或 None，给的是 %s"
+                             % (where, _typename(step["args"])))
 
 
 def _check_stats(where: str, stats) -> None:
@@ -242,9 +249,19 @@ def _call_locate(executor, selector) -> dict:
     return {"ok": ok, "element": element, "reason": reason}
 
 
-def _call_perform(executor, action, element) -> dict:
-    """让 executor 执行动作；返回规整后的 `{ok, element, reason}`。"""
-    out = executor.perform(action, element)
+def _call_perform(executor, action, element, args=None) -> dict:
+    """让 executor 执行动作；返回规整后的 `{ok, reason}`。
+
+    ★ 2026-10-25：executor 可以只接受 (action, element)（老签名），
+      也可以用 (action, element, args) 接收动作参数（如 ctl_type 的 text）。
+      这里按签名自适应，**不要求 executor 改签名**。
+    """
+    try:
+        import inspect
+        n = len(inspect.signature(executor.perform).parameters)
+    except (TypeError, ValueError):
+        n = 2
+    out = executor.perform(action, element, args) if n >= 3 else executor.perform(action, element)
     if not isinstance(out, dict):
         raise ValueError("executor.perform 必须返回 dict（{ok, reason}），给的是 %s"
                          % _typename(out))
@@ -373,7 +390,7 @@ def replay(skill, executor, guard=None) -> dict:
 
         # ③ 执行
         try:
-            perf = _call_perform(executor, step["action"], loc["element"])
+            perf = _call_perform(executor, step["action"], loc["element"], step.get("args"))
         except Exception as e:
             detail["reason"] = "执行调用出错：%s: %s" % (type(e).__name__, e)
             detail["ms"] = round((time.perf_counter() - ts) * 1000.0, 2)
