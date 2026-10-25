@@ -9,6 +9,7 @@ Windows 上的「桌面动作闸门」：**人类签发通行证 → AI 执行 G
 > *human issues a pass → the agent acts → every action leaves evidence → one kill switch.*
 > Experimental 0.x personal project: no SLA, API may change. Needs **Windows 10/11 x64 + Python 3.12 + git**.
 > **Default-deny by design** (nothing moves until a human issues a pass); scope is deliberately narrow — see「适用范围（很有限）」below.
+> *Keywords: computer-use agent · MCP server · desktop action gate · Windows automation · agent safety · audit trail.*
 
 | 状态 | 协议 | 平台 | 授权 |
 |---|---|---|---|
@@ -151,6 +152,8 @@ M19 → M19′ → M19P → M19P2 这一串修复的就是这件事：**「没�
 
 ### 判据与桌面
 
+- **判据规模（2026-10-25 实测口径）**：主清单 **60 条**登记（`python -X utf8 tests\run_all.py --list`）；
+  仓库里 **76 个「判据」文件**、**107 个测试文件**。对外说数量请用这两个可核的数，别用记忆里的旧数。
 - **桌面相关判据必须在有交互桌面会话的 Windows 上跑**：无头会话 / 服务 / CI 跑不了。
   `tests\run_all.py` 文件头的原话是「**别把它当 CI 判据使**」。
 - 部分窗口不支持 `PrintWindow`（部分 WinUI/DWM、DRM/游戏类画面）⇒ 取不到帧时**如实报「取不到」**，不猜。
