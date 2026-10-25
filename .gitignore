@@ -221,3 +221,7 @@ desktop.ini
 !tools/verify_evidence.py
 # ⑫ tools/ab_target_winforms.ps1 —— UIA 有名字的 A/B 靶场（WinForms）
 !tools/ab_target_winforms.ps1
+# ⑬ tools/env_probe.py —— 外部机器环境自检（只读，不联网）
+!tools/env_probe.py
+# ⑭ tools/slim_map.py —— core.py 瘦身依赖图（只读静态分析）
+!tools/slim_map.py
