@@ -128,7 +128,7 @@ python -X utf8 tests\_像素不判成功_判据.py --inject
 # unused import 之类只提醒不拦
 python -X utf8 tools\lint_gate.py src\agentctl
 
-# 提交前隐私扫描：扫 **git 索引**里已暂存的内容（手机号 / 密钥字面量 / 个人绝对路径 / DSH 凭据引用）
+# 提交前隐私扫描：扫 **git 索引**里已暂存的内容（手机号 / 密钥字面量 / 个人绝对路径 / 本地 agent 凭据引用）
 python -X utf8 tools\presubmit_scan.py
 python -X utf8 tools\presubmit_scan.py --worktree    # 扫工作区（修改前看看有什么）
 

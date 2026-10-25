@@ -1,4 +1,4 @@
-# 派单 · M18-b（OpenCode）· 刀3a · timeline 落盘：连接复用 · 2026-10-23 00:20
+# 派单 · M18-b（窗口B）· 刀3a · timeline 落盘：连接复用 · 2026-10-23 00:20
 
 > 依据：`docs\意见\裁决_M17_下一刀_20221022.md` §四·刀3｜`docs\实测_M17C2_动作调用链地图_20221022.md`（s4）｜`docs\实测_M17B_UIA与抓帧_20221022.md`
 > 总派单：`docs\派单_M18_动作面瘦身三刀_20221022.md`（v2 四刀三线版）
@@ -6,7 +6,7 @@
 ## 〇、一句话
 
 **`store.py` 每写一条事件就新建一个 sqlite 连接、并重设一次 `PRAGMA journal_mode=WAL`——改成连接复用 + PRAGMA 只设一次。**
-只改 `store.py`，不碰 `core.py`（那是 ZCode 的）。预计这一刀是三刀里最可能拿大头的（core 侧事后段共 ~347ms）。
+只改 `store.py`，不碰 `core.py`（那是 窗口A 的）。预计这一刀是三刀里最可能拿大头的（core 侧事后段共 ~347ms）。
 
 ## 一、落点与依据
 
@@ -40,8 +40,8 @@
 ## 四、并行纪律
 
 - **只许改**：`src/agentctl/store.py` ＋ 你自己的判据文件。
-- **不许碰**：`core.py`（ZCode 的刀1/刀3b）、`framecache.py`、`act.py`（MiniMax 的刀2）、`contract/`、`gate.py`、`action_guard_policy.json`。
-- **落笔前**在 `work\_M18_动作面瘦身\落笔锁.txt` 写「OpenCode/M18-b/开始时间」，收笔写「完成」。
+- **不许碰**：`core.py`（窗口A 的刀1/刀3b）、`framecache.py`、`act.py`（MiniMax 的刀2）、`contract/`、`gate.py`、`action_guard_policy.json`。
+- **落笔前**在 `work\_M18_动作面瘦身\落笔锁.txt` 写「窗口B/M18-b/开始时间」，收笔写「完成」。
 - **测量窗口令牌由主控单独发放**（`work\_M18_动作面瘦身\窗口令牌_M18b.txt`）。**没拿到令牌不许跑时序测量**——可以改代码、写判据、跑静态自检。
 
 ## 五、通用红线

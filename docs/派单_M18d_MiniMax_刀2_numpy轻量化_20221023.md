@@ -50,7 +50,7 @@
 ## 五、并行纪律
 
 - **只许改**：`src/agentctl/framecache.py`、`legacy_tools\_src\act.py`（三处 act.py）＋ 你自己的判据文件。
-- **不许碰**：`core.py`（ZCode 的刀1/刀3b）、`store.py`（OpenCode 的刀3a）、`contract/`、`gate.py`、`action_guard_policy.json`。
+- **不许碰**：`core.py`（窗口A 的刀1/刀3b）、`store.py`（窗口B 的刀3a）、`contract/`、`gate.py`、`action_guard_policy.json`。
 - **落笔前**在 `work\_M18_动作面瘦身\落笔锁.txt` 写「MiniMax/M18-d/开始时间」，收笔写「完成」。
 - **测量窗口令牌由主控单独发放**（`work\_M18_动作面瘦身\窗口令牌_M18d.txt`）。**没拿到令牌不许跑时序测量**。
 

@@ -1,4 +1,4 @@
-# 派单 · M18-a（ZCode）· 刀1 · core 侧 eid 复核精确定位 · 2026-10-23 00:20
+# 派单 · M18-a（窗口A）· 刀1 · core 侧 eid 复核精确定位 · 2026-10-23 00:20
 
 > 依据：`docs\意见\裁决_M17_下一刀_20221022.md` §四·刀1｜`docs\实测_M17B_UIA与抓帧_20221022.md`（B 线实测数据）｜`docs\实测_M17C2_动作调用链地图_20221022.md`
 > 总派单：`docs\派单_M18_动作面瘦身三刀_20221022.md`（v2 四刀三线版）
@@ -38,8 +38,8 @@
 ## 四、并行纪律
 
 - **只许改**：`src/agentctl/core.py`（eid 复核段）＋ 你自己的判据文件。
-- **不许碰**：`framecache.py`、`act.py`、`store.py`（**store.py 是 OpenCode 的刀3a，别抢**）、`contract/`、`gate.py`、`action_guard_policy.json`。
-- **落笔前**在 `work\_M18_动作面瘦身\落笔锁.txt` 写「ZCode/M18-a/开始时间」，收笔写「完成」。
+- **不许碰**：`framecache.py`、`act.py`、`store.py`（**store.py 是 窗口B 的刀3a，别抢**）、`contract/`、`gate.py`、`action_guard_policy.json`。
+- **落笔前**在 `work\_M18_动作面瘦身\落笔锁.txt` 写「窗口A/M18-a/开始时间」，收笔写「完成」。
 - **测量窗口令牌由主控单独发放**（`work\_M18_动作面瘦身\窗口令牌_M18a.txt`）。**没拿到令牌不许跑时序测量**——可以改代码、写判据、跑静态自检。（M17 定过的纪律：改代码并行，跑秒表串行。）
 
 ## 五、通用红线（与总派单一致）

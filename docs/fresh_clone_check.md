@@ -3,7 +3,7 @@
 > 目的：证明**这份仓在任何一台干净 Windows 机器上都能自证活着的**——
 > 不依赖开发机的 `F:\` 绝对路径、不依赖 `%LOCALAPPDATA%` 里的历史状态、
 > 不依赖仓外的真源目录。这是"可审计"承诺的地基（产品定位 §四：仓不自足，可审计自相矛盾）。
-> 配套：Codex 窗 X 的 `tools\selfcheck_minrepo.py`（仓自足验收脚本，本单同日并行施工；
+> 配套：窗口D 窗 X 的 `tools\selfcheck_minrepo.py`（仓自足验收脚本，本单同日并行施工；
 > 命令行以其 `--help`/回执为准，若有出入以 X 回执更新本文件）。
 
 ## 一、"自足"的五条验收面
@@ -44,4 +44,4 @@ python -X utf8 tools\selfcheck_minrepo.py --expect-fail   # 以 X 回执口径�
 ## 四、本机验证留痕
 
 - 2026-10-18 窗Y 只写了本说明，未执行 clone/脚本（不跑判据约束）；
-- 脚本由 Codex 窗 X 同日交付（`work\_X_receipt.md`），首跑记录以该回执为准。
+- 脚本由 窗口D 窗 X 同日交付（`work\_X_receipt.md`），首跑记录以该回执为准。

@@ -135,7 +135,7 @@ legacy_tools\\cdp.py」**。
     python -X utf8 -m agentctl.cli browser --action eval   --port 9223 --js "document.title"
     python -X utf8 -m agentctl.cli browser --action launch --port 9333 --profile <独立 profile>
 
-    # MCP（Codex / 任何 MCP 客户端）
+    # MCP（窗口D / 任何 MCP 客户端）
     mcp__agentctl__ctl_browser { "action": "pages", "port": 9223 }
     mcp__agentctl__ctl_browser { "action": "eval", "port": 9223, "js": "location.href" }
 
@@ -269,7 +269,7 @@ MiniMax Code（`<本机路径>\MiniMax Code\MiniMax Code.exe`，Electron 42.8 / 
 ## 8. MCP 的传输层：stdio 与 HTTP（2026-10-20 新增）
 
 ```
-Codex 宿主
+窗口D 宿主
   │ ① stdio：父进程持有 stdin 管道 ──► agentctl.mcp（随宿主生死）
   │ ② HTTP ：POST /mcp ──────────────► agentctl.mcp_http（常驻，自己守着连接）
                                           │
@@ -317,4 +317,4 @@ tools/call ctl_status -> ok=True code=0
 HTTP 响应形态=JSON（客户端 Accept=text/event-stream, application/json）
 ```
 
-⇒ Codex 侧：`mcp: agentctl_http/ctl_status (completed)` ⇒ **HTTP 传输打通**。
+⇒ 窗口D 侧：`mcp: agentctl_http/ctl_status (completed)` ⇒ **HTTP 传输打通**。
