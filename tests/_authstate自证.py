@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-r"""_authstate自证.py —— Codex-3 · P1-B 授权状态父子模块自证
+r"""_authstate自证.py —— 窗口D-3 · P1-B 授权状态父子模块自证
 
 ★ 铁律三条，本脚本自己先做到：
   1. **只读 + 临时目录假状态**：状态文件与 gate.lock 全部落在

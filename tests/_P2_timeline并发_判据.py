@@ -28,7 +28,7 @@ B组｜**真源实测**（判定面·绿·但内容是「病还在」）
        同时钉住「真源还是坏的」。
      ★ 真源修好之后本组会转红 —— 那不是出错，是**提醒**：
        「口径该翻过来了（把本组从『必须不成立』改成『必须成立』），
-         本条即可登记进 run_all.CRITERIA」。真源改动另开 DSH 单。
+         本条即可登记进 run_all.CRITERIA」。真源改动另开 本地 agent 单。
 
 C组｜**真源现场体检**（判定面·绿·只读 work\timeline）
   ③ 现场四数必须**如实报出**，且必须**互相自洽**：
@@ -101,7 +101,7 @@ def finish():
     print("结论：【绿】并发写三条契约可同时满足；真源现状已如实报出。", flush=True)
     print("★ 注意：本条**判定面是规格**。真源 store.py 仍是坏的 ——", flush=True)
     print("  「真源未修」这件事在 B 组如实报出，**修法与迁移路径见**", flush=True)
-    print("  docs\\设计_timeline并发写_20261021.md（真源改动另开 DSH 单）。", flush=True)
+    print("  docs\\设计_timeline并发写_20261021.md（真源改动另开 本地 agent 单）。", flush=True)
     return 0
 
 

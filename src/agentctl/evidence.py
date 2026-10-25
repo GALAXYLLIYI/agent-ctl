@@ -172,7 +172,7 @@ def make_record(**kwargs) -> dict:
     """造一条 v0 证据记录（**唯一**的合法入口）→ 返回按 `FIELDS` 排好序的 dict。
 
     用法：
-        rec = make_record(actor="DSH", target={"hwnd": 1234}, frame_hash="ab…",
+        rec = make_record(actor="本地 agent", target={"hwnd": 1234}, frame_hash="ab…",
                           action={"tool": "ctl_click"}, wait_ms=450,
                           verdict="met", reasons=[], evidence_refs=[], recompute_spec=...)
 

@@ -196,8 +196,8 @@ _REAL_CLASSIFY = None
 # ══════════════════════════════════════════════════════════════════════
 def fake_events() -> list[tuple[str, dict, dict, str]]:
     """(用例名, 事件, 上下文, 期望档)。"""
-    tm_agent = {"seq": 3308, "kind": "click", "actor": "codex", "tool": "ctl_click"}
-    tm_perceive = {"seq": 3307, "kind": "focus", "actor": "codex", "tool": "ctl_focus"}
+    tm_agent = {"seq": 3308, "kind": "click", "actor": "窗口D", "tool": "ctl_click"}
+    tm_perceive = {"seq": 3307, "kind": "focus", "actor": "窗口D", "tool": "ctl_focus"}
     return [
         ("① 物理键（无注入位）⇒ 真人",
          {"device": "keyboard", "vkCode": 65, "flags": 0, "injected": False, "lower_il": False},
@@ -335,11 +335,11 @@ def main():
     try:
         strong = classify({"device": "mouse", "flags": 0x01, "injected": True, "lower_il": False},
                           {"flags_readable": True, "agent_running": True,
-                           "timeline_match": {"seq": 1, "kind": "click", "actor": "codex",
+                           "timeline_match": {"seq": 1, "kind": "click", "actor": "窗口D",
                                               "tool": "ctl_click"}})
         weak = classify({"device": "mouse", "flags": 0x01, "injected": True, "lower_il": False},
                         {"flags_readable": True, "agent_running": True,
-                         "timeline_match": {"seq": 1, "kind": "focus", "actor": "codex",
+                         "timeline_match": {"seq": 1, "kind": "focus", "actor": "窗口D",
                                             "tool": "ctl_focus"}})
         rec("⑦ 证据弱 ⇒ 置信度必须更低", strong.get("confidence", 0) > weak.get("confidence", 0),
             "强证据=%s 弱证据=%s" % (strong.get("confidence"), weak.get("confidence")))

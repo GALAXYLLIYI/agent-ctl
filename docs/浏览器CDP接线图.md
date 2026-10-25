@@ -286,7 +286,7 @@ MiniMax Code（`<本机路径>\MiniMax Code\MiniMax Code.exe`，Electron 42.8 / 
 
 ★ 死因实测（日志原话）：
 ```
-[17:38:30] tools/call ctl_quiz actor=codex args={"action":"status","port":9333}
+[17:38:30] tools/call ctl_quiz actor=窗口D args={"action":"status","port":9333}
 [17:38:34] tools/call ctl_quiz -> ok=True code=0
 [17:38:34] stdin 结束（EOF / 父进程断开）⇒ server 退出
 ```

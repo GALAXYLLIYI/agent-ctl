@@ -4,7 +4,7 @@ r"""扫 legacy_tools/ 里不宜开源的内容：本机绝对路径、真实姓�
 为什么单独扫一遍（make_legacy_dir 已经扫过手机号/身份证）：
 那两道闸门管的是**数字型隐私**，管不住
 · 开发机的绝对路径（泄露目录结构与用户名）
-  · dsh / 用户 / 豆包 / TRAE 之类的**内部人名与项目代号**
+  · 本地 agent / 用户 / 豆包 / TRAE 之类的**内部人名与项目代号**
   · 写着「用户」「本机实测」的**私人叙述**
 这些不影响功能，但开源后会很尴尬。
 
@@ -22,7 +22,7 @@ ROOT = Path(__file__).resolve().parent.parent
 TARGET = ROOT / "legacy_tools"
 
 PAT_PATH = re.compile(r"[A-Z]:\\[A-Za-z0-9_\\.一-鿿-]+|Users\\[^\\]+|dsh-viewer-plugin|dsh-viewer")
-PAT_NAME = re.compile(r"用户|豆包|WorkBuddy|WorkBuddy|TRAE|trae|dsh\b")
+PAT_NAME = re.compile(r"用户|豆包|WorkBuddy|WorkBuddy|TRAE|trae|本地 agent\b")
 # ★ 2026-10-23 脱敏（开源 P0-1 / H1）：这里原来写的是**某个真实手机号的前 7 位**字面量
 #   （形如「7 位前缀 + \d{4}」）—— 「扫隐私的工具自己带着隐私」，仓库一公开就等于交出一个真实号码。
 #   现在改成**形态级**判据：任何 11 位、以 1[3-9] 开头的中国大陆手机号都算命中。

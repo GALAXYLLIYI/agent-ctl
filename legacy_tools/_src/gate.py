@@ -158,7 +158,7 @@ def _load_checked(path):
 # 为什么必须加锁（实测，不是推测）：
 #   `check()` 读盘判定 与 `require()` 计数写回 原本是**两步**，中间没有互斥 ——
 #   40 个进程同时打一张「上限 5 次」的证，5 轮累计**放行 48 次、超发 26 次**
-#   （台架 work\_dsh_20261009\d16_race.py，改前台账 d16_race_改前.json）。
+#   （台架 work\_本地 agent_20261009\d16_race.py，改前台账 d16_race_改前.json）。
 #   ⇒ 症状是「用户签了 5 次，实际能点 13 次」。
 # ★ D18：定义处已搬进 gate_lock.py（auth_popup 也要用它）。本函数只剩**翻译层**：
 #   把共享模块的 LockTimeout 翻成闸门的 GateDenied —— 老调用与台架都按 GateDenied 接。
@@ -388,7 +388,7 @@ def check(scope, target=None):
         # ★ D18·R2：读失败**不能**伪装成「没有通行证」—— 那会误导人以为没授权、跑去重新签发。
         return False, f"闸门状态读不了（{err}）—— 本次拒绝（不写回）"
     if not p:
-        # ★ D3 修复（2026-10-19，Codex 实跑时踩出）：**报错必须报出查的是哪个目录**。
+        # ★ D3 修复（2026-10-19，窗口D 实跑时踩出）：**报错必须报出查的是哪个目录**。
         #   本机实测：同一个 `act.py`，在 agent-ctl\legacy_tools 下跑报「没有通行证」，
         #   在 dsh-viewer-plugin\tools 下跑**通过** —— 因为这层 gate.py 用
         #   `AUTHDIR = HERE/_auth`（HERE = gate.py 所在目录），而 src\agentctl\gate.py
@@ -474,7 +474,7 @@ def require_any(scopes, note="", count=None, target=None):
     为什么在共享入口改、而不是逐调用点加 `count=False`：
       逐点改必漏 —— 本单第一版就漏了 `act.py:1163`（读文档）与 `:1177`（列可点控件），
       结果"读操作不扣额度"只堵住了三条路径里的一条。规则放在入口，**新增调用点默认就是对的**。
-    审计（`_dsh_20261009\\d18_a3f1_audit.py`，全量、不截断）：老线共 6 处感知入口，
+    审计（`_本地 agent_20261009\\d18_a3f1_audit.py`，全量、不截断）：老线共 6 处感知入口，
       真实动作一律走单档 `require(A/B/C/D, …)` ⇒ 不受本条影响（那 6 条动作调用点仍计数）。
     """
     if count is None:

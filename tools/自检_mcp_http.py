@@ -7,7 +7,7 @@ r"""自检_mcp_http.py —— 「既开既用」的可执行定义（2026-10-21�
     ① 端口有没有人听（8761）
     ② initialize 能不能通（协议层）
     ③ 工具数是不是 25（契约面）
-    ④ 令牌与**用户环境变量**是不是同一个值（Codex 鉴权面）
+    ④ 令牌与**用户环境变量**是不是同一个值（窗口D 鉴权面）
     ⑤ 急停是不是拉着的（拉着了 ⇒ 一切动作都会被拒）
     ⑥ 租约是不是被别人占着（占着 ⇒ 写动作全拒）
 
@@ -111,7 +111,7 @@ def main():
     bad = [r for r in rows if not r[1]]
     print("-" * 72)
     if not bad:
-        print("✅ 全绿：新开一个 Codex 会话就能看到 mcp__agentctl_http__* 的 %d 个工具。" % tools_n)
+        print("✅ 全绿：新开一个 窗口D 会话就能看到 mcp__agentctl_http__* 的 %d 个工具。" % tools_n)
         return 0
     print("❌ %d 项不绿（上面每条都给了怎么办）。" % len(bad))
     return 1

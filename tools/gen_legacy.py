@@ -542,7 +542,7 @@ def dir_entries(ledger, out_dir):
 
 
 # ── CHK-A（窗U · 2026-10-16）：产物台账对账 ────────────────────────────────
-# ★ 为什么要有这第三道（ZCode 点名的台账盲区）：双基线台账**只在生成时**更新，D1 的
+# ★ 为什么要有这第三道（窗口A 点名的台账盲区）：双基线台账**只在生成时**更新，D1 的
 #   guard_dir 也**只在有人跑生成时**才判别。⇒ 平时没有任何人在拿「现产物 vs A₀」对账，
 #   产物被手改就永远没人报；等下一次生成才炸，那时手改内容已经被备份/覆盖过去了。
 #   CHK-A 把这条对账装成**两处必经门禁**：本文件的生成前 + 生成后，
@@ -810,7 +810,7 @@ def main():
     print("台账          : %s" % a.ledger)
     print()
 
-    # ★ CHK-A 落位一·前门（窗U 2026-10-16，DSH 补接线）：--chk-a 只对账、不生成。
+    # ★ CHK-A 落位一·前门（窗U 2026-10-16，本地 agent 补接线）：--chk-a 只对账、不生成。
     #   退出码：0=两条腿都对齐；1=有红（或 --require-src 下真源不可达 ⇒ 也算红，
     #   「两条腿都得真验过」，必要条件 4c：环境错误不许读成绿）。
     if a.chk_a:
@@ -882,7 +882,7 @@ def main():
     ts = time.strftime("%Y%m%d_%H%M%S")
     ledger = load_ledger(a.ledger)
 
-    # ★ CHK-A 落位一·生成前（窗U 2026-10-16，DSH 补接线）：第三方 Step5 必要条件 1 ——
+    # ★ CHK-A 落位一·生成前（窗U 2026-10-16，本地 agent 补接线）：第三方 Step5 必要条件 1 ——
     #   「产物重生一致」要有真实运行输出。这里取**生成前口径**（hard_src=False）：
     #   腿② 不一致＝「真源已更新、产物待刷」，正是跑这次生成的合法理由 ⇒ 只标【待刷】。
     #   腿① 有红＝有未登记手改，仍由下面的 D1 `guard_dir` 负责拦（strict 拒写）。
@@ -947,7 +947,7 @@ def main():
     with open(a.ledger, "w", encoding="utf-8") as fh:
         json.dump(ledger, fh, ensure_ascii=False, indent=1)
 
-    # ★ CHK-A 落位一·生成后（窗U 2026-10-16，DSH 补接线）：**审计口径**（hard_src=True）。
+    # ★ CHK-A 落位一·生成后（窗U 2026-10-16，本地 agent 补接线）：**审计口径**（hard_src=True）。
     #   台账刚写完，两条腿都必须对齐：产物 = A₀、真源 = T₀。
     #   对不上＝生成过程本身有漏（或台账写不全）⇒ 一律非零退出，不许把这种黑读成绿。
     v_post = chk_a(a.out, load_ledger(a.ledger), src_dir=src_dir, tag="生成后（审计口径）")

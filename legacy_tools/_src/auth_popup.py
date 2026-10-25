@@ -35,9 +35,9 @@ T5 新增（可选，最小改动）：
      windows 只追加不去重丢、scopes 不被窄请求覆盖/抬高、acts 计数不重置、
      父过期/急停 ⇒ 子全灭（写入时把每个 windows.exp 夹到父 exp）；
      窗口追加模式（--window-ack，或 note 命中 rc=7 话术的过渡兜底）只动 windows。
-  ★ 待接 authstate：Codex-3 的 authstate.py 落地后，merge_* 系列改调它
+  ★ 待接 authstate：窗口D-3 的 authstate.py 落地后，merge_* 系列改调它
     （本文件按同 schema 实现并预留此注记，不建第二套账）。
-  ★ 需要别人改的（越界项，已上报 DSH）：core.py 的 _ask_then_retry 传 --window-ack
+  ★ 需要别人改的（越界项，已上报 本地 agent）：core.py 的 _ask_then_retry 传 --window-ack
     与 --windows；gate.py 读 pass.windows 做窗口放行终判（否则 windows 只记录不拦）。
 
 ── 第三轮 C（2026-10-18 用户拍板）：**弹窗外观回到改前**，只留参数与合并逻辑 ──
@@ -88,7 +88,7 @@ LOGFILE = os.path.join(AUTHDIR, "auth.log")
 LOCK_SECONDS = 60
 MIN_LEN = 4
 PBKDF_ITER = 200_000
-TITLE = "DSH电脑控制授权"          # 截图/感知层见到这个标题必须拒绝读取（见 perceive.py 黑名单）
+TITLE = "本地 agent电脑控制授权"          # 截图/感知层见到这个标题必须拒绝读取（见 perceive.py 黑名单）
 
 # ────────────────────── P1-A：默认值与口径常量 ──────────────────────
 # ① 分工书/L 卡：默认 ABCD 一次给齐、30 分钟、60 次。core.py 总是显式传参，
@@ -516,7 +516,7 @@ def merge_pass(existing, new, *, window_ack):
     base["scopes"] = new_scopes
     base["scope"] = "、".join(new_scopes)
     base["acts_limit"] = int(new["acts_limit"])
-    # ★★ D4 修复（2026-10-19，Codex 实跑时踩出）：**新签发 ⇒ acts 从 0 起算**。
+    # ★★ D4 修复（2026-10-19，窗口D 实跑时踩出）：**新签发 ⇒ acts 从 0 起算**。
     #   改前是「只保留，不重置、不新建」，实跑后果是**新证一出生就作废**：
     #     用户批「200 次」，回执却是「动作次数已用尽（104/200）」——
     #     而且只有把上限签到**比历史累计还大**才放行（实测 20 不行 → 60 不行 → 200 才过）。

@@ -132,7 +132,7 @@ _SELFTEST_MISS, _SELFTEST_OK = _collect_selftest()
 def _selftest_or_die(argv=None):
     """启动闸：缺任何一项 ⇒ **一次报全**并退出（rc=11），不进业务逻辑。
 
-    为什么 rc=11 而不是通用 1：调用方（drill / DSH）要能一眼区分
+    为什么 rc=11 而不是通用 1：调用方（drill / 本地 agent）要能一眼区分
     「环境不对」与「动作被拒」。1/2/3/4/5/6/7/8/9 已被既有语义占用。
     """
     if not _SELFTEST_MISS:
@@ -170,7 +170,7 @@ def _selftest_or_die(argv=None):
 
 用法：
   python act.py targets --hwnd N                  # 列出可点的控件（只读，A 级即可）
-  python act.py click --hwnd N --name "dsh.txt"    # 按控件名点（优先 UIA）
+  python act.py click --hwnd N --name "本地 agent.txt"    # 按控件名点（优先 UIA）
   python act.py click --hwnd N --xy 1200,800       # 按坐标点（需前台）
   python act.py click --hwnd N --xy 1200,800 --post  # 后台投递（不抢焦点，按兼容表分档）
   python act.py scroll --hwnd N --amount -3        # 滚动（优先 UIA Scroll）
@@ -270,7 +270,7 @@ def _dpi_report(hwnd=None):
 def _tell_next(rc, why, hwnd=None, extra=None, tip=None):
     """非零 rc 的统一出口：打印「现象」+「下一步」。返回 rc（便于 `return _tell_next(...)`）。
 
-    刻意**不做成异常**：act.py 的既有契约是"返回错误码"（drill / DSH 都按 rc 分支），
+    刻意**不做成异常**：act.py 的既有契约是"返回错误码"（drill / 本地 agent 都按 rc 分支），
     改成抛异常会打断所有既有调用方。所以这里是"补齐信息"，不是"改变控制流"。
     """
     lines = ["⛔ rc=%d：%s" % (rc, why)]
@@ -492,7 +492,7 @@ NEXT_STEP = {
     2: lambda h: ("命令行参数不合法。先看用法：\n"
                   "        python -X utf8 act.py -h\n"
                   "      最常用的三句：targets / click --name / read"),
-    3: lambda h: ("踩到了使用者的授权弹窗（标题 DSH电脑控制授权），任何动作一律禁止 —— 这是防自授权闸门，别绕。\n"
+    3: lambda h: ("踩到了使用者的授权弹窗（标题 本地 agent电脑控制授权），任何动作一律禁止 —— 这是防自授权闸门，别绕。\n"
                   "      先确认打的是哪个窗口：python -X utf8 win_list.py <关键词>\n"
                   "      ★ 2026-10-12 起应用白名单已废止，不在名单的窗口不会再被这里拒。工具目录：%s" % HERE),
     4: lambda h: ("控件/文档控件没找到。先让工具把**它看到的**列出来，再照着名字点：\n"
@@ -591,7 +591,7 @@ def _load_whitelist():
     except Exception:
         return _DEFAULT_WHITELIST
     wl = d.get("whitelist") or []
-    # ★ 2026-10-10 class 空值语义（Codex 提出两案 / 用户批准一起解决 / 取保守的拒载案）：
+    # ★ 2026-10-10 class 空值语义（窗口D 提出两案 / 用户批准一起解决 / 取保守的拒载案）：
     #   匹配是 process 与 class **精确相等**，class 为空的条目**永远匹配不上** ——
     #   不报错、不告警，只是让人误以为放行了（ChatGPT.exe 条目 2026-10-09 摘除前
     #   一直就是这样静默失效的）。一条永远匹配不上的白名单条目是纯负债 ⇒
@@ -644,7 +644,7 @@ WHITELIST = _load_whitelist()
 #   打包也从那里现场生成（tools\gen_legacy.py 的 SRC 常量）。
 #   **那一份必须同步加上同样的 "AgentCtl 急停"**，否则这条硬约束在运行时是空的。
 BLOCKED_TITLES = (
-    "DSH电脑控制授权",
+    "本地 agent电脑控制授权",
     "AgentCtl 急停",
 )
 
@@ -2463,7 +2463,7 @@ def send_vk(vk, down=True):
     user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
 
 
-# ══ 键名 → 虚拟键码（2026-10-18 · P0-B · Codex-2）═════════════════════════════
+# ══ 键名 → 虚拟键码（2026-10-18 · P0-B · 窗口D-2）═════════════════════════════
 # ★ 为什么加这张表：今天 QQ 现场的第一道断点就是「ctl_keys 不认字母」——
 #   传 keys="v" 直接被上游白名单拒掉，于是 Ctrl+V 走不通、中文只能退到
 #   KEYEVENTF_UNICODE，而那条路当时还被 UIA 元素入口挡着。
@@ -2555,7 +2555,7 @@ def do_keys(hwnd, vk=0x41, ctrl=False, times=1, dry=False, wait=0.06, scan_code=
     #     真跑记录（2026-10-19 微信 Qt 窗口）：输入框里出现 `vvaaav`，
     #     日志逐行写着「✔ 后台按键生效（像素证据有变化）」—— 字面量 v 本身
     #     就是它引以为傲的那份「证据」。
-    #     按项目自己的口径（§㊾ ZCode：「输入/事件通道层是独立失败源」）：
+    #     按项目自己的口径（§㊾ 窗口A：「输入/事件通道层是独立失败源」）：
     #     **点没点中属输入通道，不属感知通道**；同理，「组合键有没有带上修饰位」
     #     也归输入通道，而输入通道的失败**不能交给像素去裁**。
     # ★★★ M16 派单 §E（主控 2026-10-22 12:36 实测三次复现的**「判词不实」级缺陷**）：
@@ -3034,7 +3034,7 @@ def _post_wheel(hwnd, info, amount):
     delta = 120 * int(amount)
     wparam = ((delta & 0xFFFF) << 16) & 0xFFFFFFFF
     lparam = ((y & 0xFFFF) << 16) | (x & 0xFFFF)
-    # ★ 2026-10-17（DSH 补）：只投顶层窗**常常无效** —— WinForms/经典窗口把滚轮交给
+    # ★ 2026-10-17（本地 agent 补）：只投顶层窗**常常无效** —— WinForms/经典窗口把滚轮交给
     #   **光标下的那个子控件**。所以再向 WindowFromPoint 拿到的子窗投一次（多投无害）。
     targets = [int(hwnd)]
     try:
@@ -3058,7 +3058,7 @@ def _post_wheel(hwnd, info, amount):
 def _post_keys(hwnd, vk, ctrl, times, info=None):
     """PostMessage 按键（WM_KEYDOWN/WM_KEYUP）。不碰前台；Chromium 通常不认这条路。
 
-    ★ 2026-10-17（DSH 补）：顶层窗常忽略 WM_KEY*，真正处理按键的是**带焦点的子控件**
+    ★ 2026-10-17（本地 agent 补）：顶层窗常忽略 WM_KEY*，真正处理按键的是**带焦点的子控件**
       ⇒ 除了顶层 hwnd，再向"窗口中心处 WindowFromPoint 拿到的子窗"投一次（与滚轮同一招）。
     """
     targets = [int(hwnd)]
@@ -3226,7 +3226,7 @@ def do_scroll(hwnd, amount, dry=False, force_wheel=False):
 
 
 # ─────────────────── D17 阶段二（2026-10-10）：无响应窗口前置 fail-closed ──────
-# 根因（事件 #1043，DSH 逐调用计时实测钉死，不是推测）：
+# 根因（事件 #1043，本地 agent 逐调用计时实测钉死，不是推测）：
 #   `doc_control` → `_uia` → `auto.ControlFromHandle` 对**不响应**（没在抽消息循环）
 #   的窗口会**无限等待** —— 实测 >40s 不返回，只能 kill。
 #   而同一窗口上 `GetWindowText`/`GetClassName` 0.003s、`win_info` 0.085s、

@@ -426,7 +426,7 @@ async def scan(do_ocr=True, max_ocr=3, require_auth=True, use_cache=True):
     #   而 list_regions() 在前，于是窗口矩形拿到的是逻辑坐标（1707x1067），
     #   和截图的物理坐标（2560x1600）差 1.5 倍。跟 widget 那次是同一个坑。
     _dpi()
-    regions = list_regions(exclude_titles=('DSH电脑控制授权',))
+    regions = list_regions(exclude_titles=('本地 agent电脑控制授权',))
     img = grab_once()
     sw, sh = img.width, img.height
     # 整屏大小的窗口 = 透明浮层/桌面容器，不是「表单」，

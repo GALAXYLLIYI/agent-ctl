@@ -102,7 +102,7 @@ class Clock:
 class OcrBackend:
     """Windows OCR 双路：①winrt 进程内优先，②PowerShell 兜底。**降级留痕**。"""
 
-    # ★ B 项（2026-10-05，DSH 交付审查发现的硬编码）★
+    # ★ B 项（2026-10-05，本地 agent 交付审查发现的硬编码）★
     # 原来这里写死本机路径 F:\..._ctl_recon\WinOcrProbe.ps1 ——
     #   ① 换机器就废（A 项消灭的 6 处硬编码之一）
     #   ② ps1 根本没进包（spec 的 datas 里没有），所以装出来的 exe 用不了这条兜底路

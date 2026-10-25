@@ -198,7 +198,7 @@ class Ctx(object):
     def env(self, tag, decoy_pid=0):
         env = dict(os.environ)
         # AGENTCTL_BORDER=0 会让 start_follow 直接跳过拉起（那是生产开关，
-        # 本机 DSH 侧确实设过）—— 判据必须自己把它摘掉，否则一条都起不来。
+        # 本机 本地 agent 侧确实设过）—— 判据必须自己把它摘掉，否则一条都起不来。
         env.pop("AGENTCTL_BORDER", None)
         env["AGENTCTL_SRC"] = self.src
         env["PYTHONPATH"] = self.src + os.pathsep + env.get("PYTHONPATH", "")

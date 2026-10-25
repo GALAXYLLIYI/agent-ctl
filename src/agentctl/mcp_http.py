@@ -59,7 +59,7 @@ if sys.stderr is None:                       # pythonw.exe / PyInstaller(console
 STATE_DIR = os.environ.get("AGENTCTL_STATE", os.path.join(core.ROOT, "work", "state"))
 TOKEN_FILE = os.path.join(STATE_DIR, "token")
 TOKEN_ENV = "AGENTCTL_MCP_TOKEN"
-SESSION_ID = "agentctl-mcp-1"        # 常量 session id（DSH 的判据：客户端要就给它）
+SESSION_ID = "agentctl-mcp-1"        # 常量 session id（本地 agent 的判据：客户端要就给它）
 ALLOWED_HOSTS = {f"{HOST}:{PORT}", f"localhost:{PORT}", f"[{HOST}]:{PORT}"}
 DEBUG = bool(os.environ.get("AGENTCTL_MCP_DEBUG"))   # 请求头转储开关（调试用）
 
@@ -67,8 +67,8 @@ DEBUG = bool(os.environ.get("AGENTCTL_MCP_DEBUG"))   # 请求头转储开关（�
 def ensure_token() -> str:
     """令牌：**环境变量优先**，没有才用 state\token（与 HTTP 服务同一个文件）。
 
-    ★ 为什么环境变量优先：`codex mcp add --bearer-token-env-var AGENTCTL_MCP_TOKEN`
-      要求 Codex 进程里带着这个变量；两边得是同一个值，所以启动脚本会先把
+    ★ 为什么环境变量优先：`窗口D mcp add --bearer-token-env-var AGENTCTL_MCP_TOKEN`
+      要求 窗口D 进程里带着这个变量；两边得是同一个值，所以启动脚本会先把
       state\token 的内容 set 进环境变量，两边自然一致。
     """
     env = (os.environ.get(TOKEN_ENV) or "").strip()
@@ -86,7 +86,7 @@ class MCPHandler(BaseHTTPRequestHandler):
         body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
         self.send_response(http)
         # ★ Content-Type 必须**精确**是 "application/json"（不带 charset 参数）。
-        #   rmcp（Codex 的 MCP 客户端）按 content-type 做**字符串相等**判断，
+        #   rmcp（窗口D 的 MCP 客户端）按 content-type 做**字符串相等**判断，
         #   "application/json; charset=utf-8" 对不上 ⇒ 它报
         #   "error sending request ... when send initialize request"（看着像网络错，其实是响应头对不上）。
         self.send_header("Content-Type", "application/json")

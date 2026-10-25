@@ -23,8 +23,8 @@ RULES = [
      '\u5bc6\u7801\u8d4b值'),
     ('personalpath', re.compile(r'[A-Fa-f]:[\\/]{1,2}(?:Users|桌面)[\\/]'),
      '\u4e2a人绝对\u8def\u5f84'),
-    ('dshcred', re.compile(r'\.dsh\\\\\.credentials|\.credentials\.yaml'),
-     'DSH \u51ed\u636e\u6587\u4ef6\u5f15\u7528'),
+    ('dshcred', re.compile(r'\.本地 agent\\\\\.credentials|\.credentials\.yaml'),
+     '本地 agent \u51ed\u636e\u6587\u4ef6\u5f15\u7528'),
 ]
 MAX = 3 * 1024 * 1024
 

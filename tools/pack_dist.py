@@ -102,7 +102,7 @@ LEGACY_REQUIRED = ["perceive.py", "act.py", "gate.py", "auth_popup.py"]
 
 # ★ T7-3（2026-10-09）发行包白名单清空 —— 用户拍板。
 #   开发线 legacy_tools\whitelist.json 里有 8 条白名单，其中不少是**用户的私人应用**
-#   （AnythingLLM / WorkBuddy / Trae / 学习通 / Codex 桌面端…），每条都是「经用户指示」加入的。
+#   （AnythingLLM / WorkBuddy / Trae / 学习通 / 窗口D 桌面端…），每条都是「经用户指示」加入的。
 #   白名单的语义是「系统自动放行操作的目标窗口」—— 它跟着发行包走，
 #   等于把用户的授权面复制给每一个装它的人。
 #   ⇒ 打包时把 whitelist 数组**清空**，只留 _关于 / _字段 两个说明字段。

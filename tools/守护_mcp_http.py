@@ -2,14 +2,14 @@
 r"""守护_mcp_http.py —— 让 MCP over HTTP **开机就在、掉了就回来**（2026-10-21）
 
 为什么要有它（现场事实）：
-    §config.toml§ 里 agentctl_http 是 **url 型** MCP ⇒ **Codex 自己不会去拉它**
+    §config.toml§ 里 agentctl_http 是 **url 型** MCP ⇒ **窗口D 自己不会去拉它**
     （url 型没有 command 可执行）。2026-10-21 实测：服务没起 ⇒ 新会话里
     「25 个工具」一条都不出现，agent 侧只看到「连不上」。
     ⇒ 「装完就能用」的前提是：**这个服务自己会站起来，而且掉了会自己回来**。
 
 它做四件事：
     ① **令牌对账**：把 work\state\token 的值同步到**用户环境变量** AGENTCTL_MCP_TOKEN
-       （Codex 侧就是靠这个环境变量鉴权）。两边不一致 ⇒ Codex 会一直 401。
+       （窗口D 侧就是靠这个环境变量鉴权）。两边不一致 ⇒ 窗口D 会一直 401。
     ② **起服务**：pythonw -m agentctl.mcp_http（无控制台窗口）。
     ③ **看门狗**：端口没人听 ⇒ 重新拉起；服务活着 ⇒ 不动它。
        ★ 轮询 20 秒 → **3 秒**（实测：崩了以后端口回来 12~25 秒 → 3.2~6.9 秒）。
@@ -73,7 +73,7 @@ def token() -> str:
 
 
 def set_user_env(name, value):
-    """写用户级环境变量（Codex 进程启动时读的就是这一份）。"""
+    """写用户级环境变量（窗口D 进程启动时读的就是这一份）。"""
     try:
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment", 0, winreg.KEY_SET_VALUE) as k:
             winreg.SetValueEx(k, name, 0, winreg.REG_SZ, value)

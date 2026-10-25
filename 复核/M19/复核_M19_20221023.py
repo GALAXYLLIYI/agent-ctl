@@ -92,18 +92,18 @@ PROD = os.path.join(ROOT, "legacy_tools", "act.py")
 BASE_ACT = "91AE6D554048912F8CA21DC113AD077F"
 INVARIANTS = {
     # ★ 2026-10-24 措辞清理（用户→用户）：contract 与两份闸门属**合法文案变更** ⇒ 指纹更新
-    "contract/tools.json": "1EBBD1DE0576A3313057F5C87B31C26F",
+    "contract/tools.json": "F75E64992B6870177D01B1CA3CB42E6F",
     # ★ M20 core 甲案（a19fbad）后的 core.py：判决层「加长观测」是**合法变更** ⇒ 指纹更新
     # ★ 2026-10-24 N5-W11：加长观测预算 300→900（可配 AGENTCTL_ACT_EXT_OBSERVE_MS）是**合法变更**
     #   ⇒ 863B1509… → F8669E4C…（只改这一个常量与注释；三态语义/HYSTERESIS/尺寸守卫一字未动）
     # ★ W15（2026-10-24）：措辞口径统一后 core.py 变更属合法变更 ⇒ F8669E4C… → 00F5422A…
-    "src/agentctl/core.py": "0EB0F36C46766A46CA932852E895BCDE",
+    "src/agentctl/core.py": "0A33B9D31907FBB01151F8D975B1A56D",
     # ★ W12（2026-10-24）：动作面刹车策略拆分 fail/same_target 两类计数 ⇒ 策略 json 合法变更
     #   73F5F0DD… → BB104E5D…
     "src/agentctl/action_guard_policy.json": "34E470F8D97474C132926280CF4D173E",
     # ★ M19P-S2（AUTHDIR 收编，678a19f）后的两份闸门：解析口径收编是**合法变更** ⇒ 指纹更新
-    "src/agentctl/gate.py": "006B9209B2B7593445EB95D1F4C65626",
-    "legacy_tools/gate.py": "226C9F722A674FD20370106F3D89AB1D",
+    "src/agentctl/gate.py": "F0F4750392CCE945A859379D936E87EC",
+    "legacy_tools/gate.py": "ED7F3595F0BBA5D48EB38BA5DCE75754",
     # ★ M20 引入的保护：甲案只**引用** framecache 的既有常量（WAIT_BUDGET_MS=300），没改它
     "src/agentctl/framecache.py": "AB7788D98580C179CCE77F4AEC7750E3",
     # ★ 新纳入保护：M19P-S2 新建的 AUTHDIR 规则正文（三处**逐字节全等** = 141022EA…）

@@ -20,7 +20,7 @@ r"""窗S 判据：**真急停 ⇒ 一个真实动作真的被拒**（端到端�
     rc=0 全绿 ｜ rc=1 有红条 ｜ rc=2 **验不了**（前置不具备，见输出）
 
 ★ 必须在**能碰到真机状态**的进程里跑（本判据**故意**不隔离，见下）。
-  在 Codex 的 "-s workspace-write" 沙箱里跑会**直接 rc=2 验不了** —— 沙箱只允许
+  在 窗口D 的 "-s workspace-write" 沙箱里跑会**直接 rc=2 验不了** —— 沙箱只允许
   写工作区，而真旗子在 %LOCALAPPDATA%\AgentCtl、通行证与老线驱动都在工作区之外。
   2026-10-16 窗S 实测（沙箱内）：真旗子路径 PermissionError(13)、通行证读不到、
   GetCursorPos WinError 5、桌面 BitBlt 截屏失败、tasklist Access denied。
@@ -140,7 +140,7 @@ def pump(ms=120):
 
 
 def make_test_window(title="窗S_自起测试靶"):
-    """起靶窗 —— ★ 必须是**非 Python 宿主的普通桌面程序**（DSH 2026-10-17 三改）。
+    """起靶窗 —— ★ 必须是**非 Python 宿主的普通桌面程序**（本地 agent 2026-10-17 三改）。
 
     为什么：自指保护（窗K/P0）**按属主进程名硬拒 `python.exe`**（授权/急停弹窗都是
     python 起的，见 act.py 的 BLOCKED_PROCESSES_HARD）。任何 python 拥有的窗**永远点不到**
@@ -555,7 +555,7 @@ def main():
 
     section("2 · 对照组：**不拉**旗子 ⇒ 同一个动作必须成功"
             "（少了这半，前面的拒说明不了任何事）")
-    # ★ 2026-10-17（DSH 补）：实验组拉闸会**联动吊销租约**（by=brake），所以对照组
+    # ★ 2026-10-17（本地 agent 补）：实验组拉闸会**联动吊销租约**（by=brake），所以对照组
     #   必须先重新拿一张租约 —— 否则"对照组失败"其实是"租约没了"，跟急停一点关系都没有。
     #   （第 1 次真跑就红在这：对照组 code=10 租约已被吊销 by=brake。）
     _lr = core.dispatch("ctl_lease", {"action": "acquire", "actor": ACTOR,

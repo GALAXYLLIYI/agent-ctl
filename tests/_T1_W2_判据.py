@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-r"""T1 窗2 判据（Codex）—— D1 治本 / W2-B / W2-C / W2-D + bench b11 回归守
+r"""T1 窗2 判据（窗口D）—— D1 治本 / W2-B / W2-C / W2-D + bench b11 回归守
 
 用法（两条是「同一条判据、换一份 core.py 跑」）：
     python -X utf8 tests\_T1_W2_判据.py --new    # 跑现役 src\agentctl
@@ -405,7 +405,7 @@ if _guard:
     print("★★ 红的回归守（真顶掉了覆盖面，必须先修）：" + "、".join(_guard))
 print("结论：%s" % ("全绿" if not _red and not _guard else "有红"))
 
-# ★ 2026-10-14 DSH 补（依据退回单 work\_T1_退回_W2_判据退出码.md）：
+# ★ 2026-10-14 本地 agent 补（依据退回单 work\_T1_退回_W2_判据退出码.md）：
 #   原版只有 print、没有 sys.exit ⇒ 红绿一律退 0，门禁会把 11 条红读成「通过」。
 #   判据红必须让它自己喊出来：非零退出码。
 sys.exit(1 if (_red or _guard) else 0)

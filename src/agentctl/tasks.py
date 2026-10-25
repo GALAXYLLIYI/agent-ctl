@@ -99,7 +99,7 @@ def fail(store, task_id, *, why="", actor=""):
       `if "task_failed" in kinds`，它连 code 列都没查）。同模块其余 5 个写入口一律 code=0，
       本行原来是唯一异类。**该列此处仅为时间线检索用。**
       ⚠️ **别把任务状态编码进 code**：那会让读 ctl_timeline 的人把它当成信封码，去 error_codes
-      里查 —— 两张码表都没有它。DSH 已裁定：不收进 event_codes（13 是资源阈值，1 是任务状态，不同维）。
+      里查 —— 两张码表都没有它。本地 agent 已裁定：不收进 event_codes（13 是资源阈值，1 是任务状态，不同维）。
     """
     return store.append("task_failed", actor=actor, tool="ctl_task", ok=False,
                         code=0, payload={"task_id": task_id, "why": why})

@@ -172,7 +172,7 @@ for fn, txt in (('AGENT接口.md', md), ('tools.json', js_txt), ('详细设计_v
 
 # ── ⑧ 两份设计文档 ────────────────────────────────────────────
 want('设计-§21.9存在', has(design, '### 21.9'), '详细设计_v1.md 没有 §21.9')
-want('设计-D3记为不成立', has(design, '不成立') and has(design, 'DSH 裁定作废'),
+want('设计-D3记为不成立', has(design, '不成立') and has(design, '本地 agent 裁定作废'),
      '§21.9 未把 D3 记成「不成立」')
 want('设计-D1D2有根因', has(design, '三条出口的 `roles` 口径不同') and has(design, '深度不够'),
      '§21.9 未写出 D1/D2 的复核后根因')

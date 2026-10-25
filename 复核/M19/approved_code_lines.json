@@ -8,41 +8,8 @@
   "updated": "2026-10-23",
   "segments": [
     {
-      "name": "M19P-S2_authdir",
-      "desc": "M19P-S2（src/agentctl/authdir.py）：AUTHDIR 收编为单一解析",
-      "evidence": "提交 678a19f（已入仓）",
-      "lines": {
-        "APP_DIR_NAME = \"AgentCtl\"": 1,
-        "AUTH_DIR_NAME = \"_auth\"": 1,
-        "ENV_KEY = \"AGENTCTL_AUTHDIR\"": 1,
-        "def app_dir() -> str:": 1,
-        "def default_dir() -> str:": 1,
-        "def resolve() -> str:": 1,
-        "from __future__ import annotations": 1,
-        "if v:": 1,
-        "import os": 1,
-        "os.environ.get(\"LOCALAPPDATA\", os.path.expanduser(\"~\")), APP_DIR_NAME)": 1,
-        "return os.environ.get(\"AGENTCTL_APP_DIR\") or os.path.join(": 1,
-        "return os.path.abspath(default_dir())": 1,
-        "return os.path.abspath(os.path.expanduser(v))": 1,
-        "return os.path.join(app_dir(), AUTH_DIR_NAME)": 1,
-        "v = (os.environ.get(ENV_KEY) or \"\").strip()": 1
-      },
-      "sha256": "b7f47c82edd5c9cbe5ae6e01f29bb308859aaccdb890d3509424e7850bdcf1a7"
-    },
-    {
-      "name": "gate_brake_tmp_thread",
-      "desc": "急停旗子 tmp 名加随机后缀（修同进程多线程并发 set_brake 5/1600 失败）",
-      "evidence": "W1 压测场景 D：修复前 1598/1600，修复后 1600/1600",
-      "lines": {
-        "tmp = \"%s.tmp.%d.%s\" % (BRAKE_FLAG, os.getpid(), secrets.token_hex(4))": 1
-      },
-      "sha256": "86c04e69f517d73798eaeff0ee2b0654e8224307f53c81c1894f1e84909e79e0"
-    },
-    {
-      "name": "core_T3_fill_serial",
-      "desc": "T3 unobservable 拆分 + ctl_fill(eid) 修复 + 并发接线（LockedDict 四处缓存 & dispatch 串行开关）",
-      "evidence": "T3/fill 判据绿；并发判据 61–64 绿；AGENTCTL_SERIALIZE=1 冒烟通",
+      "name": "core_py_anon2",
+      "desc": "去名化：仓库内不再出现内部代工/助手名字",
       "lines": {
         "\"② 或改用 --xy（ctl_find 返回的 center 原样传）。\" % how)": 1,
         "\"再把它返回的 eid（配 from_capture）或 center 传给本工具。\")": 1,
@@ -81,16 +48,46 @@
         "xy = args.get(\"xy\")": 1
       },
       "sha256": "77ba1c1275cf77b3881ded8dabd51976f1b1c71c73a64f5ca3386b52d29144ae"
+    },
+    {
+      "name": "src_agentctl_gate_py_anon2",
+      "desc": "去名化：仓库内不再出现内部代工/助手名字",
+      "lines": {
+        "tmp = \"%s.tmp.%d.%s\" % (BRAKE_FLAG, os.getpid(), secrets.token_hex(4))": 1
+      },
+      "sha256": "86c04e69f517d73798eaeff0ee2b0654e8224307f53c81c1894f1e84909e79e0"
+    },
+    {
+      "name": "legacy_tools_src_authdir_py_anon2",
+      "desc": "去名化：仓库内不再出现内部代工/助手名字",
+      "lines": {
+        "APP_DIR_NAME = \"AgentCtl\"": 1,
+        "AUTH_DIR_NAME = \"_auth\"": 1,
+        "ENV_KEY = \"AGENTCTL_AUTHDIR\"": 1,
+        "def app_dir() -> str:": 1,
+        "def default_dir() -> str:": 1,
+        "def resolve() -> str:": 1,
+        "from __future__ import annotations": 1,
+        "if v:": 1,
+        "import os": 1,
+        "os.environ.get(\"LOCALAPPDATA\", os.path.expanduser(\"~\")), APP_DIR_NAME)": 1,
+        "return os.environ.get(\"AGENTCTL_APP_DIR\") or os.path.join(": 1,
+        "return os.path.abspath(default_dir())": 1,
+        "return os.path.abspath(os.path.expanduser(v))": 1,
+        "return os.path.join(app_dir(), AUTH_DIR_NAME)": 1,
+        "v = (os.environ.get(ENV_KEY) or \"\").strip()": 1
+      },
+      "sha256": "b7f47c82edd5c9cbe5ae6e01f29bb308859aaccdb890d3509424e7850bdcf1a7"
     }
   ],
-  "ledger_sha256": "97775b9ab11ff747c03d0d94cc6dd0543df6044ab76c0d8e95a81d1fd80efd96",
+  "ledger_sha256": "e8c14f492fdfcb20a18e07654d31ba59ba5baa857313e68b158b78f3810fd33c",
   "files": {
     "act.py": {
       "target": "legacy_tools/_src/act.py",
       "baseline": {
         "kind": "file",
         "path": "../backup_before/act_1_src__legacy_tools__act.py",
-        "md5": "3030D4B6C56C9F8046AC73F62BE52D77",
+        "md5": "9EF903E8202C68EDAC09CAEB3111041A",
         "note": "2026-10-24 措辞清理（用户→用户）后重落基线；旧段清单随之退场"
       },
       "segments": []
@@ -100,11 +97,11 @@
       "baseline": {
         "kind": "file",
         "path": "baseline_core_20261024.py",
-        "md5": "00F5422AD07C73726E750A0C34E48ED1",
+        "md5": "7B29261A38EDB097DADD06B6781E475E",
         "note": "2026-10-25 T3：基线仍是 W15 后版本；本刀只追加段与旧侧，不换基线"
       },
       "segments": [
-        "core_T3_fill_serial"
+        "core_py_anon2"
       ],
       "desc": ""
     },
@@ -113,11 +110,11 @@
       "baseline": {
         "kind": "file",
         "path": "baseline_gate_src_20261024.py",
-        "md5": "C46F32739E06DFE277862F611DA73847",
+        "md5": "81E562A85FB78F1E648D1AB508046DBD",
         "note": "2026-10-24 重写历史（路径脱敏）后重新落基线：原 git_ref 678a19f^ 已不存在"
       },
       "segments": [
-        "gate_brake_tmp_thread"
+        "src_agentctl_gate_py_anon2"
       ],
       "desc": "M19P-S2 受控文件：新线闸门（AUTHDIR 收编为单一解析）"
     },
@@ -126,7 +123,7 @@
       "baseline": {
         "kind": "file",
         "path": "baseline_gate_legacy_20261024.py",
-        "md5": "226C9F722A674FD20370106F3D89AB1D",
+        "md5": "ED7F3595F0BBA5D48EB38BA5DCE75754",
         "note": "2026-10-24 重写历史（路径脱敏）后重新落基线：原 git_ref 678a19f^ 已不存在"
       },
       "segments": [],
@@ -137,7 +134,7 @@
       "baseline": {
         "kind": "file",
         "path": "baseline_auth_popup_20261024.py",
-        "md5": "B9F278E84811DF9773EAD8A07CD556DF",
+        "md5": "3C5FDF56AC610439D0945392C5BEBA72",
         "note": "2026-10-24 重写历史（路径脱敏）后重新落基线：原 git_ref 678a19f^ 已不存在"
       },
       "segments": [],
@@ -151,7 +148,7 @@
         "md5": "D41D8CD98F00B204E9800998ECF8427E"
       },
       "segments": [
-        "M19P-S2_authdir"
+        "legacy_tools_src_authdir_py_anon2"
       ],
       "desc": "M19P-S2 受控文件：★ 本单**新建**（AUTHDIR 规则正文的唯一源；由 gen_legacy 生成）"
     }
@@ -181,6 +178,7 @@
       "_SCREEN_FRAME_RESULT = {}": 1,
       "_SCREEN_SEEN = {}": 1,
       "x, y = _xy(args.get(\"xy\") or [0, 0])": 1
-    }
+    },
+    "legacy_tools/_src/authdir.py": {}
   }
 }

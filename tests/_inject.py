@@ -6,8 +6,8 @@ r"""tests\_inject.py —— 「能跑红」的自证注入器（窗M · 2026-10-
         work\_wD_红基线_repo（wB 拿 AGENTCTL_ROOT 指过去）
         work\_2h_档位口径_红基线_ctrl_border.py（wA/wF 拿 --target 指过去）
     而 .gitignore **整个排除了 work\** ⇒ 新 clone 的机器**能跑绿、不能复现跑红**，
-    判据的可证伪性只剩一句文档背书（ZCode 干净 clone 自证 §4②）。
-    ⇒ 改成**注入式**（照 tests\_codex_接缝判据.py --inject 的现成范例）：
+    判据的可证伪性只剩一句文档背书（窗口A 干净 clone 自证 §4②）。
+    ⇒ 改成**注入式**（照 tests\_窗口D_接缝判据.py --inject 的现成范例）：
         把现役文件**复制一份**到 %TEMP% → 在**副本**上注入一个已知缺陷 →
         判据原样跑那份副本 ⇒ 同一套断言必然报红。
 

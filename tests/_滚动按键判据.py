@@ -800,7 +800,7 @@ def j67_real_scroll(core):
         else:
             red("⑥", "有交互桌面却一格没动：向下 %s→%s、向上 %s→%s"
                 % (before.get("Bline"), mid.get("Bline"), mid.get("Bline"), end.get("Bline")))
-        # ═══ ★ 2026-10-17（DSH 定稿）═══
+        # ═══ ★ 2026-10-17（本地 agent 定稿）═══
         # 键盘这条**验不了**（不是失败）：Windows 只把键盘输入投给当前焦点窗口；
         # 后台投递（PostMessage WM_KEY*）对未聚焦控件无效，而抢焦点那条路在本产品里
         # 早被判废（act.py:1173-1175：抢焦点 + 输入队列脏状态）。

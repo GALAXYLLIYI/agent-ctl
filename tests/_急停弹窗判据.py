@@ -19,7 +19,7 @@ r"""急停置顶弹窗判据（窗I · 2026-10-16）
 ⑨ 这张窗在**状态源不是生产路径**时，必须**自报「自证测试 / 非真实急停」**，
    并把那个沙箱路径原样印在窗上；状态源是生产路径时，**一个标注都不许有**。
 
-★ 为什么加这一组：ZCode（GLM）在真桌面上看到本判据弹的窗，**认不出是测试还是真急停**，
+★ 为什么加这一组：窗口A（GLM）在真桌面上看到本判据弹的窗，**认不出是测试还是真急停**，
   按「解除前先确认是谁在动」的规矩做了五路只读取证，最后差点建议跑
   `brake --action release` —— 真跑了只会往**真**日志里写一条假的「已解除」记录。
 
@@ -47,7 +47,7 @@ r"""急停置顶弹窗判据（窗I · 2026-10-16）
 ★★ **内容证据分两档，别再栽在这上面**：跨进程 `GetWindowTextW` 读 EDIT 控件
    **必然读到空**（该 API 只保证拿自己进程的控件），而标准 EDIT 的正文
    `SendMessage(WM_GETTEXT)` 是**跨进程编组的**。实测同一张窗：GWT='' 而 WM=1969 字。
-   DSH 与 ZCode 曾各自据「GWT 读到空」判「正文没渲染」—— **两次都错了**。
+   本地 agent 与 窗口A 曾各自据「GWT 读到空」判「正文没渲染」—— **两次都错了**。
    本判据因此：**先轮询 → 档①GWT → 档②跨进程 WM_GETTEXT → 都空才落像素**；
    而**像素那一档只报「验不了」，永不单独给人判红**（启发式没有资格判红：
    窗N3 那条「非底色像素占比」在深色主题下 100% ⇒ 把画满的窗判成了没画）。
@@ -770,8 +770,8 @@ def _static_checks(realmod):
               FROZEN_BLOCK_TITLE_KEY in titles, "实测 BLOCKED_TITLES=%r" % (titles,))
         check("6b · 弹窗类名 %r 已登记进 act.py 的 BLOCKED_CLASSES" % FROZEN_BLOCK_CLASS,
               FROZEN_BLOCK_CLASS in classes, "实测 BLOCKED_CLASSES=%r" % (classes,))
-        check("6c · 原有的防自授权条目没被顺手删掉（DSH电脑控制授权 仍在）",
-              "DSH电脑控制授权" in titles, "实测 BLOCKED_TITLES=%r" % (titles,))
+        check("6c · 原有的防自授权条目没被顺手删掉（本地 agent电脑控制授权 仍在）",
+              "本地 agent电脑控制授权" in titles, "实测 BLOCKED_TITLES=%r" % (titles,))
     mcp_txt = NL.join(realmod._mcp_block("agentctl"))
     servers, _src = realmod.read_mcp_servers()
     want = [s for s in servers if s.get("name") == "agentctl"]
@@ -844,7 +844,7 @@ def run_checks(backend, kind):
 
     # ⑦ MCP 那条可选中复制
     check("7a · 正文里列出了 [mcp_servers.*] 且写明来源文件",
-          "[mcp_servers." in body and ".codex" in body.replace("\\", "/"),
+          "[mcp_servers." in body and ".窗口D" in body.replace("\\", "/"),
           "正文里没有 MCP 段或没写来源")
     clip = ctrl.copy_all()
     check("7b · MCP 那条**可选中复制**（复制往返：剪贴板 == 正文，%d 字）" % len(clip),
@@ -1085,14 +1085,14 @@ def run_e2e():
 # ── 窗P2：跨进程读文本的两档口径（+ 一档像素兜底）────────────────────
 #
 # ★ 这段是更正(d) 的核心，也是今晚连着栽过两次跟头的地方 ──────────────────
-#   DSH 与 ZCode 都曾用**跨进程 GetWindowTextW** 读弹窗正文，读到空，
+#   本地 agent 与 窗口A 都曾用**跨进程 GetWindowTextW** 读弹窗正文，读到空，
 #   于是各自判「正文根本没画在屏上」—— **两次都判错了**。
 #   真相：GetWindowTextW 对**另一个进程的控件**返回空，是 Win32 的**设计**
 #   （它只保证拿自己进程的控件文本）；而标准 EDIT 控件的正文，
 #   **SendMessage(WM_GETTEXT) 是跨进程编组的**（USER32 代为投递）。
 #   实测同一张窗（work\_wP2_探针_三条入口.py 原始输出）：
 #       [Edit]  GWT=''   WM=1969字
-#   窗N3 的位图 + 跨进程 WM_GETTEXT + ZCode 像素复核三方对上：**正文一直都在渲染**。
+#   窗N3 的位图 + 跨进程 WM_GETTEXT + 窗口A 像素复核三方对上：**正文一直都在渲染**。
 #
 # ★ 所以本判据只认一条口径：**API 没读到 ≠ 屏上没画**。三档递进：
 #     档① GetWindowTextW    —— 最省事，但对跨进程控件**基本必空**（先排除它）
@@ -1295,7 +1295,7 @@ def pixel_evidence(h, bmp_path):
 # ── 窗P2：进程侧的只读工具 ─────────────────────────────────────────────
 #
 # ★ 为什么不用 tasklist / Get-CimInstance：本机沙箱里两者都是「拒绝访问」（窗P1 实测）。
-# ★ 为什么匹配 argv **逐项**而不是拼字符串做子串：派单原文与 codex 的命令行里
+# ★ 为什么匹配 argv **逐项**而不是拼字符串做子串：派单原文与 窗口D 的命令行里
 #   就含 'agentctl.brake_daemon' 这个串 —— 子串匹配会把「正在审这份派单的 agent」
 #   数成一个 daemon（我第一版就这么数出了 3 个假 daemon）。
 

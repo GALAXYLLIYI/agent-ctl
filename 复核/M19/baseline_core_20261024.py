@@ -110,7 +110,7 @@ def _eid_strict() -> bool:
     """严格模式默认**开**。AGENTCTL_EID_STRICT=0 恢复改前行为（重走一遍按编号取坐标）。
 
     ⚠ 回退开关，默认值 1（严格）。拔除条件：T1 全线验收通过、且 §三 全部判据转绿之后，
-      由 DSH 决定是否连同本函数一起删（删前须先确认没有依赖旧行为的脚本）。
+      由 本地 agent 决定是否连同本函数一起删（删前须先确认没有依赖旧行为的脚本）。
     之所以**读调用时**而不是 import 时：闸门状态目录在 import 之后才由环境定下来，
       读一次会把它冻在模块加载那一刻。
     """
@@ -133,7 +133,7 @@ def _eid_load(path, default):
 def _eid_save(path, obj):
     """原子写。**与 gate._save 逐行同款**（临时文件 + os.replace），
 
-    只是不复用它的 `_` 私有名 —— DSH 只授权在 gate.py 加一行公开别名（exclusive_lock）。
+    只是不复用它的 `_` 私有名 —— 本地 agent 只授权在 gate.py 加一行公开别名（exclusive_lock）。
     """
     d = os.path.dirname(path)
     if d:
@@ -524,7 +524,7 @@ def _legacy_env() -> dict:
 
 
 # ★ D17 · L1 止血（2026-10-09）：动作类老脚本调用的默认上限 120s → 15s。
-#   依据：ZCode 三问答复（dialogue_log id=450）实测 —— 冷启动 import uiautomation
+#   依据：窗口A 三问答复（dialogue_log id=450）实测 —— 冷启动 import uiautomation
 #   0.10~0.14s、顶层枚举 11 窗 0.10s、树采集 89 节点 0.07s、历史真实动作前后图全 1s 级
 #   ⇒ 15s 有 7 倍以上余量；唯一超 15s 的场景是「无响应窗口的 COM 等待」，而那正是本单要切断的。
 #   动机：单次卡住的上限会被 MCP 同步主循环放大成「整个平台堵住」
@@ -532,7 +532,7 @@ def _legacy_env() -> dict:
 #   args["timeout_sec"] 逐次覆盖。
 ACT_TIMEOUT_SEC = 15
 
-# ★ P0 收口（2026-10-10，Codex 挖出外层缺口 / 用户批准一起解决 / ZCode 实现）★
+# ★ P0 收口（2026-10-10，窗口D 挖出外层缺口 / 用户批准一起解决 / 窗口A 实现）★
 #   rc=7 → _ask_then_retry 的弹窗等待原来默认 240s，且**不分渠道**：
 #   ACT_TIMEOUT_SEC 管不到它，最坏账 = 15s(首次 act) + 240s(弹窗) + 15s(重试) ≈ 270s；
 #   而 MCP 主循环是同步的（mcp.py `for line in sys.stdin`），一个 tools/call 卡住，
@@ -960,7 +960,7 @@ def _issue_capture_from_shot(hwnd: int, raw_out: str) -> str | None:
 #     取 acts_limit（gate.effective_act_limit），**不再**按 scopes[0] 的排列巧合取。
 #     改前 `ACT_LIMIT.get(short(scopes[0]), 20)` 会让「A 打头」的证盖上 200，
 #     于是那张证上 B/C/D 的上限实际是 200。完整口径与理由见 gate.py 的 ACT_LIMIT 注释。
-#   在这里注入我们的 gate，就能用「单一真相源」的方式修好，不动 dsh 项目。
+#   在这里注入我们的 gate，就能用「单一真相源」的方式修好，不动 本地 agent 项目。
 _perceive_mod = {"m": None, "tried": False}
 
 
@@ -1350,7 +1350,7 @@ def _rect_inter(a, b):
 CAUSAL_VERDICTS = ("met", "no_effect_in_region", "changed_outside_target", "unknown")
 
 
-# ★★ P0-1 失败分类（2026-10-21；Codex 实跑 + MiniMax Code / ZCode 两份评审一致认定）：
+# ★★ P0-1 失败分类（2026-10-21；窗口D 实跑 + MiniMax Code / 窗口A 两份评审一致认定）：
 #   把「失败」拆成三类 —— 这是 action_guard 的 fail_streak 能不能当信号的分水岭。
 #     rejected_env   动作**根本没发出去**（没证 / 没租约 / 被别的窗挡 / 缺凭据 /
 #                    前台不对 / 找不到控件）：重试没有意义（再点一次还是被挡），
@@ -1556,7 +1556,7 @@ def _ownership_precheck(args: dict, hwnd: int, tool: str = "ctl_click"):
       ③ 区域声明：`expect_region` 与目标窗矩形求交为空 ⇒ 拒（声明写到了别人窗里）。
 
     ⛔ 不做「事后小票」：点击的激活副作用在调用方看到回执之前就已经发生
-       （ZCode 顶回 opencode 的那一条）。
+       （窗口A 顶回 窗口B 的那一条）。
     ★ 观测不到就直接说「**未判定**」并进 blind_spots，绝不编「没有遮挡」——
       「没看见」不等于「没有」（三态纪律）。production 上 `_win_at_point` 是能取到的。
     """
@@ -1896,7 +1896,7 @@ def _uia_gate(args: dict, tool: str, fn, walk_override: dict | None = None):
     #     而 ctl_screen 的 res 里**没有** 节点/命中 键（它交的是 objects/texts，
     #     不是原始节点表）⇒ _issue_capture_from_tree 走的是**空快照**分支。
     #     于是：屏幕交出了 eid、旁表却查无此号，真门路上永远 code=12。
-    #     （DSH 2026-10-18 真 Edge 实跑：ctl_screen ok=True eid=e43，ctl_click 报
+    #     （本地 agent 2026-10-18 真 Edge 实跑：ctl_screen ok=True eid=e43，ctl_click 报
     #      「这次观测没有元素明细」。上一单判据全绿是因为它取的是内层那张。）
     #   治法：**fn 已经签好的就用它**。ctl_screen 本来就做了一次全量 walk，
     #     明细是**顺带**的（见 _screen_build 里的 eid 签发段）。
@@ -1907,7 +1907,7 @@ def _uia_gate(args: dict, tool: str, fn, walk_override: dict | None = None):
     if tok:
         d["capture_id"] = tok
         d["capture_ttl_sec"] = gate.CAPTURE_TTL
-        # ★ 2026-10-10 名副实（Codex 实测抓到「节点: [] 两个指纹都空还自称元素树」）：
+        # ★ 2026-10-10 名副实（窗口D 实测抓到「节点: [] 两个指纹都空还自称元素树」）：
         #   默认轻量模式不采集节点 ⇒ 没有元素指纹可算（凭据只绑定 hwnd/rect/前台）。
         #   改前这里一律写「元素树（不是图像）」，冒领了没采集到的东西。照实说。
         if pre or res.get("节点") or res.get("命中"):
@@ -2037,7 +2037,7 @@ def t_authorize(args: dict) -> dict:
         acts = int(_acts_raw)
     if acts < 0:
         acts = 0
-    # ⚠️ 上下界钳制（2026-10-15 GLM/ZCode 复检点出"无钳制"；与 acquire_lease 的 ttl `max(1,min(,600))` 同思路）。
+    # ⚠️ 上下界钳制（2026-10-15 GLM/窗口A 复检点出"无钳制"；与 acquire_lease 的 ttl `max(1,min(,600))` 同思路）。
     #   下界 1、上界 **10000**。两点如实说明：
     #   ① **显式 acts=0 会被上面的 `or` 吞掉**、回退成默认值 —— 这是**改前既有语义，本次不改**：
     #      0 按"未指定"处理更安全（真想要"零动作"就别申请，而不是靠发证侧截断）；
@@ -2062,7 +2062,7 @@ def t_authorize(args: dict) -> dict:
     #   面板的「最近动作」只读闸门日志（gate_agentctl.log）。两边都不写 = 用户在面板上点了授权，
     #   面板却像没发生过任何事——这就是 B2 那类「两个真相源没串起来」。
     gate.log("授权请求：%s（%d 分钟 / %d 次）" % (",".join(scopes), minutes, acts))
-    # ★ 2026-10-21（Codex）：**单例弹窗仲裁** —— 同一时刻屏幕上只允许一个授权弹窗。
+    # ★ 2026-10-21（窗口D）：**单例弹窗仲裁** —— 同一时刻屏幕上只允许一个授权弹窗。
     #   病根：并发 ctl_authorize 各自拉一个弹窗进程（现场证据：闸门日志里
     #   2026-10-21 00:25:27 / 00:26:25 / 00:28:10 三笔请求重叠，第一笔 00:29:10 才被点掉
     #   ⇒ 那一刻屏幕上最多同时有 3 个弹窗；用户原话「为什么会有四个闸口弹窗访问我」）。
@@ -3189,7 +3189,7 @@ def _act(action: str, args: dict, argv: list[str], scope: str = "B") -> dict:
     #   位置就在这里（通行证→租约→观测绑定**之后**、任何动作**之前**）：
     #   ① 项目的拒绝顺序不能乱（先报要通行证、再报要租约、再报凭据，最后才报归属）；
     #   ② 归属是「凭据之后」的事实，必须早于**任何**动作 —— 点击的激活副作用
-    #      在调用方看到回执之前就已经发生，事后回执救不了（ZCode 钉的那条）。
+    #      在调用方看到回执之前就已经发生，事后回执救不了（窗口A 钉的那条）。
     _oerr, _oblind = _ownership_precheck(args, hwnd)
     if _oerr:
         return _oerr
@@ -4280,7 +4280,7 @@ def _click_by_name(hwnd: int, name: str, args: dict):
 # ── 帧过期（TTL）· 0 号证据链最小裁判的第一步（2026-10-18，三方商议 §㊾）──────
 # 为什么需要：screen_version 只能抓住「画面变了」；抓不住「你拿着一张十分钟前的
 # 旧帧去点」——画面没变、版本没变，但**你的判词会挂在一张早就不代表现在的帧上**。
-# ZCode 原话：证据必须绑 frame_id + TTL，否则判词对不上账。
+# 窗口A 原话：证据必须绑 frame_id + TTL，否则判词对不上账。
 
 # ── 输入/事件通道判词（2026-10-18 §㊾ 的 A 项）─────────────────────────────
 # 治的病：`code=8`（发出去了但画面没变）现在**分不清**是哪种原因——
@@ -4590,7 +4590,7 @@ def t_click(args: dict) -> dict:
                      "坐标口径": "屏幕物理像素（与 ctl_find/ctl_tree 的 rect/center 同源；"
                                   "不要减窗口原点）"}
         if args.get("_enabled_unknown"):
-            # ★ S2b：未知时**三个通道一起留痕**（DSH 放行 O-1：两个都挂）。
+            # ★ S2b：未知时**三个通道一起留痕**（本地 agent 放行 O-1：两个都挂）。
             #   ① data.enabled_unverified —— 机读，给程序判断
             #   ② blind_spots —— 项目口径「本次结论的盲区（不许隐藏）」（contract/tools.json:53），
             #      给人和模型看（docs/AGENT接口.md:127「必须一并转述」）
@@ -4674,7 +4674,7 @@ def t_type(args: dict) -> dict:
         argv += ["--dry-run"]
     if mode == "focus":
         # ① 不找 UIA 元素：透传 --focus 给 act.py。
-        #   这个开关的底层实现（逐字符 SendInput KEYEVENTF_UNICODE）归 Codex-2 的 act.py，
+        #   这个开关的底层实现（逐字符 SendInput KEYEVENTF_UNICODE）归 窗口D-2 的 act.py，
         #   core 这里只负责拿控参与失败口径。
         argv += ["--focus"]
         # ② 前台门禁：没前台 ⇒ code=5（可置前后解决）。
@@ -5263,7 +5263,7 @@ def _cdp_probe(*, port: int = CDP_DEFAULT_PORT, url_contains: str = "",
         out["原因"] = "页面在，但 DOM 取不到：%s" % str(dom.get("不可用原因") or "")[:160]
         return out
     q = str(query or "")
-    # ★ 2026-10-18（DSH 真浏览器实测抓到的崩溃）：原来只在 `if q:` 里写 `命中节点数`，
+    # ★ 2026-10-18（本地 agent 真浏览器实测抓到的崩溃）：原来只在 `if q:` 里写 `命中节点数`，
     #   下一行却**直接下标**读它 ⇒ `query` 为空（正常调用形态！）时抛 KeyError('命中节点数')，
     #   被闸门包成 code=15「读元素树失败」。判据没抓到是因为假的 cdp 每次都带了 query。
     #   修法：先给 0，再按需覆盖。
@@ -5294,7 +5294,7 @@ def _ocr_norm(s) -> str:
     return _screen_norm_text(str(s or ""))
 
 
-# ★ 2026-10-18（DSH 真页实测补）：Windows OCR 把中文**逐字切开并加空格**
+# ★ 2026-10-18（本地 agent 真页实测补）：Windows OCR 把中文**逐字切开并加空格**
 #   （"剩余可选" → "剩 余 可 选"）⇒ 直接用 `q in blob` 判**多字中文永远不中**。
 #   实测证据：真 Edge 窗口 ocr_window 返回的 text 是 "119 ： 56 剩 余 可 选 3 项 · 第 7 / 20 步"，
 #   而 `"剩余" in text` 为 False、`"剩" in text` 为 True。
@@ -5642,13 +5642,13 @@ def _cdp_launch(args: dict) -> dict:
         os.environ.get("TEMP") or os.environ.get("TMP") or ".",
         "agentctl_cdp_%d_%d" % (os.getpid(), int(time.time()))))
     os.makedirs(profile, exist_ok=True)
-    # ★ 2026-10-18（DSH 亲测修）：原来这里**写死 about:blank**，`url` 参数被忽略 ⇒
+    # ★ 2026-10-18（本地 agent 亲测修）：原来这里**写死 about:blank**，`url` 参数被忽略 ⇒
     #   launch 之后 /json/list 里只有 about:blank，`url_contains` 永远 reachable=false。
     #   真实验证据：同参数手工起 Edge 打开 file:///…lab_volatile.html 时 pages=7 里有 page，
     #   而走本函数起的实例里一条 page 都没有。
     argv = [exe, "--user-data-dir=%s" % profile,
             "--remote-debugging-port=%d" % port,
-            # ★ 2026-10-18（DSH 亲测补）：Edge/Chrome 111+ 会**按 Origin 拒 WebSocket**，
+            # ★ 2026-10-18（本地 agent 亲测补）：Edge/Chrome 111+ 会**按 Origin 拒 WebSocket**，
             #   不放这个旗标时客户端握手直接 403（实测报错：
             #   "Rejected an incoming WebSocket connection from the http://127.0.0.1:9222 origin"）
             #   ⇒ 本机起的实例连自己的 CDP 都连不上。只放行本机这个端口，不用 `*`。
@@ -6618,7 +6618,7 @@ SCREEN_WARM_FAST_MS = 300         # 「采集太快」阈值：真树走 COM 不
 SCREEN_SHELL_MAX_NODES = 24       # 「节点极少」阈值（真页外壳实测 18 个）
 SCREEN_READY_SHRINK_RATIO = 0.6   # 节点数 < 上次的 60% ⇒ 疑心这趟是外壳
 # ★ 窗F2b：网页类窗口的「热」门槛，按**可报对象数**（可交互或有 label 的节点）算。
-#   ★ 出处是 2026-10-18 的**真 Chromium 页实测**（DSH，`work\_暖机真页复核_20261018.py`）：
+#   ★ 出处是 2026-10-18 的**真 Chromium 页实测**（本地 agent，`work\_暖机真页复核_20261018.py`）：
 #       冷扫 ≈ 18 个可报对象 / 60 个原始节点 / 372ms   ← 三条旧依据一条都没命中，被判成「已热」
 #       热扫 ≈ 49 个可报对象 / 111 个原始节点 / 259ms
 #     40 取在 18 与 49 正中间。**为什么按对象数而不是原始节点数**：
@@ -7327,7 +7327,7 @@ def t_screen(args: dict) -> dict:
             # ★ 窗E1 · F3：拒绝信封带**屏上下文**（screen_version/window/对象总数），
             #   blind_spots 明写「校验失败≠屏幕空」—— 声明写错/白屏/错窗/预算没扫到
             #   四类失败现在分得清。**仍不回 objects**：那会被当成「声明已兑现」。
-            # ★ 窗E2（2026-10-18 · DSH 实测发现）：`拒因` 以前**只存在于 warning**，
+            # ★ 窗E2（2026-10-18 · 本地 agent 实测发现）：`拒因` 以前**只存在于 warning**，
             #   data 里没有 => agent 拿到的 data.拒因 是 None，只能去解析中文。
             #   => 提到 data 顶层，给**机器可读**的短码：
             #     "unmatched"（声明一条都没命中）| "width"（命中节点数超上限）
@@ -7519,10 +7519,10 @@ def dispatch(tool: str, args: dict, *, actor: str = "", human: bool = False) -> 
     """**唯一的入口。** 三种传输都调它。"""
     t0 = time.perf_counter()
     args = args or {}
-    # ★ D1 修复（2026-10-19，Codex 实跑发微信时踩出）
+    # ★ D1 修复（2026-10-19，窗口D 实跑发微信时踩出）
     #   症状：MCP 传输（agentctl.mcp）下**所有写动作**一律 code=10，
     #         报「本次调用**没带 actor**，请加 --actor」—— 而包装器
-    #         .codex\mcp\run_agentctl.cmd 里明写 `set "AGENTCTL_ACTOR=codex"`。
+    #         .窗口D\mcp\run_agentctl.cmd 里明写 `set "AGENTCTL_ACTOR=窗口D"`。
     #   真因：actor 由 mcp.py 从**环境变量**取出来交给 dispatch 的**关键字参数**，
     #         但 dispatch 只把 args 往下传（TOOLS[tool](args)）；
     #         闸门读的是 args.get("actor")（见 _act_precheck），

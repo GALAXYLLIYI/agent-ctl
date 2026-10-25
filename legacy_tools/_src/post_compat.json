@@ -9,7 +9,7 @@
     "_为什么必须分档": "WinUI3/XAML/UWP 的输入走 CoreInput dispatcher，只消费系统输入队列，raw PostMessage 会被丢弃。不查表就投 = 「动作报成功、界面没动」的假成功，比拒绝更危险。",
     "_匹配口径": "先精确 (process, class)，未命中再看 (process, class 留空) 的条目；进程名大小写不敏感。",
     "_投递目标口径": "★2026-10-08 在线预扫纠偏：必须投给**顶层目标窗口**（工单 T4 原话），不是 WindowFromPoint 找到的最深子窗口。VirtualBoxVM(Qt6) 实测：投给 WindowFromPoint 返回的子窗口 919258 → 前/后证据图**逐像素相同(0/1172171)**、窗口清单 0 新窗口；改投顶层目标窗口 5049210 → `✔ 页面已变化` 且新弹出 Qt 菜单窗口(pid 35868)。子窗口只作日志里的「深点窗口」诊断保留。⚠ 919258 的真实归属见下一条 —— 它**不是** VirtualBox 的子窗口。",
-    "_投递目标口径·再纠一层": "★2026-10-08 补测#4 纠错（**推翻**上一条里「投给同一应用的子窗口」这个解释）：919258 经 GetWindowThreadProcessId + GetAncestor 核实 = pid 36512、顶层祖先 722784 = **WorkBuddy.exe 的窗口**，根本不是 VirtualBoxVM(pid 35868) 的子窗口。它的矩形（虚拟化 [853,0,1707,1019]，×1.5 = [1280,0,2560,1528]）与 WorkBuddy 窗口完全重合 —— 也就是说 VirtualBox 那个点击点**当时被 WorkBuddy 窗口压着**，WindowFromPoint 返回的是**另一个进程**的窗口，那一次「投给子窗口」实际投给了 WorkBuddy，这才是 File 菜单没开的真因。补测#4 的两次 explorer 探针里 WindowFromPoint 又返回 526408（pid 37688 = DeepSeek Harness 的 Chromium 渲染子窗），同一现象复现。**所以真正的口径是：投递目标必须是「已核过身份的目标窗口本身」；绝不能让 WindowFromPoint 去决定目标 —— 它返回的是 z 序最上面那个窗口，可能是完全不相干的进程。** 连带地，post=false 的严格含义是「投给该应用【顶层窗口】不被消费」，**不等于**「该应用永远不吃 PostMessage」：窗口自己持有真子窗口时（如资源管理器文件列表 CtrlNotifySink→DUIViewWndClassName→UIItemsView），投子窗口是否可行**仍未测**。"
+    "_投递目标口径·再纠一层": "★2026-10-08 补测#4 纠错（**推翻**上一条里「投给同一应用的子窗口」这个解释）：919258 经 GetWindowThreadProcessId + GetAncestor 核实 = pid 36512、顶层祖先 722784 = **WorkBuddy.exe 的窗口**，根本不是 VirtualBoxVM(pid 35868) 的子窗口。它的矩形（虚拟化 [853,0,1707,1019]，×1.5 = [1280,0,2560,1528]）与 WorkBuddy 窗口完全重合 —— 也就是说 VirtualBox 那个点击点**当时被 WorkBuddy 窗口压着**，WindowFromPoint 返回的是**另一个进程**的窗口，那一次「投给子窗口」实际投给了 WorkBuddy，这才是 File 菜单没开的真因。补测#4 的两次 explorer 探针里 WindowFromPoint 又返回 526408（pid 37688 = 主控模型 Harness 的 Chromium 渲染子窗），同一现象复现。**所以真正的口径是：投递目标必须是「已核过身份的目标窗口本身」；绝不能让 WindowFromPoint 去决定目标 —— 它返回的是 z 序最上面那个窗口，可能是完全不相干的进程。** 连带地，post=false 的严格含义是「投给该应用【顶层窗口】不被消费」，**不等于**「该应用永远不吃 PostMessage」：窗口自己持有真子窗口时（如资源管理器文件列表 CtrlNotifySink→DUIViewWndClassName→UIItemsView），投子窗口是否可行**仍未测**。"
   },
   "_预扫记录": {
     "状态": "已执行在线预扫（2026-10-08 19:57–20:1x，B+C 通行证 scopes=['B级 点击滚动','C级 打字快捷键'] acts_limit=30）",
@@ -23,7 +23,7 @@
       "notepad.exe / Notepad（WinUI3）→ 不消费（回退例）",
       "explorer.exe / CabinetWClass → 不消费（第 4 个应用，2026-10-08 20:31–20:36 补测；★弱否定，细节与局限见 _补测记录）"
     ],
-    "未测的登记条目": "WeChatAppEx / WorkBuddy / ChatGPT / AnythingLLM / TRAE SOLO CN / DeepSeek Harness / cxstudy —— post 仍为 null（unverified）。**不许**因为「一族应用同架构」就替它们填 false，那是假证据。"
+    "未测的登记条目": "WeChatAppEx / WorkBuddy / ChatGPT / AnythingLLM / TRAE SOLO CN / 主控模型 Harness / cxstudy —— post 仍为 null（unverified）。**不许**因为「一族应用同架构」就替它们填 false，那是假证据。"
   },
   "_补测记录": {
     "状态": "已执行在线补测第 4 个应用（2026-10-08 20:31–20:36，B+C 通行证，acts_limit=30，实用 10 次，20:36:48 主动结束）",
@@ -39,7 +39,7 @@
       "② 免费快照：窗口 14→14，新增 0 / 消失 0 / 状态变化 0（第2次连进程都是 新增0/消失0）",
       "③ **事件通道**：9 秒全局 WinEvent 订阅各抓到 45 条事件，用 GetAncestor/pid 逐条归属核对后，落在靶子窗口一族的 = **0 条**（45 条全属 TextInputHost 输入法窗口、WorkBuddy 的 Chromium 渲染子窗、以及 9 个创建即销毁的系统临时窗口）"
     ],
-    "焦点证据": "投递前后目标窗口 foreground=False（同一时刻唯一的前台窗口始终是 DeepSeek Harness hwnd=526208）；投递代码里没有 SetForegroundWindow/SetCursorPos；自检丙-11 独立证明前台窗口跨一次真投递不变",
+    "焦点证据": "投递前后目标窗口 foreground=False（同一时刻唯一的前台窗口始终是 主控模型 Harness hwnd=526208）；投递代码里没有 SetForegroundWindow/SetCursorPos；自检丙-11 独立证明前台窗口跨一次真投递不变",
     "结论": "post=false（按「投顶层窗口」口径）",
     "★ 结论的局限（必须一起读）": "① 这是**弱否定**：用户把动作限定为「空目录的列表空白区点一下」，而该动作**即使被消费也本应零外观变化**，所以像素通道天然无鉴别力，判定主要靠事件通道；② 落点所在的输入宿主其实是**子窗口**，投子窗口是否可行**未测**（那需要点名投 CtrlNotifySink/DUIViewWndClassName，超出本单测法，且要再加白名单条目，未获授权）；③ 错误方向是安全方向：写成 false 只会让 act.py 对资源管理器回退到前台路线，不会造成假成功。"
   },
@@ -76,7 +76,7 @@
       "置信": "弱否定（零反应型探针 + 顶层投递口径）—— 读这条前请先读 _补测记录 的「结论的局限」",
       "why": "实测**投顶层窗口不消费**：两次不同空白点，三条通道一致零反应（证据图逐字节相同 / 窗口清单全零 / 9 秒 45 条事件零条落在本窗口树）。★ 但这不等于「资源管理器永远不吃 PostMessage」——文件列表其实是真子窗口（CtrlNotifySink→DUIViewWndClassName→UIItemsView）在承载鼠标消息，投子窗口未测。",
       "verified": "2026-10-08 20:35:04",
-      "evidence": "第1次 20:31:55 act.py click --hwnd 1051210 --xy 1200,900 --post --post-force --retry 0 → 投递目标=1051210 客户区坐标=[1076,631] 深点窗口=526408(D=DeepSeek Harness 的 Chromium 渲染子窗，说明该点被前台窗口遮挡，不影响 PostMessage 语义)；「⚠⚠ 页面无变化」rc=8；前图=act_20261008_203154_before.png 后图=act_20261008_203155_after.png，两者 md5 均 da67fcf2aff151afaa962e169b18bdd9(70797B)；快照 t4x_e_before→t4x_e_after 窗口 14→14 新增0/消失0/状态变化0。第2次 20:35:04 --xy 700,1200 → 客户区 [576,931]，同样「⚠⚠ 页面无变化」rc=8，图 md5 与前一次**完全相同**；快照 t4x_e2_before→t4x_e2_after 进程 新增0/消失0、窗口 新增0/消失0/状态变化0。事件归属核对：见 _补测记录。S6 账本两行：…第1次=unknown（我在快照里漏声明期望谓词，故只能记 unknown，未美化）、…第2次=satisfied（判据是「靶子完好」proc-exists:explorer.exe + window-exists:_t4_probe_empty_dir，不是「投递被消费」）。"
+      "evidence": "第1次 20:31:55 act.py click --hwnd 1051210 --xy 1200,900 --post --post-force --retry 0 → 投递目标=1051210 客户区坐标=[1076,631] 深点窗口=526408(D=主控模型 Harness 的 Chromium 渲染子窗，说明该点被前台窗口遮挡，不影响 PostMessage 语义)；「⚠⚠ 页面无变化」rc=8；前图=act_20261008_203154_before.png 后图=act_20261008_203155_after.png，两者 md5 均 da67fcf2aff151afaa962e169b18bdd9(70797B)；快照 t4x_e_before→t4x_e_after 窗口 14→14 新增0/消失0/状态变化0。第2次 20:35:04 --xy 700,1200 → 客户区 [576,931]，同样「⚠⚠ 页面无变化」rc=8，图 md5 与前一次**完全相同**；快照 t4x_e2_before→t4x_e2_after 进程 新增0/消失0、窗口 新增0/消失0/状态变化0。事件归属核对：见 _补测记录。S6 账本两行：…第1次=unknown（我在快照里漏声明期望谓词，故只能记 unknown，未美化）、…第2次=satisfied（判据是「靶子完好」proc-exists:explorer.exe + window-exists:_t4_probe_empty_dir，不是「投递被消费」）。"
     },
     {
       "process": "WeChatAppEx.exe",
@@ -119,7 +119,7 @@
       "evidence": null
     },
     {
-      "process": "DeepSeek Harness.exe",
+      "process": "主控模型 Harness.exe",
       "class": "Chrome_WidgetWin_1",
       "post": null,
       "why": "Electron，预期不消费",

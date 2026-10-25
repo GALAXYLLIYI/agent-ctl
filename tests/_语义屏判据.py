@@ -54,7 +54,7 @@ r"""判据 · F4 语义屏 ctl_screen（窗B1 · 2026-10-17）
        靶窗用**自建 Tk 窗**（属主 python.exe ⇒ 落 `BLOCKED_PROCESSES_HARD`，正是"敏感"那一族）。
        ★ 判据盯的是**服务端终判**，不是老线 act.py 那层：拒绝必须发生在 act.py 之前
          ⇒ 可观察判据 = `data.raw` 为空 **或** warning 点名"终判/服务端"；两样都没有 ⇒ 红。
-       ★ 现状预期：Codex-3 把终判接进 core 之前，本条**红**（接线单明说未落地可红）。
+       ★ 现状预期：窗口D-3 把终判接进 core 之前，本条**红**（接线单明说未落地可红）。
     S12 P0 神经层（窗Z · 2026-10-18，派单 `work\dispatch_Z_神经层P0.md`）：
         ① 归属**前置闸**：`WindowFromPoint` 的顶层 ∉ 目标窗树 ⇒ **发送之前**就拒、回执点名遮挡者、
            且 act.py 一次都没被 spawn（「零像素」）；
@@ -92,7 +92,7 @@ r"""判据 · F4 语义屏 ctl_screen（窗B1 · 2026-10-17）
     python -X utf8 tests\_语义屏判据.py --inject all                 # 一起注，逐条报红
 ★ (11) 组**只在有交互桌面的会话里跑**：它要真拉起记事本、真 SendInput。跑不了 ⇒ 如实说"环境受限"
   （退出码 2），**不把"没验"算成绿**。
-★ (12) 组判据的红/绿要看 Codex-3 是否已把 `authstate.deny_window` 接进 core 的动作路径 ——
+★ (12) 组判据的红/绿要看 窗口D-3 是否已把 `authstate.deny_window` 接进 core 的动作路径 ——
   未接线时默认红，这正是接线单说的"预期"。
 ★ 名字说明：--inject version 是**修正②**那条（screen_version 钉死），它现在会同时红 (2) 与 (10) —— 两处盯的都是「版本必须是新签发的」，如实报。
 
@@ -1185,7 +1185,7 @@ _real_eid_put_g3b = _eid_sessions_put
 def _eid_sessions_put(tok, hwnd, nodes, walk=None, 无明细=False):   # noqa: F811  故意覆盖真版
     # 注入的缺陷：**capture 一律不写元素明细** ——
     #   屏幕照样交出 eid，旁表却空空如也，点下去永远 code=12。
-    #   真实后果：这就是 G3b 单要治的那条真门路缺口（DSH 2026-10-18 真 Edge 实跑撞到），
+    #   真实后果：这就是 G3b 单要治的那条真门路缺口（本地 agent 2026-10-18 真 Edge 实跑撞到），
     #   光看返回信封完全看不出来 —— objects[].eid 明明在那儿，一喂就断。
     return _real_eid_put_g3b(tok, hwnd, [], walk, 无明细=True)
 '''
@@ -1378,7 +1378,7 @@ INJECT_HIT_AFTER_SEND = '''
 # ===== 以下为 窗Z 注入段（跑红自证专用，勿入产品代码）=====
 # 注入的缺陷：**归属改成"事后判"** —— 发送瞬间那道前置闸被拿掉，
 #   改成 act.py 跑完再回头问"这点现在归谁"。
-# 真实后果：点击的激活副作用在调用方看到回执之前就已经发生（ZCode 钉的那条），
+# 真实后果：点击的激活副作用在调用方看到回执之前就已经发生（窗口A 钉的那条），
 #   拿旧坐标点进遮挡者，回执再点名也救不回来。
 _real_act_Z = _act
 _real_op_Z = _ownership_precheck
@@ -2934,7 +2934,7 @@ def check_action_side(core, fx):
     #   ★ 关键：**取外层 data.capture_id**，不是 data.结果.capture_id。
     #     上一单判据取的是后者（call() 返回 结果）⇒ 拿到的是 ctl_screen 自己签的那张，
     #     于是真门路上 _uia_gate 拿 res 重签的空快照把明细盖掉了，判据却全绿
-    #     （DSH 2026-10-18 真 Edge 实跑逮到：code=12「这次观测没有元素明细」）。
+    #     （本地 agent 2026-10-18 真 Edge 实跑逮到：code=12「这次观测没有元素明细」）。
     #   这里走**真的 t_screen → 真信封**，用的就是调用方会拿到的那个 capture_id。
     fx.g3_click_effect = "none"
     fx.n_extra_btn = 0
@@ -3129,7 +3129,7 @@ def check_ocr_r3(core, fx):
     need((ch1b.get('R3_ocr') or {}).get('hit') is True,
          'CDP 在场时 R3 被吞了：%r' % ch1b.get('R3_ocr'), reds)
 
-    # ── ①c **中文逐字切开**也必须命中（2026-10-18 DSH 真页实测锁）
+    # ── ①c **中文逐字切开**也必须命中（2026-10-18 本地 agent 真页实测锁）
     #   Windows OCR 把「剩余可选」认成「剩 余 可 选」（每字之间一个空格）；
     #   用普通规范化比较时**多字中文查询永远不中**（实测：`"剩余" in text` 为 False、`"剩" in text` 为 True）。
     #   这条锁的就是 `_ocr_tight`（吃掉 CJK 间空白；**拉丁词之间的空格不动**）。
@@ -3280,7 +3280,7 @@ def check_cdp_r1(core, fx):
          'R1 命中时 source_confidence.cdp 该给 DOM 的真值（0.90 量级），实得 %r'
          % (c1.get('source_confidence'),), reds)
 
-    # ── ①b2 **query 为空 + CDP 可用 ⇒ 不许崩**（2026-10-18 DSH 真浏览器实测抓到的 KeyError）
+    # ── ①b2 **query 为空 + CDP 可用 ⇒ 不许崩**（2026-10-18 本地 agent 真浏览器实测抓到的 KeyError）
     #   真事：`ctl_screen(cdp_port=9333)` 不带 query 时，`_cdp_probe` 里
     #   `out["命中节点数"]` 只在 `if q:` 里赋值、下一行却直接下标读 ⇒ KeyError ⇒ 闸门报 code=15。
     #   判据之前没抓到，是因为假的 CDP 每次都带了 query。这里补一条"空 query"的回归锁。
@@ -3927,7 +3927,7 @@ def _w1_ensure_fg(hwnd, tries=3):
 
     ★ 为什么必须显式确认：真窗口判据的送达依赖前台 —— focus 打字发往「前台焦点窗」、
       坐标点击要真正落在靶窗上。而 agent 会话跑判据时**用户可能正在用这台电脑**
-      （实测撞到过：raw 里写着「现前台仍是 hwnd=854912『OpenCode』」，
+      （实测撞到过：raw 里写着「现前台仍是 hwnd=854912『窗口B』」，
       靶窗被别的程序压着置不上前，于是打字/点击全部失败、判据一片红）。
       那种红是**指着产品喊冤**：产品没错，是这一刻没有可供判定的交互前台。
     ⇒ 置不上前就记 W1_BLOCKED（既不算红也不算绿，退出码 2），如实说"这一条我验不了"。
@@ -4281,7 +4281,7 @@ def check_input_channel(core, fx):
              "④ 零变化时应当**不当成功**（期望 code=8 确认没变 / code=5 没测出来，都不许报成功），"
              "实际 ok=%s code=%s" % (r6.get("ok"), r6.get("code")), reds)
 
-        # ── ⑤ 数字键必须走「键名」：'9' 是数字 9，不是 Tab（窗W2 补，接线单 Codex-1 报的洞）──
+        # ── ⑤ 数字键必须走「键名」：'9' 是数字 9，不是 Tab（窗W2 补，接线单 窗口D-1 报的洞）──
         #   ★ 改前 core 先 int(s, 0)：int("9",0)=9 ⇒ vk=0x09=**Tab**、int("8",0)=8 ⇒ 0x08=**Backspace**；
         #     而 '0'~'7' 因 0x00~0x07 不在 _VK_SAFE 里**全拒**。
         #     前两种是「静默发错键」—— 键发出去了、回执也绿的，只有回读才发现打错；

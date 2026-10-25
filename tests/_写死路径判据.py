@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-r"""_写死路径判据.py —— 写死路径白名单门禁（窗W · 2026-10-17 · 派单：DSH）
+r"""_写死路径判据.py —— 写死路径白名单门禁（窗W · 2026-10-17 · 派单：本地 agent）
 
 重跑命令：
     python -X utf8 tests\_写死路径判据.py                 # 验真（当前仓）
@@ -18,7 +18,7 @@ work\_写死路径扫描_20261017.py——两处只许同步改，不许各漂�
       （tools/ 与 docs/证据/ 的仓根写死在白名单 B/D 类豁免，见白名单 §三/§六。）
   [2] 白名单外新命中：命中文件不落 A~G 七类 ⇒ 红点名（防偷偷加本机路径）。
   [3] 条数自证：实测命中文件数/行数 必须等于白名单文档 §二 写的数 —— 文档从本文件
-      现场解析（单一真相源），文档漂了也是病；DSH 更新文档后本判据自动跟随，无需改码。
+      现场解析（单一真相源），文档漂了也是病；本地 agent 更新文档后本判据自动跟随，无需改码。
   [4] --inject 自证：仓内 0 命中文件复制到 %TEMP% 副本 —— 未改=绿；塞一行
       `F:\SomeMachine\x` = 红**并点名字**。证明检测器活着。
 
@@ -38,7 +38,7 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)                      # tests\ 的上一级 = 仓根
 WHITELIST_MD = os.path.join(ROOT, "work", "_写死路径白名单_20261017.md")
-INJECT_DIR = os.path.join(tempfile.gettempdir(), "agentctl_zcode_wZ_inject")
+INJECT_DIR = os.path.join(tempfile.gettempdir(), "agentctl_窗口A_wZ_inject")
 
 # ── 口径（照抄 work\_写死路径扫描_20261017.py，两处只许同步改）─────────────
 SKIP_DIRS = {".git", "__pycache__", ".pytest_cache", "node_modules", "dist"}
@@ -65,7 +65,7 @@ def classify(rel):
         return ("A", "备份回滚材料（收口后删除；§五保留 1 个作证据）")
     if "/证据/" in b:
         return ("B", "历史证据留档：记录当天在哪台机器跑出了什么，改了=篡改证据")
-    # ★ 2026-10-17 修（DSH 亲跑发现）：这里原来用大小写敏感的 b 比 "readme.md"，
+    # ★ 2026-10-17 修（本地 agent 亲跑发现）：这里原来用大小写敏感的 b 比 "readme.md"，
     #   而仓里那份叫 `README.md` ⇒ 每次都判「白名单外」。改用 low。
     if low == "readme.md" or low == "contract/tools.json" or low == "install.ps1" \
             or low == ".gitignore" or low.startswith("build/"):
@@ -165,7 +165,7 @@ def run_main():
     print("    白名单文档写：文件 %d / 行 %d" % (exp_f, exp_l))
     print("    实测扫出　　：文件 %d / 行 %d" % (n_files, n_lines))
     rec("3", "实测命中数 == 白名单文档 §二 所写", "绿" if (ok_f and ok_l) else "红",
-        "文档漂了也是病：若 bak 删除/回灌重生成等已改变命中数，请 DSH 重跑扫描脚本并更新 §二")
+        "文档漂了也是病：若 bak 删除/回灌重生成等已改变命中数，请 本地 agent 重跑扫描脚本并更新 §二")
 
     return 1 if (cz or unknown or not (ok_f and ok_l)) else 0
 
@@ -194,7 +194,7 @@ def run_inject():
     with open(dst, "a", encoding="utf-8") as f:
         f.write('\nx_injected = "F:\\\\SomeMachine\\\\x"\n')
     h1 = scan(INJECT_DIR)
-    # ★ 2026-10-17 修（ZCode 自测发现）：named 原来匹配 "F:\SomeMachine\x"（单反斜杠），
+    # ★ 2026-10-17 修（窗口A 自测发现）：named 原来匹配 "F:\SomeMachine\x"（单反斜杠），
     #   而写进副本的是源码转义后的双反斜杠形态 ⇒ 字符串永不相等、注入明明被抓却判红。
     #   改按稳定子串 "SomeMachine" 匹配，并在 detail 里打印命中原文。
     named = [(rel, ln, s) for rel, v in h1.items() for ln, s in v if "SomeMachine" in s]

@@ -15,7 +15,7 @@ r"""gate.py —— AgentCtl 的安全内核：闸门（原子）＋ 急停 ＋ �
 用法：
     import gate
     gate.require("B", "点击保存")            # 不过就抛 GateDenied
-    lic = gate.acquire_lease("DSH", ["B"], 600)
+    lic = gate.acquire_lease("本地 agent", ["B"], 600)
     gate.release_lease(lic)
 
 ★ 双 gate 分工契约（窗 X · 2026-10-18 写定，别再当成两份重复实现）
@@ -62,7 +62,7 @@ for _s in (sys.stdout, sys.stderr):
         pass
 
 # ── legacy_tools 定位（分层查找，**没有本机绝对路径兜底**）─────────
-# 2026-10-04 DSH 审查交付包时否掉了我原来的「三段回退」方案，原话：
+# 2026-10-04 本地 agent 审查交付包时否掉了我原来的「三段回退」方案，原话：
 #   「留一段本机绝对路径当兜底，等于这次交付**仍然带着本机路径**，
 #     只是被藏到了最后——A 项要消灭的就是它；而且它是**静默**兜底：
 #     别台机器上指向不存在的目录，**又变成『看起来有默认值，其实是坏的』**。」
@@ -79,7 +79,7 @@ for _s in (sys.stdout, sys.stderr):
 #   1) 环境变量 AGENTCTL_LEGACY_HOME —— 测试 / 多实例（**显式指定，不做能力体检**，见下）
 #   2) 冻结态 _MEIPASS\legacy_tools（打包时把白名单 legacy 放这儿）
 #   3) **本机开发指针 build\local_legacy_home.txt（一行目录路径）**
-#      —— 用**指针文件**而不是硬编码：硬编码就是 DSH 说的「把本机路径藏到最后」；
+#      —— 用**指针文件**而不是硬编码：硬编码就是 本地 agent 说的「把本机路径藏到最后」；
 #         指针文件至少是显式的、可 grep 到的，而且**打包带不进去**
 #         （只有源码态读得到它，冻结态 _MEIPASS 里没有 build\ 这一层）。
 #   4) 源码态：从本文件所在目录向上最多 3 级，找 legacy_tools\
@@ -429,7 +429,7 @@ LOG = os.path.join(AUTHDIR, "gate_agentctl.log")
 # ── 急停状态：文件挪出桌面 ──────────────────────────────────
 # 为什么挪：用户 2026-10-04「桌面那些急停文件就不用了」。
 # 之前写死在 桌面\_急停.flag 有两个问题：
-#   ① **换机器就废**（DSH 审查交付包时点的 A 项缺陷，6 处硬编码之一）；
+#   ① **换机器就废**（本地 agent 审查交付包时点的 A 项缺陷，6 处硬编码之一）；
 #   ② 桌面上摆个 flag 让人以为要去管它，实际用户只用面板按钮和热键。
 # 现在放 %LOCALAPPDATA%\AgentCtl\：桌面干净了，跨机器也跟得走。
 #
@@ -711,7 +711,7 @@ def _save(path, obj):
         json.dump(obj, f, ensure_ascii=False, indent=1)
     os.replace(tmp, path)
 
-exclusive_lock = _exclusive   # ★ T1 窗2（DSH 唯一授权的这一行）：公开别名，不改任何逻辑/语义
+exclusive_lock = _exclusive   # ★ T1 窗2（本地 agent 唯一授权的这一行）：公开别名，不改任何逻辑/语义
 # ────────────────────── 急停 ──────────────────────
 def brake_engaged() -> bool:
     return os.path.exists(BRAKE_FLAG)
@@ -863,7 +863,7 @@ def _check_locked(p: dict, sc: str, *, skip_count: bool = False) -> tuple[bool, 
         # 只读感知：A 级零副作用。铁律 11⑥：「20 次门槛只卡有副作用的层级」。
         return True, f"范围「{SCOPES.get(sc, sc)}」有效至 {p.get('expires')}（只读感知，不计数）", CODE_OK
     n = int(p.get("acts", 0))
-    # ⚠️ 这里是**第二套口径**（2026-10-15 GLM/ZCode 复检点出"双轨"，此处只加指认、不改行为）：
+    # ⚠️ 这里是**第二套口径**（2026-10-15 GLM/窗口A 复检点出"双轨"，此处只加指认、不改行为）：
     #   `ACT_LIMIT.get(sc, 10)` 按「**本次请求的那一档**」取上限；
     #   而发证侧（core.py:1186）走 `gate.effective_act_limit(scopes, 20)` ⇒ 按「**全证**里最紧的
     #   有副作用档位」取。两者只在本证**没写** acts_limit 时才可能落到这里（正常发证都带值）。
@@ -880,7 +880,7 @@ def _check_locked(p: dict, sc: str, *, skip_count: bool = False) -> tuple[bool, 
     return True, f"范围「{SCOPES.get(sc, sc)}」有效至 {p.get('expires')}，已用 {n}/{limit} 次", CODE_OK
 
 # ────────────────────── 敏感窗终判（读侧）──────────────────────
-# ★ 接线单 §二 5（DSH 解禁的**窄口**：只许加终判读侧，不动码表）：
+# ★ 接线单 §二 5（本地 agent 解禁的**窄口**：只许加终判读侧，不动码表）：
 #   敏感窗拒绝原先**只在弹窗层**（授权弹窗的候选列表里不放它们）。
 #   但坐标点击（ctl_click --xy）不经过候选窗口那一步 ⇒
 #   用户即使没在候选里看到，仍可能被**直接点到**授权弹窗 / UAC 框 / 系统设置页。
@@ -961,7 +961,7 @@ def end_session(why: str = "主动结束") -> tuple[bool, str]:
 # ────────────────────── 单写者租约 ──────────────────────
 # 单 agent 场景下租约不用于"仲裁多方"，而是**防止同一个 agent 自己的并发调用/残留进程互相踩**
 def acquire_lease(actor: str, scopes, ttl_sec: int = 600) -> dict:
-    # ★ 2026-10-10 修逗号 bug（Codex 定位到行，用户批准）：CLI 进来的 scopes 是**字符串**
+    # ★ 2026-10-10 修逗号 bug（窗口D 定位到行，用户批准）：CLI 进来的 scopes 是**字符串**
     #   "B,C,D"，原来直接 for 迭代 —— 迭代字符串迭代的是**字符**，',' 被当成一个档位
     #   静默写进租约（实测 scopes: [",","B","C","D"]），无类型检查、无校验 ⇒ fail-open。
     #   修法不发明新轮子：走 2026-10-06 就有的 parse_scopes（authorize 路径同款），

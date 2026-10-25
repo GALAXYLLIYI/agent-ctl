@@ -3,7 +3,7 @@ r"""cli.py —— 命令行传输层（第三态）
 
 用法：
     python -m agentctl.cli status
-    python -m agentctl.cli lease --action acquire --actor DSH --scopes B
+    python -m agentctl.cli lease --action acquire --actor 本地 agent --scopes B
     python -m agentctl.cli timeline --limit 20
     python -m agentctl.cli shot --hwnd 1234
     python -m agentctl.cli --list                 # 列工具

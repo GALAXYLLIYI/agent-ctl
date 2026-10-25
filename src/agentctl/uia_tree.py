@@ -24,7 +24,7 @@ UIA（UI Automation）是 Windows 自带的 COM 接口，读屏软件用的就�
 ## 边界（必须如实说）
 
 UIA 看不见的一律瞎：**Canvas 自绘、游戏画面、PDF 内嵌渲染、没开无障碍的 Electron**。
-本机 Codex 桌面版（Electron）只能拿到 22 个节点的外壳，页面全黑。
+本机 窗口D 桌面版（Electron）只能拿到 22 个节点的外壳，页面全黑。
 浏览器可用是因为 Chromium 在检测到无障碍客户端接入后才把 DOM 灌进树里。
 所以这条线是**补充**不是**替代**，`ctl_shot` 永远留着兜底。
 """
@@ -42,7 +42,7 @@ SEARCH_TIMEOUT_SEC = 2.0
 #   本文件早先有人把树里的 rect 当成「屏幕坐标」、把 --xy 当成「窗口局部坐标」，
 #   于是去「减窗口原点换算」—— 换算后点仍可能落在窗口矩形内 ⇒ 不被 rc=5 拦住
 #   ⇒ **静默点错**，而且被写成 SOP 就制度化了。
-#   DSH 已读码裁定：--xy 与 ctl_tree 的 rect **同一套 = 屏幕物理像素**
+#   本地 agent 已读码裁定：--xy 与 ctl_tree 的 rect **同一套 = 屏幕物理像素**
 #   （contract.conventions.coordinates / act.py 的 SetCursorPos / PER_MONITOR_DPI_AWARE）。
 #   所以这里**只加一句标注**，措辞照契约原文；**绝不加 rect_local / center_local /
 #   窗口原点 这类换算字段** —— 多摆一套坐标，agent 总有选错的那个。

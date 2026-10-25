@@ -37,7 +37,7 @@ import sys
 import tempfile
 import time
 
-# ★ 2026-10-17（DSH 补 · 窗Z 的第 18 条红了以后才看清）：
+# ★ 2026-10-17（本地 agent 补 · 窗Z 的第 18 条红了以后才看清）：
 #   只在"某些 spawn"的 env 里设 AGENTCTL_BORDER_LOG 不够 —— 还有子进程（holder /
 #   间接 start_follow）继承的是**本进程环境**，于是照样写生产目录的 ctrl_border.log，
 #   第 18 条「生产目录前后快照完全一致」就会红。
@@ -86,7 +86,7 @@ _INJECT_CASES = tuple(x.strip() for x in
 
 # ══ 窗F 补（2026-10-18 12:5x）：**强制启动延迟**开关 ══════════════════════════
 #   为什么要它：光把 sleep 取短，注入只在「慢的时候」有判别力 ——
-#   DSH 2026-10-18 12:49 实测：空载机器上 T1_W3_INJECT_FIXED_SLEEP=0.2 根本没红
+#   本地 agent 2026-10-18 12:49 实测：空载机器上 T1_W3_INJECT_FIXED_SLEEP=0.2 根本没红
 #   （0.2s 已经够边框上屏），绿67/红0。而「慢」正是偶发场景、不能指望复现
 #   ⇒ 那条注入会永远「碰运气绿」。
 #   治法：**把「慢」变成开关**。设了它，边框子进程在 import 之前先睡 N 秒
@@ -1000,7 +1000,7 @@ def border(src_dir=None, keep_border=False):
         check("7a 无通行证 ⇒ 隐藏（--idle 默认 hide）",
               "状态=hidden" in r.stdout, r.stdout.strip())
         check("7b ★ 隐藏态**必须**往日志写一行「无通行证 ⇒ 隐藏」"
-              "（DSH 追加的硬要求，否则「看不见边框」会被误判成急停）",
+              "（本地 agent 追加的硬要求，否则「看不见边框」会被误判成急停）",
               "无通行证 ⇒ 隐藏" in lg, "日志尾部：%s" % lg[-200:])
 
         # 7c --idle red 可翻成常红
@@ -1063,7 +1063,7 @@ def border(src_dir=None, keep_border=False):
               "状态=red" in r.stdout and "解析失败" in r.stdout, r.stdout.strip())
 
 
-        # 9) ★ 老用法 --tier B --duration 1 必须照旧能跑（minicode 端到端脚本指着它）
+        # 9) ★ 老用法 --tier B --duration 1 必须照旧能跑（窗口C 端到端脚本指着它）
         os.remove(passf)
         cmd9 = [sys.executable, "-X", "utf8", "-m", "agentctl.ctrl_border",
                 "--tier", "B", "--duration", "1"]
@@ -1182,7 +1182,7 @@ def border(src_dir=None, keep_border=False):
         def edge_looks_orange(data, order="bgr"):
             """边缘 24x24 里有没有接近 C 档主色的像素（窗F 后是 #1565C0）。
 
-            ★★ 2026-10-15 修（DSH 实读发现，**不是** GLM 复检提的）：
+            ★★ 2026-10-15 修（本地 agent 实读发现，**不是** GLM 复检提的）：
                **两条通道的字节序不一样，必须显式声明** ——
                  · GDI BitBlt（`_bitblt_edge()`）走 `GetDIBits` ⇒ 32bpp BI_RGB ⇒ 字节是 **BGRA**（B 在前）
                  · PIL `ImageGrab.grab().tobytes()` ⇒ 模式 'RGB' ⇒ 字节是 **RGB**（R 在前）
@@ -1242,7 +1242,7 @@ def border(src_dir=None, keep_border=False):
                 #   ★ 窗F 补（2026-10-18 12:5x）：这条分支现在**自己判就绪**。
                 #     改前它 sleep 完就把 ready 硬写成 True、就绪判定整个旁路 ——
                 #     空载机器上「0.2s 已经够上屏」就绿，注入**证明不了轮询在干活**
-                #     （DSH 12:49 实测：绿 67 / 红 0）。
+                #     （本地 agent 12:49 实测：绿 67 / 红 0）。
                 #     现在 sleep 完按**同一套三件**探一次：齐 ⇒ 绿；不齐 ⇒ **红**，
                 #     红字直接说「固定 sleep 之后三件不齐 ⇒ 这一版没在等」。
                 #     ⇒ sleep 取多短都会被抓，判别力不再取决于机器快慢。
@@ -1383,10 +1383,10 @@ def border(src_dir=None, keep_border=False):
             SKIP.append("12 / 12b / 12c（WDA 不进截图的三向对照）：本机 GDI BitBlt 与 "
                         "PIL ImageGrab 都抓不回真实画面（BitBlt 整片空白；PIL 报 "
                         "OSError: screen grab failed）⇒ 这台机器上验不了，"
-                        "需要 DSH 在有真实显示的会话里跑一次")
+                        "需要 本地 agent 在有真实显示的会话里跑一次")
             print("  [用例12] ⚠ 本机抓屏回**整片空白**（PIL 同样 screen grab failed）")
             print("           ⇒ 12 / 12b / 12c **本机验不了**：判绿是自欺，判红是"
-                  "把环境问题算到代码头上。已登记 SKIP，请 DSH 在有真实显示的会话跑一次。",
+                  "把环境问题算到代码头上。已登记 SKIP，请 本地 agent 在有真实显示的会话跑一次。",
                   flush=True)
         else:
             check("12 ★ 带 WDA ⇒ 抓屏**看不到**边框（前提 12b：同样条件下不带 WDA 抓得到）",
@@ -1398,7 +1398,7 @@ def border(src_dir=None, keep_border=False):
                 if results["不带WDA"][1] > 0:
                     check("12c ★ 第三条抓屏通道对照（PIL ImageGrab）：带WDA 看不到 / 不带WDA 看得到"
                           "｜⚠️ 本条**不是** perceive 走的路 —— 原文案把 PIL 说成『perceive 真正用的路』"
-                          "是**假账**，2026-10-15 GLM(ZCode) 复检指出、DSH 实读核对：perceive 用 **mss**"
+                          "是**假账**，2026-10-15 GLM(窗口A) 复检指出、本地 agent 实读核对：perceive 用 **mss**"
                           "（core.py:850-853 的 _look_only、:1443-1446 的坐标动作 verify_image），"
                           "而 mss 在 Windows 上就是 GDI BitBlt ⇒ 与 12/12b **同族**，那两条才覆盖 perceive 的路；"
                           "PIL 只是第三通道（若真要『perceive 同库对照』，应另加一条 import mss 的通道）",
@@ -1438,7 +1438,7 @@ def border(src_dir=None, keep_border=False):
                   label="用例13")
         procs.append(p)
         ready13, hs, _s13, _d13 = _wait_case_ready("13", log, log_off13, p)
-        # ★ 2026-10-15 修（GLM/ZCode 复检 刺2）：原来是 hs[:4] —— 那是**4 窗时代**的旧参数。
+        # ★ 2026-10-15 修（GLM/窗口A 复检 刺2）：原来是 hs[:4] —— 那是**4 窗时代**的旧参数。
         #   窗F 之后每屏 8 窗（主色 4 + 1px 反色描边 4），而 EnumWindows 的顺序**不保证** ⇒
         #   只测前 4 个完全可能"恰好全是主色窗"，**edge 窗的 WM_NCHITTEST 从未被断言**，
         #   判据看起来绿、其实一半没覆盖。这里改成全量，并在下面加一条覆盖性断言（13b）。
@@ -1462,7 +1462,7 @@ def border(src_dir=None, keep_border=False):
         check("13a ★ 边框窗口 WM_NCHITTEST 回 HTTRANSPARENT(-1) ⇒ 点击穿透",
               len(rts) > 0 and all(v == -1 for v in rts), rts)
         check("13b ★ 本条必须覆盖**全部**边框窗（一屏 = 主色 4 + 1px 反色描边 4 = 8 个），"
-              "不许只测一半 —— 只测 hs[:4] 时 edge 窗可能从未被断言（GLM/ZCode 复检 刺2）",
+              "不许只测一半 —— 只测 hs[:4] 时 edge 窗可能从未被断言（GLM/窗口A 复检 刺2）",
               len(rts) == len(hs) and len(hs) >= 8, "hs=%d rts=%d" % (len(hs), len(rts)))
         print("  （WindowFromPoint 类=%r —— 这一条**只如实记录**不判红："
               "WindowFromPoint 本身就不看 WS_EX_TRANSPARENT，真正的穿透靠上面的 "
@@ -1558,11 +1558,11 @@ def border(src_dir=None, keep_border=False):
             #   判绿是自欺（fg 恒 0，怎么比都是"没变"）。
             SKIP.append("14（不抢焦点）：本会话 GetForegroundWindow() 恒为 NULL"
                         "（没有前台窗口/无交互桌面）⇒ 这台机器上验不了，"
-                        "需要 DSH 在真实登录会话里跑一次")
+                        "需要 本地 agent 在真实登录会话里跑一次")
             print("           ⇒ 本会话 fg 恒为 0（压根没有前台窗口）⇒ 14 验不了，"
-                  "已登记 SKIP。请 DSH 在真实登录会话跑一次。", flush=True)
+                  "已登记 SKIP。请 本地 agent 在真实登录会话跑一次。", flush=True)
         else:
-            # ★ 2026-10-15 **三方判定**（GLM/ZCode 复检 ② 的建议，采纳入账）：
+            # ★ 2026-10-15 **三方判定**（GLM/窗口A 复检 ② 的建议，采纳入账）：
             #   本用例的产品语义是「**边框**不抢前台」⇒ 只判边框自己的罪，第三方噪声如实登记并带证据。
             #   ⛔ 原先的"检测到前台被夺 ⇒ 笼统记验不了"被否：它会在
             #      「边框真抢了焦点 + 恰好第三方也在抢」那个窗口里**放走真 regression**（把牙齿拔了）。
@@ -1989,9 +1989,9 @@ def snapshot_prod():
 
 # ═══════════════════════════════════════════════════════════════
 # ═══════════════════════════════════════════════════════════════
-# 窗J（2026-10-18）：**跨进程互斥** —— 并发跑会互相污染（DSH 已实测）
+# 窗J（2026-10-18）：**跨进程互斥** —— 并发跑会互相污染（本地 agent 已实测）
 # ═══════════════════════════════════════════════════════════════
-# 实测现场（DSH 15:4x 并发压力自查，两份 all 同时跑）：
+# 实测现场（本地 agent 15:4x 并发压力自查，两份 all 同时跑）：
 #   A: 红 1 —— 10c「第二个没产生第二组窗口（EnumWindows 仍是 16 个）」
 #   B: 红 1 —— 15o-4「stop_follow 之后屏幕上没有边框」，列出的 8 个 hwnd 是**对方**的窗口
 # 不是判据坏了，是两份实例**共用同一块屏幕 + 同一套单例互斥量**，
@@ -2082,7 +2082,7 @@ def w3_busy_report(other, started):
         "为什么必须挡住：border/wire 段要**真建边框窗**、并占用同一套单例互斥量",
         "（AgentCtlCtrlBorderFollow）。两份同时跑 = **共用整块屏幕 + 共用单例**，",
         "互相把对方的边框窗数进自己账上 ⇒ **结果不可信**。",
-        "实测现场（2026-10-18 15:4x DSH 并发压力自查）：",
+        "实测现场（2026-10-18 15:4x 本地 agent 并发压力自查）：",
         "  · 一份红 10c「第二个没产生第二组窗口（EnumWindows 仍是 16 个）」",
         "  · 另一份红 15o-4「stop_follow 之后屏幕上没有边框」，列出的 8 个 hwnd 是对方的窗",
         "那两条红**不是判据坏了**，是并发造成的假账。",

@@ -146,7 +146,7 @@ PARENT_OPEN_GRACE = 3.0
 PARENT_OPEN_WARN_EVERY = 5.0
 
 # ══════════ 配色 / 厚度 / 反色描边（窗F 2026-10-15 定板）══════════════════
-# ★ 这三个表是**契约级**的：用户 20:41 拍板、DSH 定死五个值。
+# ★ 这三个表是**契约级**的：用户 20:41 拍板、本地 agent 定死五个值。
 #   改任何一个都必须走单独立项 + 用户重新拍板，并同步
 #   contract/tools.json 的 conventions.edge_border_hint 与冻结判据
 #   tests\_2h_wF_配色冻结判据.py（那份判据会当场红，这是它存在的意义）。
@@ -1159,7 +1159,7 @@ class _BorderApp:
         self.color = color
         self.thickness, self.edge_color = want_t, want_edge
         unregister_border_classes()
-        # ★ 2026-10-15 修（GLM(ZCode) 复检 刺1 · 真泄漏）：
+        # ★ 2026-10-15 修（GLM(窗口A) 复检 刺1 · 真泄漏）：
         #   这里**不能**再 _register() —— _create_all() 内部（:808）本来就会 _register()，
         #   而 _register() 既建刷**又**注册窗口类。原来的顺序是
         #     :869 建一对新刷 A → 删旧刷 → :808 再建一对新刷 B 覆盖 self._brush/_brush_edge
@@ -1195,7 +1195,7 @@ class _BorderApp:
         while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
             user32.TranslateMessage(ctypes.byref(msg))
             user32.DispatchMessageW(ctypes.byref(msg))
-        # ★ 2026-10-15 修（GLM(ZCode) 复检 刺3 · 卫生）：退出前**注销窗口类**。
+        # ★ 2026-10-15 修（GLM(窗口A) 复检 刺3 · 卫生）：退出前**注销窗口类**。
         #   不注销会留"僵尸类"（类里的 lpfnWndProc 指向本进程地址，进程一死就是野指针；
         #   下个进程 RegisterClassW 会拿到 1410）。有自愈兜底（_register() 开头先 UnregisterClassW），
         #   所以非紧急；但既然已抽成函数，这里补一行就闭环。
@@ -1390,7 +1390,7 @@ class _BorderApp:
                 sig = (st, tuple(color) if color else None)
                 changed = sig != last
                 if st == ST_HIDDEN:
-                    # ★ DSH 追加的硬要求：隐藏态**必须**往日志写一行 ——
+                    # ★ 本地 agent 追加的硬要求：隐藏态**必须**往日志写一行 ——
                     #   否则「看不见边框」会被误判成「急停了」。
                     if changed:
                         _emit("[--follow] 无通行证 ⇒ 隐藏（%s）" % why)

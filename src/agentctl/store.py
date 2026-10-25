@@ -12,7 +12,7 @@ r"""store.py —— 时间线的【真相源】与哈希链
 用法：
     from agentctl.store import Store
     st = Store(r"...\timeline")
-    e = st.append("act", actor="DSH", tool="ctl_click", payload={"hwnd": 1234, "name": "保存"})
+    e = st.append("act", actor="本地 agent", tool="ctl_click", payload={"hwnd": 1234, "name": "保存"})
     st.verify()          # -> (ok, first_bad)
 """
 from __future__ import annotations

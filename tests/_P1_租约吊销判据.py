@@ -275,7 +275,7 @@ def main():
             if os.path.join(REPO, "src") not in sys.path:
                 sys.path.insert(0, os.path.join(REPO, "src"))
             from agentctl import core
-            r = core.t_lease({"action": "revoke", "actor": "DSH", "lease_id": "随便"})
+            r = core.t_lease({"action": "revoke", "actor": "本地 agent", "lease_id": "随便"})
             if r.get("ok") or int(r.get("code") or 0) == 0:
                 bad.append("t_lease --action revoke 居然成功了：%s" % r)
         except Exception as e:

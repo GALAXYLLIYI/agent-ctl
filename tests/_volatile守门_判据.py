@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-r"""判据 · volatile 守门（2026-10-17 22:4x，窗Z3 的规则表落地后由 DSH 建）。
+r"""判据 · volatile 守门（2026-10-17 22:4x，窗Z3 的规则表落地后由 本地 agent 建）。
 
 治的病（Z3 拿实地代码找到、我 grep 复核过）：
   ① `SpinnerControl` 同时在 volatile 豁免名单与可交互名单 ⇒ 既豁免又能交互，

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-r"""tests\_legacy台账对账.py —— CHK-A 落位二（窗U 设计，DSH 2026-10-17 补接线）
+r"""tests\_legacy台账对账.py —— CHK-A 落位二（窗U 设计，本地 agent 2026-10-17 补接线）
 
 第三方 Step5 收口门禁**必要条件 1**「产物重生一致」要求：
 **CHK-A 必须在 `gen_legacy` 与 `run_all` 两处都有真实运行输出。**
@@ -15,7 +15,7 @@ r"""tests\_legacy台账对账.py —— CHK-A 落位二（窗U 设计，DSH 2026
      ⇒ 抓「真源改过但产物没刷（过期）」。
 
 ★ **不是** T₀ == A₀：被 RULES 净化的 5 个文件（cdp/coord/option_locator/perceive/selftest）
-  两者合法不等，拿它们互比会把正常仓判红（DSH 2026-10-16 亲踩，pc 回了 5 条假警报）。
+  两者合法不等，拿它们互比会把正常仓判红（本地 agent 2026-10-16 亲踩，pc 回了 5 条假警报）。
 
 退出码：
   0 = 两条腿都对齐

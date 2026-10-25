@@ -48,7 +48,7 @@ CONTROL_CHAIN = ["perceive.py", "act.py", "gate.py", "auth_popup.py",
 
 # ★ 永久排除名单。分两类：
 #   ① 私人数据 —— 真实手机号/身份证，绝不能外流
-#   ② 不是 AgentCtl 的东西 —— 属于 DSH 项目或用户的具体业务
+#   ② 不是 AgentCtl 的东西 —— 属于 本地 agent 项目或用户的具体业务
 #   第②类更隐蔽：它们功能上没坏，放进开源仓库也不会报错，
 #   但会把**另一个项目**的路径、策略、以及用户的真实业务场景（个税师实操、
 #   微信考试页）一起公开。所以按「不属于本项目」排除，不等闸门报错。
@@ -65,10 +65,10 @@ PERMANENT_DROP = {
     #   与本脚本下方 PERMANENT_DROP 第②类的立场完全一致 —— 不是修不好，
     #   是根本不属于本项目。改为从 tools/whitelist_template.json 生成空白模板。
     "whitelist.json": "使用者真实窗口白名单（私人数据），改用空白模板",
-    # ② DSH 项目的东西（路径全指向 <另一项目> / <工作手册>）
-    "★远程命脉保护清单.md": "DSH 的远程保护清单，与本项目无关",
-    "guardian_policy.json": "DSH 的 guardian 策略配置",
-    "handover_check.py": "DSH 的交接检查",
+    # ② 本地 agent 项目的东西（路径全指向 <另一项目> / <工作手册>）
+    "★远程命脉保护清单.md": "本地 agent 的远程保护清单，与本项目无关",
+    "guardian_policy.json": "本地 agent 的 guardian 策略配置",
+    "handover_check.py": "本地 agent 的交接检查",
     "monitor_resources.py": "输出写死到 agent-manual/_监控",
     "up.bat": "本机启动脚本，写死了本机 python 路径",
     "up.py": "本机启动脚本，急停路径写死到桌面",
@@ -85,7 +85,7 @@ PERMANENT_DROP = {
     "local_model.py": "本机本地模型接线",
     # ④ 旧契约与旧文档：主仓库已有 contract/tools.json 与 README.md
     "agent_tools.json": "旧工具契约，已被 contract/tools.json 取代",
-    "README.md": "DSH 那份项目说明（含本机路径与真实经历），本项目另有 README",
+    "README.md": "本地 agent 那份项目说明（含本机路径与真实经历），本项目另有 README",
 }
 
 

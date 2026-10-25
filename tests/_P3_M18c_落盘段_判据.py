@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 r"""_P3_M18c_落盘段_判据.py —— M18-c 刀3b（core 侧落盘段）的审计完整性守卫
 
-覆盖（派单 docs\派单_M18c_ZCode_刀3b_落盘段_20221023.md §三）：
+覆盖（派单 docs\派单_M18c_窗口A_刀3b_落盘段_20221023.md §三）：
   A. 证据文件一张不少且能打开（非复用 3 张 / 复用-变更 1 张 crop / 复用-没变 1 张 after）
   B. 事件一条不少 + 哈希链不断（ctl_verify）
   C. 临时目录/证据目录不泄漏：连续 50 次落盘后目录数 == ACT_DIFF_KEEP，无 .tmp 残留
@@ -118,12 +118,12 @@ def main():
     # ── B/D 事件同步落盘 + 一条不少 + 哈希链 ────────────────────────
     n0 = sum(1 for _ in core.store().query_events(limit=10**9)) if hasattr(
         core.store(), "query_events") else None
-    seq = core._ev("M18c判据", actor="ZCode", tool="判据", payload={"i": 1})
+    seq = core._ev("M18c判据", actor="窗口A", tool="判据", payload={"i": 1})
     line = newest_jsonl_line(SANDBOX / "timeline")
     sync_ok = (line is not None and line.get("kind") == "M18c判据")
     check("D1_审计同步落盘后才回执", sync_ok,
           "jsonl尾=%s" % (str(line.get("kind"))[:30] if line else "无"))
-    seq2 = core._ev("M18c判据", actor="ZCode", tool="判据", payload={"i": 2})
+    seq2 = core._ev("M18c判据", actor="窗口A", tool="判据", payload={"i": 2})
     line2 = newest_jsonl_line(SANDBOX / "timeline")
     check("D2_事件一条不少", bool(seq) and bool(seq2) and line2 is not None
           and line2.get("seq", 0) >= line.get("seq", 0) if line and line2 else False,
@@ -205,7 +205,7 @@ def mode_timing(n=20):
         (base / ("fill%d" % i)).mkdir(parents=True, exist_ok=True)
     out["listdir_保留扫描_KEEP满"] = timed(lambda: os.listdir(str(base)), n)
     out["口径"] = ("进程内组件级（_act_diff_store 含 PNG 编码+写盘+保留扫描；"
-                   "不含抓帧/diff/事件写入——事件写入已由 M18-b 归 OpenCode）")
+                   "不含抓帧/diff/事件写入——事件写入已由 M18-b 归 窗口B）")
     (RAW / "M18c_timing.json").write_text(json.dumps(out, ensure_ascii=False, indent=1),
                                           encoding="utf-8")
     print(json.dumps(out, ensure_ascii=False, indent=1))
