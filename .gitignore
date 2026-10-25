@@ -219,3 +219,5 @@ desktop.ini
 !tools/threat_probe.py
 # ⑪ tools/verify_evidence.py —— 证据离线复核器（结构层复算；像素层标 recomputable:false）
 !tools/verify_evidence.py
+# ⑫ tools/ab_target_winforms.ps1 —— UIA 有名字的 A/B 靶场（WinForms）
+!tools/ab_target_winforms.ps1
