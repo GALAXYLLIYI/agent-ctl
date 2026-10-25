@@ -37,7 +37,7 @@
 ### A. 凭据路（有 Gitee 账号、且有本库权限）
 
 ```powershell
-git clone https://gitee.com/GALAXYLIYI/agent-ctl.git
+git clone https://gitee.com/GALAXYLIYI/computer-use-gate.git
 cd agent-ctl
 pwsh -File .\install.ps1
 ```
@@ -61,13 +61,13 @@ pwsh -File .\install.ps1 -Zip .\agentctl.zip
 PowerShell 里粘这一行，回车：
 
 ```powershell
-irm https://gitee.com/GALAXYLIYI/agent-ctl/raw/main/install.ps1 | iex
+irm https://gitee.com/GALAXYLIYI/computer-use-gate/raw/main/install.ps1 | iex
 ```
 
 **不想盲跑**（推荐第一次这么做，能先看清脚本再执行）：
 
 ```powershell
-irm https://gitee.com/GALAXYLIYI/agent-ctl/raw/main/install.ps1 -OutFile install.ps1
+irm https://gitee.com/GALAXYLIYI/computer-use-gate/raw/main/install.ps1 -OutFile install.ps1
 notepad install.ps1      # 看一眼
 .\install.ps1
 ```

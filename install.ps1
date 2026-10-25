@@ -36,10 +36,10 @@
 
 .EXAMPLE
     一行安装：
-      irm https://gitee.com/GALAXYLIYI/agent-ctl/raw/main/install.ps1 | iex
+      irm https://gitee.com/GALAXYLIYI/computer-use-gate/raw/main/install.ps1 | iex
 
     两步安装（更稳，能先看一眼脚本再跑）：
-      irm https://gitee.com/GALAXYLIYI/agent-ctl/raw/main/install.ps1 -OutFile install.ps1
+      irm https://gitee.com/GALAXYLIYI/computer-use-gate/raw/main/install.ps1 -OutFile install.ps1
       .\install.ps1
 #>
 

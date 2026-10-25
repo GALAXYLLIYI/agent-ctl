@@ -75,22 +75,22 @@ Copyright (c) 2026 GALAXYLLIYI
 | 仓 | 地址 | 状态 | 角色 |
 |---|---|---|---|
 | **GitHub** | https://github.com/GALAXYLLIYI/computer-use-gate | **公开** | **主仓**：开发、Issue、PR、Release 以这里为准 |
-| **Gitee** | https://gitee.com/GALAXYLIYI/agent-ctl | **公开** | **镜像**：每次推送同步，国内可直连安装 |
+| **Gitee** | https://gitee.com/GALAXYLIYI/computer-use-gate | **公开** | **镜像**：每次推送同步，国内可直连安装 |
 
 > 两个仓都已公开；下载安装包请到 **Release**（附 `agentctl.zip.sha256`）。
 >
-> GitHub 主仓已更名为 **computer-use-gate**（旧链接自动重定向）；Gitee 镜像仍叫 **agent-ctl**（链接不变）。
+> 主仓与镜像现同名 **computer-use-gate**（旧链接自动重定向）。
 
 公开仓：
 
 ```powershell
-git clone https://gitee.com/GALAXYLIYI/agent-ctl ; cd agent-ctl ; pwsh -File .\install.ps1
+git clone https://gitee.com/GALAXYLIYI/computer-use-gate ; cd agent-ctl ; pwsh -File .\install.ps1
 ```
 
 一行装（先看清脚本再跑更稳）：
 
 ```powershell
-irm https://gitee.com/GALAXYLIYI/agent-ctl/raw/main/install.ps1 -OutFile install.ps1
+irm https://gitee.com/GALAXYLIYI/computer-use-gate/raw/main/install.ps1 -OutFile install.ps1
 notepad install.ps1      # 看一眼
 .\install.ps1
 ```
