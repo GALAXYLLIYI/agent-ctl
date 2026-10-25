@@ -31,20 +31,39 @@
       "sha256": "b7f47c82edd5c9cbe5ae6e01f29bb308859aaccdb890d3509424e7850bdcf1a7"
     },
     {
-      "name": "T3_unobservable_core",
-      "desc": "T3：code=5 从 rejected_env 拆成 unobservable（只贴标签，计数口径不变）",
-      "evidence": "tests/_P3_看不清不计刹车_判据.py（正常 rc=0 / --inject rc=1）",
+      "name": "core_T3_fill",
+      "desc": "T3 unobservable 拆分 + ctl_fill(eid) 修复",
+      "evidence": "T3 判据绿/注入红；空记事本 fill eid 实测 code=0 读回一致",
       "lines": {
+        "\"② 或改用 --xy（ctl_find 返回的 center 原样传）。\" % how)": 1,
+        "\"再把它返回的 eid（配 from_capture）或 center 传给本工具。\")": 1,
+        "\"要点坐标就只留 --xy。\")": 1,
         "FAILURE_CLASS_UNOBSERVABLE = \"unobservable\"": 1,
         "_REJECTED_ENV_CODES = frozenset((3, 4, 7, 9, 10, 11, 12, 13))": 1,
         "_UNOBSERVABLE_CODES = frozenset((5,))": 1,
+        "cap = args.get(\"from_capture\") or args.get(\"capture_id\")": 1,
+        "eid = args.get(\"eid\")": 1,
+        "elif name:": 1,
+        "else:": 1,
+        "feat, _entry, how = _eid_lookup(cap, eid)": 1,
         "if code in _UNOBSERVABLE_CODES:": 1,
-        "return FAILURE_CLASS_UNOBSERVABLE": 1
+        "if eid and xy:": 1,
+        "if eid:": 1,
+        "if not feat or not feat.get(\"center\"):": 1,
+        "name = args.get(\"name\")": 1,
+        "return FAILURE_CLASS_UNOBSERVABLE": 1,
+        "return env(code=gate.CODE_NO_CTRL,": 3,
+        "warning=\"--eid 与 --xy 只能二选一：要点元素就只留 --eid + --from_capture；\"": 1,
+        "warning=\"fill 拿不到 eid 的坐标（%s）：eid 是**那次快照的取件钥匙**，\"": 1,
+        "warning=\"fill 的 --name 路径未开放：请先 ctl_find --name <名字>，\"": 1,
+        "x, y = _xy(xy or [0, 0])": 1,
+        "x, y = feat[\"center\"][0], feat[\"center\"][1]": 1,
+        "xy = args.get(\"xy\")": 1
       },
-      "sha256": "3fc85e6f2c0abe49eb91c7a41da18edd971a4df974bdb9fa33344771827dcb41"
+      "sha256": "c7cc89b591465a086c63b18aa8e2d46b6e91b7e4af43d09e9eb7d773e91d5c4c"
     }
   ],
-  "ledger_sha256": "46ae0b0cddfa5b0b32121a83ba3944d7553d700a095f89b3d9c20bb5ffc73fd1",
+  "ledger_sha256": "96002f0c3dbcd687cb75abcbb5cc31a1d5416a4865b28bcf8bf2811923875a93",
   "files": {
     "act.py": {
       "target": "legacy_tools/_src/act.py",
@@ -65,7 +84,7 @@
         "note": "2026-10-25 T3：基线仍是 W15 后版本；本刀只追加段与旧侧，不换基线"
       },
       "segments": [
-        "T3_unobservable_core"
+        "core_T3_fill"
       ],
       "desc": ""
     },
@@ -132,7 +151,8 @@
     "legacy_tools/_src/gate.py": {},
     "legacy_tools/_src/auth_popup.py": {},
     "core.py": {
-      "_REJECTED_ENV_CODES = frozenset((3, 4, 5, 7, 9, 10, 11, 12, 13))": 1
+      "_REJECTED_ENV_CODES = frozenset((3, 4, 5, 7, 9, 10, 11, 12, 13))": 1,
+      "x, y = _xy(args.get(\"xy\") or [0, 0])": 1
     }
   }
 }

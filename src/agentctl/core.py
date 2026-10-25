@@ -4706,7 +4706,31 @@ def t_type(args: dict) -> dict:
 
 def t_fill(args: dict) -> dict:
     hwnd = int(args.get("hwnd") or 0)
-    x, y = _xy(args.get("xy") or [0, 0])
+    eid = args.get("eid")
+    name = args.get("name")
+    cap = args.get("from_capture") or args.get("capture_id")
+    xy = args.get("xy")
+    # ★ 2026-10-25 修（缺陷：ctl_fill 收 eid 却只读 xy ⇒ 默认 (0,0) 静默点左上角）：
+    #   三种定位口按 ctl_click 的口径二选一；**定位不到就明确报错**，绝不用 (0,0) 兜底。
+    if eid and xy:
+        return env(code=gate.CODE_NO_CTRL,
+                   warning="--eid 与 --xy 只能二选一：要点元素就只留 --eid + --from_capture；"
+                           "要点坐标就只留 --xy。")
+    if eid:
+        feat, _entry, how = _eid_lookup(cap, eid)
+        if not feat or not feat.get("center"):
+            return env(code=gate.CODE_NO_CTRL,
+                       warning="fill 拿不到 eid 的坐标（%s）：eid 是**那次快照的取件钥匙**，"
+                               "必须带 --from_capture，且该快照要有元素明细；"
+                               "① 重新 ctl_find 拿新的 eid + capture_id；"
+                               "② 或改用 --xy（ctl_find 返回的 center 原样传）。" % how)
+        x, y = feat["center"][0], feat["center"][1]
+    elif name:
+        return env(code=gate.CODE_NO_CTRL,
+                   warning="fill 的 --name 路径未开放：请先 ctl_find --name <名字>，"
+                           "再把它返回的 eid（配 from_capture）或 center 传给本工具。")
+    else:
+        x, y = _xy(xy or [0, 0])
     argv = ["fill", "--hwnd", str(hwnd),
             "--xy", f"{x},{y}",
             "--text", str(args.get("text") or "")]

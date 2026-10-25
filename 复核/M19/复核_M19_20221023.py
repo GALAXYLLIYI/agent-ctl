@@ -97,7 +97,7 @@ INVARIANTS = {
     # ★ 2026-10-24 N5-W11：加长观测预算 300→900（可配 AGENTCTL_ACT_EXT_OBSERVE_MS）是**合法变更**
     #   ⇒ 863B1509… → F8669E4C…（只改这一个常量与注释；三态语义/HYSTERESIS/尺寸守卫一字未动）
     # ★ W15（2026-10-24）：措辞口径统一后 core.py 变更属合法变更 ⇒ F8669E4C… → 00F5422A…
-    "src/agentctl/core.py": "AF7AF011C41CE9F498A2CD0B089B12DF",
+    "src/agentctl/core.py": "55FEDB3BC77E396D483906C31BB921D0",
     # ★ W12（2026-10-24）：动作面刹车策略拆分 fail/same_target 两类计数 ⇒ 策略 json 合法变更
     #   73F5F0DD… → BB104E5D…
     "src/agentctl/action_guard_policy.json": "34E470F8D97474C132926280CF4D173E",
