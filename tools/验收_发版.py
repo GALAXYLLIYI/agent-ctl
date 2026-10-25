@@ -248,6 +248,130 @@ ITEMS = [
              "pack_dist 用法：python -X utf8 tools\\pack_dist.py --out <zip>"),
         ],
     },
+    # ══ 2026-10-25（工单 W3）追加：run_all.py 第 54–63 条（2026-10-25 六包）══
+    # ★ 本段为**纯追加**（派单 W3：只追加 ITEMS 行，已有行一个字不改）。
+    #   期望码照各判据 docstring / run_all.py 登记写明的口径，不自创跑法。
+    {
+        "id": "threat",
+        "名称": "威胁模型判据（run_all 第 54 条「威胁」· 对抗探针骨架）",
+        "验什么": "T01–T12 全登记、id 唯一、real 白名单与 needs_desktop 一致；"
+                  "dry-run 零副作用（不 import pyautogui / 不发输入 / 不写仓内文件）；"
+                  "real 不带 --i-understand ⇒ rc=2",
+        "跑法": [
+            ("正跑", "tests/_P3_威胁模型_判据.py", [], {}, 0,
+             "判据 docstring『跑法』：正跑 ⇒ exit 0（run_all.py 第 54 条登记同）"),
+            ("注入自证 --inject", "tests/_P3_威胁模型_判据.py", ["--inject"], {}, 1,
+             "判据 docstring『跑法』：--inject 必须红 ⇒ exit 1（run_all.py 第 54 条登记同）"),
+        ],
+    },
+    {
+        "id": "audit",
+        "名称": "审计导出判据（run_all 第 55 条「审计」）",
+        "验什么": "空输入不崩且含「无记录」；三态/四类计数逐格正确；Top-N 与时间范围正确；"
+                  "markdown 含「无法复算」小节",
+        "跑法": [
+            ("正跑", "tests/_P3_审计导出_判据.py", [], {}, 0,
+             "判据 docstring：退出码 0 绿 / 1 红（run_all.py 第 55 条：正跑 0、--inject 1）"),
+            ("注入自证 --inject", "tests/_P3_审计导出_判据.py", ["--inject"], {}, 1,
+             "run_all.py 第 55 条登记：--inject 1（注入必红）"),
+        ],
+    },
+    {
+        "id": "vision",
+        "名称": "视觉兜底接口判据（run_all 第 56 条「视觉」）",
+        "验什么": "默认关闭；异常/超时/坏候选一律 unobservable；"
+                  "无网络与模型依赖（断言没有 requests/urllib/openai/ollama）",
+        "跑法": [
+            ("正跑", "tests/_P3_vision_assist_判据.py", [], {}, 0,
+             "判据 docstring『跑法』：正跑（期望 exit=0）"),
+            ("注入自证 --inject", "tests/_P3_vision_assist_判据.py", ["--inject"], {}, 1,
+             "判据 docstring『跑法』：注入自证（期望 exit=1）"),
+        ],
+    },
+    {
+        "id": "skills",
+        "名称": "技能库判据（run_all 第 57 条「技能」）",
+        "验什么": "定位失败即停、expect 不满足不判成功、guard 拒绝即停、validate 缺字段报错",
+        "跑法": [
+            ("正跑", "tests/_P3_技能库_判据.py", [], {}, 0,
+             "判据 docstring『跑法』：正跑（期望 exit=0）"),
+            ("注入自证 --inject", "tests/_P3_技能库_判据.py", ["--inject"], {}, 1,
+             "判据 docstring『跑法』：注入自证（期望 exit=1）"),
+        ],
+    },
+    {
+        "id": "timing",
+        "名称": "耗时归因判据（run_all 第 58 条「归因」）",
+        "验什么": "span 嵌套累加、p50/p95 可手算核对、n<20 必须打印「不足以归因」、并发不丢计数",
+        "跑法": [
+            ("正跑", "tests/_P3_耗时归因_判据.py", [], {}, 0,
+             "判据 docstring『跑法』：正跑（期望 rc=0）"),
+            ("注入自证 --inject", "tests/_P3_耗时归因_判据.py", ["--inject"], {}, 1,
+             "判据 docstring『跑法』：注入自证（期望 rc=1，必须红）"),
+        ],
+    },
+    {
+        "id": "evidence",
+        "名称": "证据复核判据（run_all 第 59 条「证据复核」）",
+        "验什么": "合法记录 ⇒ verifier rc=0、矛盾记录 ⇒ rc=1、不可复算 ⇒ rc=2 "
+                  "且报告含「不可独立复算」；注入（把矛盾记录期望成 0）必红",
+        "跑法": [
+            ("正跑", "tests/_P3_证据复核_判据.py", [], {}, 0,
+             "run_all.py 第 59 条登记：正跑 0（判据 docstring『跑法』：[--inject]）"),
+            ("注入自证 --inject", "tests/_P3_证据复核_判据.py", ["--inject"], {}, 1,
+             "run_all.py 第 59 条登记：--inject 1（注入必红；docstring：判据必须红）"),
+        ],
+    },
+    {
+        "id": "skillargs",
+        "名称": "技能 args 扩展判据（run_all 第 60 条「技能args」）",
+        "验什么": "args 非 dict 必须报错并点名；回放时 args 真传给 executor；"
+                  "老签名 executor（2 参数 perform）仍兼容",
+        "跑法": [
+            ("正跑", "tests/_P3_技能args_判据.py", [], {}, 0,
+             "run_all.py 第 60 条登记：正跑 0（判据 docstring『跑法』：[--inject]）"),
+            ("注入自证 --inject", "tests/_P3_技能args_判据.py", ["--inject"], {}, 1,
+             "run_all.py 第 60 条登记：--inject 1（注入必红）"),
+        ],
+    },
+    {
+        "id": "actconc",
+        "名称": "动作面并发计数判据（run_all 第 61 条「并发」）",
+        "验什么": "8 线程 × 250 次失败动作后 fail 计数必须精确 = 2000（丢更新即红）；"
+                  "成功一次清零 —— 钉 ThreadingHTTPServer 下 observe 的读改写竞态（_OBS_LOCK）",
+        "跑法": [
+            ("正跑", "tests/_P3_动作面并发_判据.py", [], {}, 0,
+             "run_all.py 第 61 条登记：正跑 0（判据 docstring『跑法』：[--inject]）"),
+            ("注入自证 --inject", "tests/_P3_动作面并发_判据.py", ["--inject"], {}, 1,
+             "run_all.py 第 61 条登记：--inject 1（注入必红）"),
+        ],
+    },
+    {
+        "id": "stress",
+        "名称": "并发压测判据（run_all 第 62 条「并发压测」· 工单 W1）",
+        "验什么": "40 进程并发签发、8 线程并发租约（同 actor 8/8、异 actor 恰 1）、"
+                  "eid 旁表并发写、8 线程 brake set/release —— 四场景达标"
+                  "（brake 操作级失败计数是数据项不是门槛，见 docs\\并发压测报告_20261025.md §场景 D）",
+        "跑法": [
+            ("正跑", "tests/_P3_并发压测_判据.py", [], {}, 0,
+             "判据 docstring『跑法』：正跑 ⇒ exit 0（run_all.py 第 62 条登记同）"),
+            ("注入自证 --inject", "tests/_P3_并发压测_判据.py", ["--inject"], {}, 1,
+             "判据 docstring『跑法』：--inject 必须红 ⇒ exit 1（run_all.py 第 62 条登记同）"),
+        ],
+    },
+    {
+        "id": "primitives",
+        "名称": "并发原语判据（run_all 第 63 条「并发原语」）",
+        "验什么": "sync.LockedDict / SerialByActor / ensure_single_writer —— "
+                  "update_fn 8 线程各 +1×1000 精确 8000；同 actor 串行、异 actor 并行；"
+                  "装饰器保留元数据",
+        "跑法": [
+            ("正跑", "tests/_P3_并发原语_判据.py", [], {}, 0,
+             "判据 docstring：退出码 0 绿 / 1 红（run_all.py 第 63 条：正跑 0、--inject 1）"),
+            ("注入自证 --inject", "tests/_P3_并发原语_判据.py", ["--inject"], {}, 1,
+             "run_all.py 第 63 条登记：--inject 1（注入必红）"),
+        ],
+    },
 ]
 
 
