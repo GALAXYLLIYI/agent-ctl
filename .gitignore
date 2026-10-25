@@ -215,3 +215,5 @@ desktop.ini
 !tools/ab_probe.py
 # ⑨ tools/ab_target.py —— A/B 靶场（纯 tkinter 8 控件 + --selftest，供无鼠标验证）
 !tools/ab_target.py
+# ⑩ tools/threat_probe.py —— 对抗探针骨架（dry-run 零副作用；real 需 --i-understand 且仅白名单）
+!tools/threat_probe.py
