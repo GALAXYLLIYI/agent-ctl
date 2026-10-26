@@ -233,3 +233,9 @@ desktop.ini
 !tools/env_probe.py
 # ⑭ tools/slim_map.py —— core.py 瘦身依赖图（只读静态分析）
 !tools/slim_map.py
+# ⑮ 排版管线（2026-10-26）：生成器与样式模板必须进仓
+!tools/build_docx.py
+!tools/render_check.py
+!tools/make_reference.py
+!tools/mermaid.lua
+!tools/puppeteer-edge.json
