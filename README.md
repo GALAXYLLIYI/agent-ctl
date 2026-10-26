@@ -316,6 +316,9 @@ pwsh -File tools\dev_env.ps1
 
 见 [`CONTRIBUTING.md`](CONTRIBUTING.md)，行为准则见 [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md)。
 
+**第一次来？照着 [`docs\贡献者上手指南.md`](docs\贡献者上手指南.md) 走** ——
+接受邀请 → 配环境 → 认证 → 切分支 → 提 PR，一步一步带命令和常见坑。
+
 一句话版本：**0.x 阶段 API 可能变**，请以 `docs\` 里的实测记录为准；PR 要附**判据退出码 + 复现步骤**。
 
 ## 致谢

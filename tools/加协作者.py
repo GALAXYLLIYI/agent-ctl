@@ -96,15 +96,54 @@ def _is_owner(login: str) -> bool:
 
 
 def verify() -> str:
+    """列出 push 及以上的成员（★ 注意：这个列表**不含 read 成员**）。
+
+    ★ 别拿它当「对方有没有接受邀请」的判据 —— read 成员不在这里，
+      会被误判成「没进来」。权威口径是 permission 端点，见 permission_of()。
+    """
     rc, out, err = gh(["api", f"repos/{REPO}/collaborators",
                        "--jq", '.[] | "\\(.login)  admin=\\(.permissions.admin)  maintain=\\(.permissions.maintain)  push=\\(.permissions.push)"'])
     return out if rc == 0 else f"（回读失败：{err}）"
+
+
+def permission_of(login: str) -> str:
+    """★ 权威口径：查该账号在本仓的**实际**权限。
+
+    为什么必须用它：`collaborators` 列表只列 push 及以上，
+    一个只拿到 read 的账号根本不在里面 ⇒ 「列表里没有他」≠「他没进来」。
+    """
+    # owner 自己是 admin，但 permission 端点对 owner 也可能查不到 ⇒ 先判 owner。
+    if _is_owner(login):
+        return "admin  role=admin（仓库所有者）"
+    rc, out, err = gh(["api", f"repos/{REPO}/collaborators/{login}/permission",
+                       "--jq", '"\\(.permission)  role=\\(.role_name)"'])
+    if rc != 0:
+        return "查不到（多半是完全没进仓）"
+    return out
+
+
+def report(login: str) -> str:
+    """一个账号的完整状态行：实际权限 + 邀请是否还挂着。"""
+    perm = permission_of(login)
+    rc, out, err = gh(["api", f"repos/{REPO}/invitations",
+                        "--jq", f'.[] | select(.invitee.login == "{login}") | "邀请 id=\\(.id) 权限=\\(.permissions) 过期=\\(.expired)"'])
+    inv = out if (rc == 0 and out) else "（没有待接受邀请）"
+    verdict = ""
+    if perm.startswith("push") or perm.startswith("maintain") or perm.startswith("admin"):
+        verdict = "✅ 已生效"
+    elif perm.startswith("read"):
+        verdict = "⚠ 只拿到 read —— 邀请没被接受，让对方用正确账号去 /invitations 接受"
+    else:
+        verdict = "❌ 没进仓"
+    return f"{perm}\n     邀请：{inv}\n     ⇒ {verdict}"
 
 
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("usernames", nargs="*", help="GitHub 用户名（可多个）")
     ap.add_argument("--file", help="从文件读账号名（一行一个，# 开头为注释）")
+    ap.add_argument("--check", action="store_true",
+                    help="只查状态，不发邀请：打印每个账号的【实际】权限 + 邀请是否还挂着")
     args = ap.parse_args()
 
     names = list(args.usernames)
@@ -118,6 +157,19 @@ def main() -> int:
         except OSError as e:
             print(f"读文件失败：{e}")
             return 1
+
+    if args.check:
+        # ★ 只查模式：用权威的 permission 端点，不发任何邀请。
+        if not names:
+            print("用法：python -X utf8 tools\\加协作者.py --check <用户名> [<用户名> ...]")
+            return 1
+        print(f"仓库：{REPO}\n")
+        for n in names:
+            print(f"● {n}")
+            print(f"     {report(n)}\n")
+        print("—— push 及以上的成员（★ 不含 read 成员，不是完整名单）——")
+        print(verify())
+        return 0
 
     if not names:
         print("没有指定账号名。逐个输入，空行结束：")
