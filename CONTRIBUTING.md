@@ -1,7 +1,10 @@
 # 贡献指南（CONTRIBUTING.md）
 
 > 感谢你愿意花时间看这个仓。
-> 先说一句实话：**这是个 0.x 的个人项目**，维护者只有一个人，评审可能很慢。发现问题请直接开 issue，别等。
+> 先说一句实话：**这是个 0.x 的个人项目**，维护者人数很少，评审可能很慢。发现问题请直接开 issue，别等。
+>
+> 本仓已开放 **GitHub / Gitee 协作者权限** —— 已有账号的协作者可以直接切分支、提 PR。
+> 如果你还没有账号，直接提 PR 也一样欢迎。贡献者名单见 [`CONTRIBUTORS.md`](CONTRIBUTORS.md)。
 
 ---
 
@@ -146,8 +149,9 @@ python -X utf8 tools\verify_dist.py
 
 ## 三、分支与提交约定
 
-- **主分支是 `main`**。从 `main` 切特性分支：`feat/<简述>` / `fix/<简述>` / `docs/<简述>`。
-- **不要直接往 `main` 推**。维护者会自己收口。
+- **主分支是 `main`**。从 `main`切特性分支：`feat/<简述>` / `fix/<简述>` / `docs/<简述>`。
+- **不要直接往 `main` 推** —— `main` 已开保护：**必须走 PR**，且要 **1 个批准 + CI 闸门绿**才能合。
+  协作者也一样：自己开的 PR 别人批准，不能自批自合。
 - **提交信息用中文**，沿用仓里的既有格式：
 
   ```
@@ -210,6 +214,6 @@ python -X utf8 tools\verify_dist.py
 ## 七、其它
 
 - **安全问题**不要开公开 issue —— 见 [`SECURITY.md`](SECURITY.md)。
-- **本项目不提供 SLA**，维护者只有一个人，回复可能很慢。
+- **本项目不提供 SLA**，维护者人数很少，回复可能很慢。
 - 本项目采用 **Apache License 2.0**（见 [`LICENSE`](LICENSE)）。
   第三方组件的许可与来源见 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)。
