@@ -23,6 +23,17 @@
 
 </div>
 
+> **TL;DR (English)** — **Computer Use for Windows**, running on your own desktop: your AI agent can see the screen, click, type, switch windows and drive web pages.
+> - **No GPU needed**: controls are read via Windows UI Automation, built-in Windows OCR and browser CDP, not a local vision model.
+> - **Works with any agent**: Claude Code, Codex, Gemini CLI, Cursor, Cherry Studio or your own scripts, via **MCP (stdio / HTTP)**, **HTTP API** or **CLI**.
+> - **Default-deny**: nothing moves until **you** click "Allow" on an on-screen prompt. A pass lasts 30 minutes or 60 actions.
+> - **Evidence for every action**: before/after screenshots, a hash-chained tamper-evident log, and exportable replay videos.
+> - **One-key stop**: `Ctrl+Alt+Home` halts everything immediately.
+>
+> Experimental 0.x: no SLA, APIs may change. Needs **Windows 10/11 x64 + Python 3.12 + git**. Quick start: [5 分钟上手](#5-分钟上手); scope and limits: [先说清楚适用范围](#先说清楚适用范围).
+>
+> *Keywords: computer-use agent · MCP server · Windows automation · desktop action gate · agent safety · audit trail.*
+
 ---
 
 ## 一句话说明
