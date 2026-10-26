@@ -62,11 +62,31 @@ def invite(login: str) -> tuple[bool, str]:
         return True, "已经是协作者，无需邀请"
     if "validation failed" in low:
         # ★ 这条消息有多种成因，不能一律说成「仓库限制」——
-        #   最常见的一种是**目标就是仓库所有者本人**（GitHub 不允许邀请 owner）。
+        #   ① 目标就是仓库所有者本人（GitHub 不允许邀请 owner）；
+        #   ② **目标不属于任何组织/企业 ⇒ GitHub 不允许给 maintain**（实测会报
+        #      "Cannot assign <name> permission of maintain"）——
+        #      这是最容易被误判成「权限配置有问题」的一种，实际是 GitHub 的
+        #      账号类型限制：maintain/triage 只能给组织成员，个人小号最高 push。
         if _is_owner(login):
             return False, "这个账号就是仓库所有者（admin），GitHub 不允许邀请自己 —— 无需操作"
+        if "permission of maintain" in low or "permission of triage" in low:
+            return False, ("GitHub 不允许给该账号 maintain/triage 权限"
+                           "（个人账号不属于任何组织/企业时，GitHub 只允许到 push）"
+                           " ⇒ 请改用 push 权限重发")
         return False, "GitHub 拒绝：目标不能被邀请（可能是仓库所有者本人，或仓库被限制为仅限已定成员）"
     return False, f"发邀请失败：{err.splitlines()[0] if err else out}"
+
+
+def _fallback_push(login: str) -> tuple[bool, str]:
+    """maintain 被拒时的兜底：退到 push 再试一次。"""
+    rc, out, err = gh(["api", "-X", "PUT",
+                       f"repos/{REPO}/collaborators/{login}",
+                       "-f", "permission=push"])
+    if rc == 0:
+        return True, "已用 **push** 权限发出邀请（maintain 被 GitHub 拒绝，已自动降级）"
+    if "already" in err.lower():
+        return True, "已经是协作者，无需邀请"
+    return False, f"push 降级也失败：{err.splitlines()[0] if err else out}"
 
 
 def _is_owner(login: str) -> bool:
@@ -133,12 +153,25 @@ def main() -> int:
             failed.append(n)
             continue
         ok, msg = invite(n)
+        if not ok and "maintain/triage" in msg:
+            # ★ 自动降级重试：GitHub 只允许给「组织成员」maintain/triage，
+            #   个人账号最高 push。直接改用 push 再发一次，别把事情停在这。
+            ok2, msg2 = _fallback_push(n)
+            print(f"[{'已发' if ok2 else '失败'}] {n} —— {info}")
+            print(f"         maintain 被拒 → 降级重试：{msg2}")
+            if not ok2:
+                failed.append(n)
+            continue
         print(f"[{'已发' if ok else '失败'}] {n} —— {info} → {msg}")
         if not ok:
             failed.append(n)
 
     print("\n—— 当前协作者名单 ——")
     print(verify())
+    print("\n—— 待接受邀请 ——")
+    rc, out, err = gh(["api", f"repos/{REPO}/invitations",
+                        "--jq", '.[] | "\\(.invitee.login)  权限=\\(.permissions)  id=\\(.id)  (7 天内有效)"'])
+    print(out if rc == 0 and out else "（无待接受邀请 —— 对方若已接受，名单里会多一行）")
     if failed:
         print(f"\n有 {len(failed)} 个没成功：{', '.join(failed)}")
         return 1
