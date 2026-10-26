@@ -129,12 +129,20 @@ def report(login: str) -> str:
                         "--jq", f'.[] | select(.invitee.login == "{login}") | "邀请 id=\\(.id) 权限=\\(.permissions) 过期=\\(.expired)"'])
     inv = out if (rc == 0 and out) else "（没有待接受邀请）"
     verdict = ""
-    if perm.startswith("push") or perm.startswith("maintain") or perm.startswith("admin"):
+    # ★ 注意 GitHub API 对 push 权限返回的字面是 **"write"**，不是 "push"
+    #   （仓库 collaborators 列表里的 permissions.push 才是布尔值）。
+    #   这里两个都认，否则 push 权限会被误判成「没进仓」。
+    first = perm.split()[0].lower() if perm.split() else ""
+    if first in ("write", "push", "maintain", "admin"):
         verdict = "✅ 已生效"
-    elif perm.startswith("read"):
+    elif first == "read":
         verdict = "⚠ 只拿到 read —— 邀请没被接受，让对方用正确账号去 /invitations 接受"
-    else:
+    elif first == "triage":
+        verdict = "⚠ triage 权限 —— 能管 issue/PR 但推不了代码，要推分支得重新邀"
+    elif first == "none":
         verdict = "❌ 没进仓"
+    else:
+        verdict = "❓ 状态不明确（见上面权限值）"
     return f"{perm}\n     邀请：{inv}\n     ⇒ {verdict}"
 
 

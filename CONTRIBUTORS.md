@@ -16,10 +16,11 @@
 
 | 账号 | 平台 | 加入时间 | 权限 | 关注方向 |
 |---|---|---|---|---|
-| [1750468716qqcom-maker](https://github.com/1750468716qqcom-maker) | GitHub | 2026-10-26 | push | _待补_ |
+| [1750468716qqcom-maker](https://github.com/1750468716qqcom-maker) | GitHub | 2026-10-26 | push（已生效 2026-10-26） | _待补_ |
 
 > ⚠ 该账号的权限是 **push** 而不是 maintain —— GitHub 只允许给「组织/企业成员」
 > 授予 maintain 与 triage，个人账号最高到 push（详见 `docs\加贡献者协作者_操作手册.md`）。
+> 2026-10-26 实测：对方接受邀请后，GitHub API 返回的权限字面是 `write`（= push 档）。
 
 ## 贡献者（按贡献类型署名）
 
