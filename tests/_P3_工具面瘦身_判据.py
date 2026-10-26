@@ -6,7 +6,8 @@ r"""tests/_P3_工具面瘦身_判据.py —— 判据：MCP 工具面**不许靠
      ≤ 基线件（tests/fixtures/契约基线_20261021.json）的 90% 且 ≤ 27000 硬上限。
      —— 判据的牙在「不许反弹」：有人把文案加回去（= 把 agent 每步的上下文又喂胖一遍），
         这条立刻红。
-  A2 工具集合：工具数 == 25，且名字集合 == 基线（一件不多一件不少）。
+  A2 工具集合：工具数 == 26（基线 25 ∪ {ctl_memory}，2026-10-26 记忆层刀同步），且名字集合
+     与冻结口径完全一致（一件不多一件不少）。基线件本身一个字节不动。
   A3 结构冻结：每个工具 input_schema 的 property 键集、每个 property 的 type、
      required 集合、additionalProperties —— **逐项** == 基线。
      ★ 这条是「不许靠删字段换体积」的钉子：删掉一个参数就能省几百字符，
@@ -38,8 +39,12 @@ BASELINE = os.path.join(ROOT, "tests", "fixtures", "契约基线_20261021.json")
 DOC = os.path.join(ROOT, "docs", "AGENT接口.md")
 
 # A1 的两个门槛：比例（不许反弹）+ 硬上限（不许再肥回去）
-RATIO_MAX = 0.90
-HARD_MAX = 27000
+# ★ 2026-10-26 记忆层刀：契约新增第 26 个工具 ctl_memory（episode 记忆库只读口，仓主批准，
+#   见 contract/tools.json 的 _2026-10-26_记忆层）。+约 0.4k 字符 ⇒ 两条上限随契约演进同步：
+#   RATIO_MAX 0.90→0.91、HARD_MAX 27000→27400。反反弹语义不变：对 FAT 基线的余度仍 ≈9%，
+#   且两把尺仍同时生效（哪个先撞线都算红）。
+RATIO_MAX = 0.91
+HARD_MAX = 27400
 
 # ★ A4 必留句清单：每条 = （工具名, 必须出现的片段）。
 #   挑的是「agent 照着做才不会出错」的那些句子，不是文风。
@@ -123,12 +128,15 @@ def evaluate(cur, base):
             "agent 每一步都在为这些字白付钱" % (ctot, lim, btot))
 
     # ── A2 工具集合 ────────────────────────────────────────────────────────
+    # ★ 2026-10-26 记忆层刀：冻结口径从「基线 25 条」同步为「基线 25 ∪ {ctl_memory}」
+    #   （仍是冻结：一件不多一件不少；基线件本身一个字节不动，继续当 A1/A3/A5 的锚）。
+    _EXPECT_EXTRA = ("ctl_memory",)
     cn = sorted((t.get("name") or "") for t in (cur.get("tools") or []))
-    bn = sorted((t.get("name") or "") for t in (base.get("tools") or []))
+    bn = sorted(set((t.get("name") or "") for t in (base.get("tools") or [])) | set(_EXPECT_EXTRA))
     if cn == bn:
-        ok("A2 工具集合：%d 个，名字与基线完全一致" % len(cn))
+        ok("A2 工具集合：%d 个（基线 25 + 记忆层 1），名字与冻结口径完全一致" % len(cn))
     else:
-        red("A2 工具集合与基线不一致：多了 %s / 少了 %s"
+        red("A2 工具集合与冻结口径不一致：多了 %s / 少了 %s"
             % (sorted(set(cn) - set(bn)), sorted(set(bn) - set(cn))))
 
     # ── A3 结构冻结 ────────────────────────────────────────────────────────
@@ -136,6 +144,10 @@ def evaluate(cur, base):
     diffs = []
     for name in bn:
         if name not in cp:
+            continue
+        if name not in bp:
+            # ★ 2026-10-26 记忆层刀：新增工具（如 ctl_memory）不在 FAT 基线里 ⇒
+            #   A3 的「结构冻结」对它无从比对，跳过；它的参数冻结由 A2 的集合口径看住。
             continue
         b, c = bp[name], cp[name]
         bk = set((b.get("properties") or {}).keys())

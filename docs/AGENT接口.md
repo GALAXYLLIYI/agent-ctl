@@ -818,6 +818,7 @@ MCP §tools/list§ 的载荷实测 **55182 字节**（2026-10-21 08:5x，127.0.0
 | ctl_type / ctl_fill | mode=focus 无元素打字、画面没变 ⇒ code=8、Ctrl+A 清空 | QQ 现场「ctl_type 要元素」那个具体坑 |
 | ctl_browser | launch 的参数、端口被别人占着就拒、launch/close 要 B 级 | cdp.py 端口写死 9222 的旧账与窗B 的修复过程 |
 | ctl_task / ctl_wait / ctl_lease / ctl_status / ctl_shot / ctl_timeline / ctl_verify / ctl_witness / ctl_record / ctl_replay / ctl_preflight | 全部保留（本来就短） | —— |
+| ctl_memory（2026-10-26 新增第 26 个） | 全部保留（本来就短）：query=语义检索（episode/段摘要/workflow，带出处与三值结局）；stats=计数与游标；写入侧走 CLI（拉取式铁律） | 记忆库真源在 `src\agentctl\memory\`（episode 契约/巩固/检索/提炼）；库文件 `work\memory\episodes.db`（AGENTCTL_MEMORY_DB 可覆盖）；与 timeline.db 的关系＝「同一原始事件流，两个索引」；敏感窗筛选在 harvest 侧复用 authstate.deny_window 真源（命中 ⇒ 窗口身份不落库） |
 
 ### A.2 瘦身后的代价（说清楚，别当没这回事）
 

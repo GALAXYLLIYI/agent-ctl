@@ -49,22 +49,45 @@ def _first_str(p: dict, keys: tuple[str, ...], cap: int = 60) -> str:
     return ""
 
 
-def _payload_brief(kind: str, p: dict) -> tuple[str, str, str, str]:
-    """按各 kind 的真实 payload 形状容错提取 (obs, target, expect, result_ext)。
+def _win_sensitive(exe: str, cls: str) -> tuple[bool, str]:
+    """敏感窗终判（记忆层复用**闸门同款名单真源** authstate.deny_window —— 五张表老线同源）。
+
+    hard（授权/急停弹窗 / UAC 框 / 系统设置页 / python 自家窗）与 terminal（cmd/powershell 终端族）
+    都算命中：动作本身可留痕，但**窗口身份（exe/类名）不落记忆库**（设计稿 §5.2 隐私边界）。
+    标题比对不适用——timeline 只存 title_hash，本来就没有明文标题（这恰好是对的）。
+    判据自身出错 ⇒ **按命中处理**（隐私 fail-closed，不许静默放行）。
+    """
+    try:
+        from agentctl import authstate
+        hit, why, _kind = authstate.deny_window(exe=exe, cls=cls, title="")
+        return bool(hit), why or ""
+    except Exception as exc:  # noqa: BLE001
+        return True, "敏感窗名单判不了（%s: %s）⇒ fail-closed 按命中过滤" % (type(exc).__name__, exc)
+
+
+def _payload_brief(kind: str, p: dict) -> tuple[str, str, str, str, str]:
+    """按各 kind 的真实 payload 形状容错提取 (obs, target, expect, result_ext, win_filtered)。
 
     实测形状（2026-10-26 真库抽样）：
         click  = {xy, hwnd, from_capture, evidence{changed,verdict,…}, win{…}}（无语义目标名）
         type   = {text, mode, …}；fill = {eid, text, …}
         keys   = {keys, ctrl, …}；scroll = {amount, …}
         browser= {action, js?, url_contains?, port}；focus = {hwnd, …}
+    敏感窗（_win_sensitive 命中）⇒ obs 不带 win 身份，改由 win_filtered 说明（隐私边界）。
     """
     if not isinstance(p, dict):
-        return _cap(kind), "", "", ""
+        return _cap(kind), "", "", "", ""
 
     win = p.get("win") or {}
     win_txt = ""
+    win_filtered = ""
     if isinstance(win, dict) and win:
-        win_txt = "win={}|{}".format(win.get("exe") or "?", win.get("cls") or "?")
+        exe, cls = str(win.get("exe") or ""), str(win.get("cls") or "")
+        hit, why = _win_sensitive(exe, cls)
+        if hit:
+            win_filtered = why
+        else:
+            win_txt = "win={}|{}".format(exe or "?", cls or "?")
 
     evidence = p.get("evidence") or {}
     result_ext = ""
@@ -102,7 +125,7 @@ def _payload_brief(kind: str, p: dict) -> tuple[str, str, str, str]:
     else:
         parts = [x for x in (str(kind), target, win_txt) if x]
         obs = _cap("; ".join(parts), _TEXT_CAP)
-    return obs, target, expect, result_ext
+    return obs, target, expect, result_ext, win_filtered
 
 
 def _parse_t(t_wall: str) -> Optional[datetime]:
@@ -176,7 +199,7 @@ class TimelineHarvester:
                 p = json.loads(payload_txt or "{}")
             except (TypeError, ValueError):
                 p = {}
-            obs, target, expect, result_ext = _payload_brief(kind, p)
+            obs, target, expect, result_ext, win_filtered = _payload_brief(kind, p)
             outcome, verdict = contract.verdict_from_code(ok, code)
             if kind in contract.BLOCKED_KINDS:
                 # 被拦/异常：动作没发出去，效果无从观测（contract §三值口径）
@@ -205,6 +228,7 @@ class TimelineHarvester:
                     "expect": expect,
                     "verdict": verdict,
                     "cred": {"src_seq": int(seq), "ok": ok, "code": code},
+                    "win_filtered": win_filtered,
                 },
                 session_id=session_id,
                 src_seq=int(seq),

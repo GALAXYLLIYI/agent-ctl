@@ -1441,6 +1441,41 @@
         "additionalProperties": false
       },
       "returns": "统一信封（ok/code/data/warning/…）。data 里：status→{页面:[{类型,在,题数,已答,详情页带标准答案}]}；dump/truth→{题数,落盘[,含标准答案]}；apply→{改动,题数}；verify→{题数,不一致,未作答,判定:PASS/FAIL,明细}；save→{暂存,已答}。"
+    },
+    {
+      "name": "ctl_memory",
+      "title": "记忆库",
+      "description": "episode 记忆库只读口：query=语义检索（带出处与三值结局）；stats=计数。写入走 CLI agentctl.memory（拉取式）。",
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "gate": null,
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": ["query", "stats"],
+            "description": "query=检索；stats=计数"
+          },
+          "text": {
+            "type": "string",
+            "description": "query 的检索文本"
+          },
+          "k": {
+            "type": "integer",
+            "description": "返回条数上限（1-20，默认 5）"
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "additionalProperties": false
+      },
+      "returns": "统一信封。query→data.结果={hits:[{source,score,t,kind,obs,outcome,verify,…}],workflows}；stats→data={episodes,segments_live,harvest_cursor_seq,…}"
     }
   ],
   "_本版未列入（v1.1 补，列在这里是为了不和设计文档的完整清单打架）": {
@@ -1468,5 +1503,6 @@
   },
   "_2026-10-14_T1窗1": "schema_version 4 → 5。本轮改动全是**文档/文案**性质：①conventions 新增 edge_border_hint（含「接线未生效要如实报告」的前提句，并写死「边框不是传感信号、无边框≠安全、以 ctl_status 为准」）；②conventions.capture_binding 新增 ttl_sec=15 与 ttl_source（2026-10-14 实测 gate.py 的 CAPTURE_TTL 常量，非派单口径）；③conventions.coordinates 补明「只有这一套、--xy 原样收不换算」（本地 agent 裁定 D3 不成立）；④新增 conventions._写动作三步_唯一定义处 指针（唯一定义处＝docs\\AGENT接口.md §3-bis，避免第二真源）；⑤ctl_click 的 description/eid/name/xy 四处描述文案按 D1/D2 改写。⛔ **未动任何工具的 input_schema 结构**（properties 的键集、types、enum、required、additionalProperties 全部原样，只改 description 文本）；⛔ 未增删改任何 error_codes / event_codes。",
   "_2026-10-07_白名单废止": "用户指示「不整名单限制，每次都问」。legacy_tools/whitelist.json 已作废：里面的 8 个条目一次性转成了 asked_targets.json 里的放行记录，之后不再读。现在起，任何**没见过**的窗口第一次被操作时都会弹窗问用户；同意一次管 30 分钟。**敏感窗口黑名单不在这条里** —— 用户自己的授权弹窗（标题 本地 agent电脑控制授权）任何动作一律禁止，不问、不放行。",
-  "_2026-10-21_P0-1_failure_class": "P0-1 失败分类。**加的是可选字段**：既有字段名 / types / enum / required / 错误码一个字未动，工具的 input_schema 也没动 ⇒ 按 §_2026-10-14_T1窗1 的同一口径（升 schema_version 等于对外宣称接口不兼容，那是谎报），本次**不升** schema_version（仍是 5）。★ 如果将来 failure_class 变成必填、或改了取值语义，就该升到 6 并同步 w1 / wF 两条钉子。同批改动（源码侧）：core.py 加 failure_class()；action_guard.observe() 收 failure_class，rejected_env 不计入 fail_streak 与同目标连击，改为单独留痕 kind=action_blocked。"
+  "_2026-10-21_P0-1_failure_class": "P0-1 失败分类。**加的是可选字段**：既有字段名 / types / enum / required / 错误码一个字未动，工具的 input_schema 也没动 ⇒ 按 §_2026-10-14_T1窗1 的同一口径（升 schema_version 等于对外宣称接口不兼容，那是谎报），本次**不升** schema_version（仍是 5）。★ 如果将来 failure_class 变成必填、或改了取值语义，就该升到 6 并同步 w1 / wF 两条钉子。同批改动（源码侧）：core.py 加 failure_class()；action_guard.observe() 收 failure_class，rejected_env 不计入 fail_streak 与同目标连击，改为单独留痕 kind=action_blocked。",
+  "_2026-10-26_记忆层": "新增第 26 个工具 ctl_memory（episode 记忆库只读口：query/stats）。**加法兼容 ⇒ 不升 schema_version**（沿 P0-1 批注口径）。★ A2 冻结口径随本批同步为「基线 25 ∪ {ctl_memory}」、A1 体积上限 RATIO_MAX 0.90→0.91 / HARD_MAX 27000→27400（tests\\_P3_工具面瘦身_判据.py；契约演进的钉子同步，仓主批准）。★ 敏感窗筛选在记忆层 harvest 侧复用 authstate.deny_window 真源（命中 ⇒ 窗口身份不落库）。实现：src\\agentctl\\memory\\（episode 契约/巩固/检索/提炼）+ core._t_memory（只读、不落事件）。"
 }

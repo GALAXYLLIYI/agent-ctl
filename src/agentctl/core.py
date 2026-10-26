@@ -7507,6 +7507,53 @@ def _t_quiz(a):
     return quiz.t_quiz(a)
 
 
+def _t_memory(a):
+    """episode 记忆库**只读口**（记忆层刀 · 2026-10-26）。
+
+    ★ query = 语义检索（episode 命中 + 段摘要 + workflow，带出处与三值结局）；
+      stats = 计数与游标。
+    ★ 写入侧（harvest / compact / distill）**不进工具面** —— 「信息拉取式」铁律，
+      走 CLI：python -m agentctl.memory {harvest|compact|distill}。
+    ★ 惰性导入（_t_quiz 同款）：memory 子包不拖累 core 顶层。
+    ★ 库路径：AGENTCTL_MEMORY_DB 或 <仓>\\work\\memory\\episodes.db；
+      服务进程与 CLI 共用同一份（timeline 的语义视图，同一原始事件流两个索引）。
+    """
+    import agentctl.memory as mem
+    from agentctl.memory.retrieve import Retriever
+    action = (a.get("action") or "").strip().lower()
+    if action == "query":
+        text = str(a.get("text") or "")
+        if not text:
+            return env(code=gate.CODE_NO_CTRL, warning="query 需要非空 text")
+        try:
+            k = max(1, min(20, int(a.get("k") or 5)))
+        except (TypeError, ValueError):
+            return env(code=gate.CODE_NO_CTRL, warning="k 必须是整数（1-20）")
+        store = mem.open_store()
+        try:
+            out = Retriever(store).query(text, k=k)
+        finally:
+            store.close()
+        return env(ok=True, code=0, data={"结果": out})
+    if action == "stats":
+        store = mem.open_store()
+        try:
+            segs = list(store.iter_segments(live_only=False))
+            data = {
+                "db": mem.default_db_path(),
+                "memory_version": mem.MEMORY_VERSION,
+                "episodes": store.count_episodes(),
+                "segments_total": len(segs),
+                "segments_live": len([s for s in segs if not s.get("merged_into")]),
+                "harvest_cursor_seq": store.get_meta("harvest_cursor_seq", "0"),
+                "promoted_until": store.get_meta("promoted_until", "0"),
+            }
+        finally:
+            store.close()
+        return env(ok=True, code=0, data=data)
+    return env(code=gate.CODE_NO_CTRL, warning="未知 action（合法：query / stats）")
+
+
 TOOLS = {
     "ctl_status": t_status,
     "ctl_preflight": t_preflight,
@@ -7532,6 +7579,7 @@ TOOLS = {
     "ctl_focus": t_focus,
     "ctl_browser": t_browser,
     "ctl_quiz": _t_quiz,
+    "ctl_memory": _t_memory,
     "ctl_task": lambda a: tasks_dispatch.handle(a, store=store, env=env,
                                                  gate=gate, timeline_dir=TIMELINE_DIR),
 }
@@ -7631,9 +7679,10 @@ def dispatch(tool: str, args: dict, *, actor: str = "", human: bool = False) -> 
         r["notices"] = _ns
     # 下面这些不落事件（否则 ctl_wait 每调一次就写一条，颞不发事流，
     #   还会把 notices 的游标自己推进去，引发“自己消费的额外轮询”）
-    if tool in ("ctl_status", "ctl_timeline", "ctl_verify", "ctl_wait"):
+    #   ★ 2026-10-26 记忆层刀：ctl_memory 同类（只读检索，落事件会把时间线刷成检索日志）
+    if tool in ("ctl_status", "ctl_timeline", "ctl_verify", "ctl_wait", "ctl_memory"):
         return r
-    if tool in ("ctl_status", "ctl_timeline", "ctl_verify"):
+    if tool in ("ctl_status", "ctl_timeline", "ctl_verify", "ctl_memory"):
         return r
     try:
         _evp = {k: v for k, v in args.items() if k != "token"}

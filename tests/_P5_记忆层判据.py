@@ -10,12 +10,14 @@ r"""tests\_P5_记忆层判据.py —— 记忆层 v0 集成判据（记忆层刀
     · 检索必须命中且带出处（episode 命中 vs 段摘要命中要分得清）。
     · workflow 提炼：重复成功会话入库、数字归一、过期可辨。
 
-断什么（9 组）：
+断什么（11 组）：
     ① 三值映射 verdict_from_code 全表；② store 幂等 + sqlite_vec/numpy 两路径同序同分；
     ③ embedder 跨实例确定性 + L2；④ 合成 timeline → harvest：数量/结局/会话切分/游标幂等；
     ⑤ promote：时间断裂切段 + ANCHOR_N 强制锚点；⑥ merge 滞回：中间带不动、高相似合并出父段、锚点不被稀释；
     ⑦ compact 幂等（二跑零新增零合并）；⑧ 检索：针命中 + 段摘要命中带 source 标记；
-    ⑨ distill：重复成功会话提炼 workflow、数字归一、last_verified 落库。
+    ⑨ distill：重复成功会话提炼 workflow、数字归一、last_verified 落库；
+    ⑩ 敏感窗筛选：deny_window 命中的窗口身份不落 obs、留 win_filtered 标记、普通窗不受影响；
+    ⑪ ctl_memory 工具接线：契约条目在 + core.TOOLS 有映射 + dispatch 三态（stats/query/未知 action）走通。
 
 --inject（自证判据是活的，注入后**必须变红**）：
     把 contract.verdict_from_code 换成「code=8 也判 success」的谎言版，
@@ -324,6 +326,71 @@ def t_distill(tmp: str) -> None:
             "同签名不许重复入库"
 
 
+# ── ⑩ 敏感窗筛选（harvest 层；设计稿 §5.2 隐私边界）────────────────────────
+
+def t_sensitive_filter(tmp: str) -> None:
+    # ★ harvester 固定读 <目录>\timeline.db ⇒ 用独立子目录，避免与 ④ 组的合成库串台
+    sens_dir = os.path.join(tmp, "sens_tl")
+    os.makedirs(sens_dir, exist_ok=True)
+    tdb = os.path.join(sens_dir, "timeline.db")
+    rows = [
+        # 终端族（authstate 五张表 TERMINAL）⇒ 窗口身份必须被滤掉
+        ev(1, "type", "2026-10-26T10:00:00+08:00", 1, 0,
+           {"text": "whoami", "win": {"exe": "cmd.exe", "cls": "ConsoleWindowClass"}}),
+        # 普通窗 ⇒ 身份保留
+        ev(2, "type", "2026-10-26T10:00:10+08:00", 1, 0,
+           {"text": "普通记事", "win": {"exe": "notepad.exe", "cls": "Notepad"}}),
+    ]
+    build_synthetic_timeline(tdb, rows)
+
+    from agentctl.memory.harvest import TimelineHarvester
+
+    with MemoryStore(os.path.join(tmp, "p5_sens.db")) as st:
+        hv = TimelineHarvester(st, timeline_dir=sens_dir)
+        try:
+            hv.harvest()
+            eps = {r["src_seq"]: r for r in st.iter_episode_rows()}
+            v1 = Episode.from_db_row(eps[1]).verify   # verify 列在原始行是 JSON 串
+            v2 = Episode.from_db_row(eps[2]).verify
+            assert "win=" not in eps[1]["obs"], "敏感窗身份不许落 obs"
+            assert v1.get("win_filtered"), "命中必须留 win_filtered 标记（不许静默）"
+            assert "whoami" in eps[1]["text"], "动作语义保留（滤的是窗口身份，不是动作记录）"
+            assert "win=notepad.exe|Notepad" in eps[2]["obs"], "普通窗口身份必须保留"
+            assert not v2.get("win_filtered"), "普通窗不得误滤"
+        finally:
+            hv.close()
+
+
+# ── ⑪ ctl_memory 工具接线（契约 + core 分发 + 三态行为）────────────────────
+
+def t_tool_wiring(tmp: str) -> None:
+    import json as _json
+
+    tj = _json.load(open(os.path.join(ROOT, "contract", "tools.json"), encoding="utf-8"))
+    entries = {t.get("name"): t for t in tj.get("tools") or []}
+    e = entries.get("ctl_memory")
+    assert e, "契约缺 ctl_memory 条目"
+    assert e["input_schema"].get("additionalProperties") is False
+    assert e.get("annotations", {}).get("readOnlyHint") is True, "记忆查询必须标只读"
+
+    from agentctl import core as core_mod
+
+    assert "ctl_memory" in core_mod.TOOLS, "core.TOOLS 缺 ctl_memory 映射"
+
+    os.environ["AGENTCTL_MEMORY_DB"] = os.path.join(tmp, "p5_tool.db")
+    try:
+        r = core_mod.dispatch("ctl_memory", {"action": "stats"}, actor="判据")
+        assert r.get("ok") is True and r.get("data", {}).get("episodes") == 0, r
+        r2 = core_mod.dispatch("ctl_memory", {"action": "query", "text": "测试检索"}, actor="判据")
+        assert r2.get("ok") is True and r2["data"]["结果"]["hits"] == [], r2
+        r3 = core_mod.dispatch("ctl_memory", {"action": "bogus"}, actor="判据")
+        assert r3.get("ok") is not True, "未知 action 必须拒"
+        r4 = core_mod.dispatch("ctl_memory", {"action": "query"}, actor="判据")
+        assert r4.get("ok") is not True, "query 缺 text 必须拒"
+    finally:
+        os.environ.pop("AGENTCTL_MEMORY_DB", None)
+
+
 # ── --inject：判据是活的（注入谎言映射必须变红）─────────────────────────────
 
 def t_inject_self() -> None:
@@ -367,6 +434,8 @@ def main() -> int:
     check("⑦ compact 幂等", lambda: t_compact_idempotent(tmp))
     check("⑧ 检索命中与出处", lambda: t_retrieve(tmp))
     check("⑨ workflow 提炼与数字归一", lambda: t_distill(tmp))
+    check("⑩ 敏感窗筛选", lambda: t_sensitive_filter(tmp))
+    check("⑪ ctl_memory 工具接线", lambda: t_tool_wiring(tmp))
     if FAILS:
         print(f"RED x{len(FAILS)}")
         for f in FAILS:
