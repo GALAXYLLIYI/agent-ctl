@@ -54,6 +54,12 @@ class Backend:
 
     name = "backend"
 
+    #: ★ 该后端的**合理默认超时**（秒）。locate_safe 未显式给 timeout_sec 时用它。
+    #: 为什么放在后端身上（DSH 2026-10-27 点名）：云热态 ~1s、本地热态 ~2.8s、本地冷态 ~15s——
+    #: 一个全局 2.0s 默认会把本地后端**永远**判成超时 unobservable（"本地慢"不是"没测出来"）。
+    #: 子类按自己实测分布覆盖；不给就继承 2.0（保守，与历史行为一致）。
+    default_timeout_sec: float = DEFAULT_TIMEOUT_SEC
+
     def locate(self, image_bytes: bytes, target_name: str,
                window_rect=None) -> list[dict]:
         """在 `image_bytes` 这张裁剪图里找 `target_name`。
@@ -162,22 +168,27 @@ def _run_with_timeout(fn, args, timeout_sec: float):
 
 def locate_safe(image_bytes: bytes, target_name: str, window_rect=None, *,
                 backend: Backend = None,
-                timeout_sec: float = DEFAULT_TIMEOUT_SEC) -> dict:
+                timeout_sec: float | None = None) -> dict:
     """兜底定位的**安全包装**：任何不确定 ⇒ `unobservable`（**永不当成功**）。
 
     · 开关未开 ⇒ unobservable（**且不把图交给任何后端**）
     · 后端超时 / 抛异常 ⇒ unobservable
     · 候选不合规 ⇒ unobservable（宁可说"不知道"，也不放行半吊子坐标）
     · 后端正常回答但没给候选 ⇒ `ok=True, found=False`（**有效观测到「没有」**，≠ 没测出来）
+
+    超时口径（DSH 2026-10-27）：timeout_sec 未显式给 ⇒ **问后端要**（backend.default_timeout_sec）——
+    云/本地热/本地冷的合理上限不同，全局 2.0s 曾把本地后端永远判死。
     """
     if not ENABLED:
         return _unobservable("开关未开启（%s 未设为 1）" % ENV_KEY)
     if backend is None:
         return _unobservable("没有可用后端")
     try:
-        t = float(timeout_sec or 0) or DEFAULT_TIMEOUT_SEC
+        t = float(timeout_sec or 0)
     except Exception:
-        t = DEFAULT_TIMEOUT_SEC
+        t = 0.0
+    if t <= 0:
+        t = float(getattr(backend, "default_timeout_sec", 0) or 0) or DEFAULT_TIMEOUT_SEC
     try:
         raw = _run_with_timeout(backend.locate,
                                 (image_bytes, target_name, window_rect), t)

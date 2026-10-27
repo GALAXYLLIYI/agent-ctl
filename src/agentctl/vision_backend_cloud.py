@@ -164,6 +164,8 @@ class CloudBackend:
     """OpenAI 兼容 chat 接口的视觉后端（默认智谱 glm-4v-flash，免费档）。"""
 
     name = "cloud"
+    # 云热态实测 ~1.0s（glm-4v-flash 905ms 级）；给足余量但远小于本地冷态。
+    default_timeout_sec = 8.0
 
     def __init__(self, *, model: str | None = None, base_url: str | None = None,
                  key_file: str | None = None, timeout_sec: float | None = None):
