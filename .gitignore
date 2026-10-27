@@ -104,6 +104,24 @@ tools/*
 #        **占位符没替换就会发出一次无效请求**（404，看着像「没权限」，其实是「用户不存在」）。
 #        本脚本先查账号、再发邀请、再回读确认，三步都出声。
 !tools/加协作者.py
+#   ⑨ tools\probe_input_injection.py —— **输入注入可用性体检**（键盘 / 鼠标 分开测）。
+#      · docs\能力边界与响应时间_20261027.md §3.5 指向它 ⇒ 不在仓 = 悬空引用。
+#      · 为什么要有它：实测本机**鼠标注入通、键盘注入不通**（连原生控件都收不到字符）。
+#        而 agentctl 的 C 级（打字/快捷键）走键盘 ⇒ 本机 C 级不可用。
+#        没有这个体检，agent 会把「键盘没打进去」误判成「目标没响应」⇒ 盲目重试
+#        白烧动作额度，更糟的是误报 code=8「画面没变」这个**假的失败原因**。
+#      · 依赖：只用标准库 + legacy_tools\act.py（**用它自己的注入路径** ⇒ 与产品同源不会漂）。
+#      · 它开的是记事本测试窗（%TEMP% 临时文件），测完自己关掉删掉 ⇒ 不碰用户真实文档。
+!tools/probe_input_injection.py
+#   ⑩ tools\ab_target_py.py —— AB 靶场的 **python 版**（WinForms，8 控件）。
+#      · 为什么要有它：仓里已有的 ab_target_winforms.ps1 用 **pwsh** 跑
+#        ⇒ 窗的属主进程是 pwsh.exe ⇒ 命中 act.py 的 BLOCKED_PROCESSES_TERMINAL
+#        ⇒ 靶场被当「敏感窗口」⇒ ctl_click 返 code=3、ctl_focus 返 code=7（等 20 秒）
+#        ⇒ **根本测不到真动作耗时**。python 版的属主是 python.exe，也被硬拒（安全侧取舍）。
+#      · 所以真动作测量必须用**属主不在名单里**的窗口（记事本 Notepad.exe）。
+#      · 依赖：pythonnet（clr）+ System.Windows.Forms ⇒ **不是纯标准库**，属额外依赖 ⇒
+#        干净克隆上可能装不上 pythonnet ⇒ 跑不起来会明确报错，不会静默假绿。
+!tools/ab_target_py.py
 # ⛔ 2026-10-23（新单 I · M19P5）**核不过 ⇒ 没放行**的几个 —— 别再往里加（核对结论）：
 #   · tools\申请授权.py —— 写死仓外路径（F:\<用户名>\…\某上游项目\tools）；
 #     真源已于 2026-10-18 收进 legacy_tools\_src\，它仍指老位置 ⇒ 干净克隆上必然跑不起来；
