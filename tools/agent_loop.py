@@ -35,6 +35,10 @@ _SRC = os.path.join(_REPO, "src")
 if _SRC not in sys.path:
     sys.path.insert(0, _SRC)
 
+# ★ 视觉兜底是本循环的内建能力：开关在 vision_assist 导入时读一次 ⇒ 必须在**任何**
+#   agentctl.vision_* import 之前把 env 立好（缺省开启；显式关掉用 =0）。
+os.environ.setdefault("AGENTCTL_VISION_ASSIST", "1")
+
 from agentctl.memory import open_store  # noqa: E402
 from agentctl.memory.compact import Compactor  # noqa: E402
 from agentctl.memory.contract import Episode, make_session_id, verdict_from_code  # noqa: E402
@@ -158,11 +162,17 @@ class MCPClient:
 # ── 敏感闸（发图前必过）─────────────────────────────────────────────────────
 
 def image_allowed(win_exe: str, win_cls: str) -> tuple[bool, str]:
-    """发图前敏感窗终判。命中 / 判不了 ⇒ 不发（fail-closed，与 harvest 同源）。"""
+    """发图前敏感窗终判。
+
+    ★ 语义（真机踩的坑）：`_win_sensitive` 返回 (hit, why)——**hit=True = 命中敏感名单 = 要拦**。
+    本函数返回"是否允许发图"⇒ **not hit** 才放行；判不了（异常）⇒ fail-closed 不发。
+    （此前把 hit 当 allowed 用 ⇒ 非敏感窗全被拦、敏感窗反而放行——完全颠倒，2026-10-27 修。）
+    """
     try:
-        return _win_sensitive(str(win_exe or ""), str(win_cls or ""))
+        hit, why = _win_sensitive(str(win_exe or ""), str(win_cls or ""))
+        return (not bool(hit)), (why or "")
     except Exception as e:  # noqa: BLE001
-        return True, "敏感闸异常 fail-closed: %s: %s" % (type(e).__name__, e)
+        return False, "敏感闸异常 fail-closed: %s: %s" % (type(e).__name__, e)
 
 
 # ── 感知 ────────────────────────────────────────────────────────────────────
@@ -185,6 +195,21 @@ def perceive(client: MCPClient, query: str = "") -> dict:
     wins = data.get("windows") or []
     if isinstance(wins, list):
         snap["windows"] = wins
+    # ★ 信封 windows 项缺 process/exe（敏感闸需要）——从 data.raw（JSON 字符串）补源
+    try:
+        raw_obj = json.loads(data.get("raw") or "{}")
+        for rw in (raw_obj.get("窗口") or []):
+            if not isinstance(rw, dict):
+                continue
+            for w2 in wins:
+                if isinstance(w2, dict) and w2.get("hwnd") == rw.get("hwnd"):
+                    w2.setdefault("process", rw.get("process"))
+                    w2.setdefault("exe", rw.get("process"))
+                    w2.setdefault("cls", rw.get("class"))
+                    w2.setdefault("class", rw.get("class"))
+                    break
+    except Exception:
+        pass
 
     target = _pick_window(wins)
     snap["target"] = target
@@ -202,7 +227,9 @@ def perceive(client: MCPClient, query: str = "") -> dict:
             "window": (scr.get("data") or {}).get("window"),
         }
 
-    # 视觉兜底：只有 screen 没给可交互对象时才走；发图前过敏感闸
+    # 视觉兜底触发（第 2 步口径修订）：不止"UIA 零可交互对象"——
+    # UIA 有对象但**没有命中 query 语义**的，同样走本地视觉（真实场景：有对象但没我要的按钮）。
+    # ★ 发图前敏感闸照旧（隐私铁律）：命中 ⇒ 一个字节都不发。
     exe = str(target.get("process") or target.get("exe") or "")
     cls = str(target.get("class") or target.get("cls") or "")
     ok_send, why = image_allowed(exe, cls)
@@ -210,19 +237,88 @@ def perceive(client: MCPClient, query: str = "") -> dict:
         snap["sensitive_blocked"] = True
         snap["sensitive_why"] = why
         return snap
-    if not ((snap.get("screen") or {}).get("objects")):
+    objs = (snap.get("screen") or {}).get("objects") or []
+    n_inter = sum(1 for o in objs if isinstance(o, dict) and o.get("interactive"))
+    q = (query or "").strip()
+    sem_hit = False
+    if q and objs:
+        for o in objs:
+            if isinstance(o, dict) and q.lower() in str(o.get("label") or "").lower():
+                sem_hit = True
+                break
+    need_vision = (n_inter == 0) or (q and not sem_hit)
+    if need_vision:
         shot = client.call("ctl_shot", hwnd=hwnd, why="agent_loop 视觉兜底", inline=False)
         if shot.get("ok"):
             d = shot.get("data") or {}
-            snap["shot"] = {
-                "path": d.get("path"),
-                "capture_id": d.get("capture_id"),
-                "frame_id": d.get("frame_id"),
-                "exe": exe,
-                "cls": cls,
-                "sensitive_why": why,  # 已过闸的记录
-            }
+            # ★ 回执形状：文件路径在 data.raw.截图.文件（中文键）；data 里只有 capture_id
+            shot_path, shot_origin = None, None
+            try:
+                raw_shot = (json.loads(d.get("raw") or "{}").get("截图") or {})
+                shot_path = raw_shot.get("文件")
+                area = raw_shot.get("区域")
+                if isinstance(area, list) and len(area) >= 2:
+                    shot_origin = [int(area[0]), int(area[1])]
+            except Exception:
+                pass
+            if not shot_path:
+                shot_path = d.get("path") or d.get("file")
+            if shot_path:
+                snap["shot"] = {
+                    "path": shot_path,
+                    "origin": shot_origin,        # 截图左上角的屏幕物理坐标（xy 换算用）
+                    "capture_id": d.get("capture_id"),
+                    "frame_id": d.get("frame_id"),
+                    "exe": exe,
+                    "cls": cls,
+                    "sensitive_why": why,  # 已过闸的记录
+                }
+                # ★ 第 2 步接线：截图交给本地视觉后端（qwen2.5vl）做"看图定位"，
+                #   把 UIA 盲区的候选变成可点对象（视觉 obj 与 UIA obj 同台竞争，LLM 选）。
+                #   坐标口径：截图坐标 + 截图原点 = 屏幕物理坐标（ctl_click --xy 同口径）。
+                vis = _vision_locate(snap["shot"], query or "", target)
+                if vis:
+                    snap["vision_hits"] = vis
     return snap
+
+
+def _vision_locate(shot: dict, target_query: str, win: dict) -> list[dict]:
+    """对兜底截图跑本地视觉定位（qwen2.5vl:7b）。失败安静返回 []（兜底不许炸主路）。"""
+    path = str(shot.get("path") or "")
+    if not path or not os.path.isfile(path):
+        return []
+    try:
+        from agentctl.vision_backend_ollama import OllamaBackend
+        from agentctl import vision_assist as _va
+        with open(path, "rb") as f:
+            png = f.read()
+        be = OllamaBackend()
+        r = _va.locate_safe(png, target_query or "主按钮", None,
+                            backend=be, timeout_sec=getattr(be, "default_timeout_sec", 75.0))
+        if not (r.get("ok") and r.get("found")):
+            return []
+        # 窗口原点：优先 shot 元数据（raw.截图.区域），退回 ctl_windows 的 rect
+        wr = shot.get("origin") or (win.get("rect") if isinstance(win, dict) else None)
+        ox, oy = (int(wr[0]), int(wr[1])) if isinstance(wr, list) and len(wr) >= 2 else (0, 0)
+        out = []
+        for c in (r.get("candidates") or [])[:3]:
+            bx, by, bw, bh = c["bbox"]
+            cx, cy = int(bx + bw / 2) + ox, int(by + bh / 2) + oy
+            out.append({
+                "eid": None,                       # 视觉候选没有 UIA eid —— 走 xy+from_capture
+                "from_capture": shot.get("capture_id"),
+                "xy": [cx, cy],                    # 屏幕物理坐标（与 ctl_click --xy 同口径）
+                "bbox": [bx + ox, by + oy, bw, bh],
+                "label": f"[视觉] {c.get('label') or target_query}",
+                "role": "VisualCandidate",
+                "interactive": True,
+                "confidence": c.get("confidence"),
+                "source": "vision",
+            })
+        return out
+    except Exception as exc:  # noqa: BLE001 —— 兜底失败不许炸感知主路
+        print(f"[vision] 兜底定位失败（安静降级）: {type(exc).__name__}: {exc}", flush=True)
+        return []
 
 
 def _pick_window(wins: list) -> Optional[dict]:
@@ -493,6 +589,17 @@ class AgentLoop:
         args = action.get("args") or {}
         if not isinstance(args, dict):
             args = {}
+        # ★ 凭据保鲜（code=12 洪水的教训）：视觉点击的 from_capture 是感知时签的，
+        #   LLM 决策耗 1-8s 后 TTL（15s）逼近 ⇒ 执行前**重拍一张**拿新鲜 capture_id
+        #   （xy 是刚定位的屏幕坐标，沿用；这正是 ctl_click 双凭据设计的正确用法）。
+        if tool == "ctl_click" and args.get("from_capture") and args.get("xy") and args.get("hwnd"):
+            fresh = self.client.call("ctl_shot", hwnd=int(args["hwnd"]),
+                                     why="点击前凭据保鲜", inline=False)
+            if fresh.get("ok"):
+                d = fresh.get("data") or {}
+                new_cap = d.get("capture_id")
+                if new_cap:
+                    args = dict(args, from_capture=str(new_cap))
         # 动作前置租约：没有租约的动作会被闸门 code=10 拒（真机预演踩过）
         if tool in ("ctl_click", "ctl_type", "ctl_fill", "ctl_keys", "ctl_scroll",
                     "ctl_focus", "ctl_browser"):

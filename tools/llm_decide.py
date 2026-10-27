@@ -90,7 +90,14 @@ def _project_snapshot(snapshot: dict, state: dict) -> str:
             if n >= 12:
                 break
     if n == 0:
-        lines.append("  （本屏没有可交互对象——不要选 ctl_click，打字任务直接选 done）")
+        lines.append("  （本屏没有可交互对象——若下面有[视觉候选]可用 ctl_click xy；打字任务直接选 done）")
+    # 视觉候选（UIA 盲区时本地模型看图找的）：xy 已是屏幕物理坐标，可直接当 args.xy
+    for vh in (snapshot.get("vision_hits") or [])[:3]:
+        if isinstance(vh, dict):
+            lines.append(f"  [视觉候选] label={vh.get('label')!r} xy={vh.get('xy')} "
+                         f"from_capture={vh.get('from_capture')} ⇒ ctl_click args="
+                         f"{{\"hwnd\": {win.get('hwnd')}, \"xy\": {vh.get('xy')}, "
+                         f"\"from_capture\": \"{vh.get('from_capture')}\"}}")
     if snapshot.get("plan_lost"):
         lines.append("!! 计划窗口已丢失")
     return "\n".join(lines)
@@ -129,6 +136,22 @@ def _normalize(tool: str, args: Any, snapshot: dict) -> Optional[dict]:
     if tool == "ctl_click":
         a = {"hwnd": hwnd, "expect": "点击"}
         if args.get("eid"):
+            # ★ eid 幻觉硬闸（code=12 洪水的教训）：eid 必须在本屏快照白名单里，
+            #   编造的直接改走视觉候选 xy（若本屏无候选则拒绝该动作）。
+            snap_objs = (snapshot.get("screen") or {}).get("objects") or []
+            valid_eids = {str(o.get("eid")) for o in snap_objs
+                          if isinstance(o, dict) and o.get("eid")}
+            vh = (snapshot.get("vision_hits") or [])
+            if str(args["eid"]) not in valid_eids:
+                if vh:
+                    v0 = vh[0]
+                    return {"tool": tool, "kind": "click",
+                            "args": {"hwnd": hwnd, "xy": v0["xy"],
+                                     "from_capture": v0["from_capture"],
+                                     "expect": "点击(视觉候选纠偏)"},
+                            "target": f"hwnd={hwnd} vision_xy={v0['xy']}",
+                            "expect": "点击视觉候选"}
+                return None   # 无处可点：把这个动作丢弃（比喂给闸门吃 code=12 强）
             a["eid"] = str(args["eid"])
             cap = (snapshot.get("screen") or {}).get("capture_id")
             if cap:
