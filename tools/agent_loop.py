@@ -652,6 +652,7 @@ class AgentLoop:
             # ★ 给 LLM 决策核的反馈（防重复打字/盲目重试）：上一步工具+三值结果
             self.state["last_result"] = f"{action.get('tool')} code={code} ok={ok}"
             self.state["last_type_ok"] = bool(action.get("kind") == "type" and settled)
+            self.state["last_args_text"] = str((action.get("args") or {}).get("text") or "")
             if action.get("kind") == "focus" and settled:
                 self.state["focused"] = True
             if action.get("kind") == "type" and settled:
