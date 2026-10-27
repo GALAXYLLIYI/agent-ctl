@@ -239,3 +239,7 @@ desktop.ini
 !tools/make_reference.py
 !tools/mermaid.lua
 !tools/puppeteer-edge.json
+# ⑯ 智能闭环（2026-10-27）：循环/启动器/LLM 决策核是产品件不是草稿（6b05833 漏网，999f274 后补）
+!tools/agent_loop.py
+!tools/launch_agentctl.py
+!tools/llm_decide.py
