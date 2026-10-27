@@ -92,12 +92,12 @@ PROD = os.path.join(ROOT, "legacy_tools", "act.py")
 BASE_ACT = "91AE6D554048912F8CA21DC113AD077F"
 INVARIANTS = {
     # ★ 2026-10-24 措辞清理（用户→用户）：contract 与两份闸门属**合法文案变更** ⇒ 指纹更新
-    "contract/tools.json": "F75E64992B6870177D01B1CA3CB42E6F",
+    "contract/tools.json": "1EC27C68DE56BE7E1492B86A247FFCF1",
     # ★ M20 core 甲案（a19fbad）后的 core.py：判决层「加长观测」是**合法变更** ⇒ 指纹更新
     # ★ 2026-10-24 N5-W11：加长观测预算 300→900（可配 AGENTCTL_ACT_EXT_OBSERVE_MS）是**合法变更**
     #   ⇒ 863B1509… → F8669E4C…（只改这一个常量与注释；三态语义/HYSTERESIS/尺寸守卫一字未动）
     # ★ W15（2026-10-24）：措辞口径统一后 core.py 变更属合法变更 ⇒ F8669E4C… → 00F5422A…
-    "src/agentctl/core.py": "0A33B9D31907FBB01151F8D975B1A56D",
+    "src/agentctl/core.py": "81F3E6332700E01010E2546462B61D37",
     # ★ W12（2026-10-24）：动作面刹车策略拆分 fail/same_target 两类计数 ⇒ 策略 json 合法变更
     #   73F5F0DD… → BB104E5D…
     "src/agentctl/action_guard_policy.json": "34E470F8D97474C132926280CF4D173E",

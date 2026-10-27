@@ -127,7 +127,7 @@ def _normalize(tool: str, args: Any, snapshot: dict) -> Optional[dict]:
         hwnd = int(win.get("hwnd"))
     except (TypeError, ValueError):
         return None
-    # ★ Kimi 探针 10：done 不是可归位的动作——归一层对 done 返回 None
+    # ★ 外部探针 10：done 不是可归位的动作——归一层对 done 返回 None
     #   （收工判定在 llm_decide 的调用层处理，normalize 只管"会改变屏幕状态的动作"）。
     if tool == "done":
         return None
@@ -145,7 +145,7 @@ def _normalize(tool: str, args: Any, snapshot: dict) -> Optional[dict]:
         if not keys:
             return None
         # code=5 洪水的教训：按键需要窗口在前台且焦点正确——给 allow_foreground 提高命中
-        # ★ Kimi 探针 09：ctrl/times 等模型给的参数**透传**，不许丢。
+        # ★ 外部探针 09：ctrl/times 等模型给的参数**透传**，不许丢。
         ka = {"hwnd": hwnd, "keys": keys, "allow_foreground": True}
         if args.get("ctrl"):
             ka["ctrl"] = True
@@ -159,10 +159,10 @@ def _normalize(tool: str, args: Any, snapshot: dict) -> Optional[dict]:
                 "target": f"hwnd={hwnd} keys={keys}",
                 "expect": f"按键 {keys}（画面变化）"}
     if tool == "ctl_click":
-        # ★ Kimi 探针 16：args 不放泛化 expect——点击的核验期望要**点名观测到的元素**。
+        # ★ 外部探针 16：args 不放泛化 expect——点击的核验期望要**点名观测到的元素**。
         a = {"hwnd": hwnd}
         if args.get("xy"):
-            # ★ Kimi 探针 08：模型给的 xy 若来自**视觉候选**，必须绑视觉自己的
+            # ★ 外部探针 08：模型给的 xy 若来自**视觉候选**，必须绑视觉自己的
             #   from_capture（截图凭据）——绑 UIA 快照凭据是张冠李戴，必 code=12。
             xy = [int(t) for t in args["xy"]]
             matched = None
@@ -181,7 +181,7 @@ def _normalize(tool: str, args: Any, snapshot: dict) -> Optional[dict]:
                         "target": f"hwnd={hwnd} vision_xy={xy}",
                         "expect": "点击视觉候选"}
             a["xy"] = xy
-            # ★ Kimi 探针 25：xy 必须绑定一个**真实候选**（视觉命中或本屏 UIA 对象）——
+            # ★ 外部探针 25：xy 必须绑定一个**真实候选**（视觉命中或本屏 UIA 对象）——
             #   凭空坐标 [9999,9999] 是幻觉，直接丢弃（不绑任何凭据发出去）。
             snap_objs = (snapshot.get("screen") or {}).get("objects") or []
             bound = any(
@@ -200,7 +200,7 @@ def _normalize(tool: str, args: Any, snapshot: dict) -> Optional[dict]:
                     "target": f"hwnd={hwnd} xy={xy}",
                     "expect": "点击生效"}
         if args.get("eid"):
-            # ★ eid 幻觉硬闸（Kimi 探针 10 同源）：eid 必须在本屏快照白名单里；
+            # ★ eid 幻觉硬闸（外部探针 10 同源）：eid 必须在本屏快照白名单里；
             #   编造的 ⇒ **直接丢弃**（不静默换目标——静默改靶会点错东西）。
             snap_objs = (snapshot.get("screen") or {}).get("objects") or []
             valid = next((o for o in snap_objs
@@ -211,7 +211,7 @@ def _normalize(tool: str, args: Any, snapshot: dict) -> Optional[dict]:
             cap = (snapshot.get("screen") or {}).get("capture_id")
             if cap:
                 a["from_capture"] = str(cap)
-            # ★ Kimi 探针 16：期望**点名观测到的元素**，不是一句泛泛的"点击"
+            # ★ 外部探针 16：期望**点名观测到的元素**，不是一句泛泛的"点击"
             label = str(valid.get("label") or "").strip()
             return {"tool": tool, "kind": "click", "args": a,
                     "target": f"hwnd={hwnd} eid={args['eid']}",
@@ -294,7 +294,7 @@ def make_llm_decide(task: str, fallback=None, log=None,
             return fallback(snapshot, st)
 
         try:
-            # ★ Kimi 探针 07：预算按**尝试**计数（超时/坏输出同样烧预算）——
+            # ★ 外部探针 07：预算按**尝试**计数（超时/坏输出同样烧预算）——
             #   否则持续超时的本地模型会被无限重试（hammering）。
             st_counts["llm_used"] += 1
             user = _project_snapshot(snapshot, st)
@@ -305,7 +305,7 @@ def make_llm_decide(task: str, fallback=None, log=None,
                 raise ValueError("回复里没有 JSON")
             obj = json.loads(m.group(0))
             tool = str(obj.get("tool") or "")
-            # ★ Kimi 探针 13：done 需要**客观完成证据**（本会话至少一次 settled 成功）。
+            # ★ 外部探针 13：done 需要**客观完成证据**（本会话至少一次 settled 成功）。
             #   证据不足时模型说 done ⇒ **不收工也不停**——转规则决策继续干活
             #   （规则会从"目标窗未 focus"这类第一步续起）。
             if tool == "done":

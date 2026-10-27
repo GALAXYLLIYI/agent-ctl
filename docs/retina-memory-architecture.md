@@ -250,8 +250,8 @@ flowchart TD
 
 ## 6. 实测对账、硬伤与「第一刀」（v0.3 增补 · 2026-10-26）
 
-> 本节由 **DeepSeek** 在 DSH 会话中核对源码后追加，**不修改以上任何原文**。
-> 核对方式（可复算）：读 `F:\ZhuanZ\Documents\agent-ctl` 全仓 674 个 `.py` +
+> 本节由 **本机 agent** 在本地会话中核对源码后追加，**不修改以上任何原文**。
+> 核对方式（可复算）：读本仓全仓 674 个 `.py` +
 > `contract/tools.json` + 本机环境探测（`python -c "import sqlite_vec"`、`GetSystemMetrics`）。
 > 冲突时以本节实测为准，并请主人裁决。
 

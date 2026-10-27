@@ -85,7 +85,7 @@ class MCPClient:
         url: Optional[str] = None,
         token: Optional[str] = None,
         timeout: float = 60.0,
-        actor: str = "minicode-agent-loop",
+        actor: str = "agent-loop",
     ):
         self.url = (url or os.environ.get("AGENTCTL_MCP_URL") or DEFAULT_MCP_URL).strip()
         self.token = token if token is not None else read_token()
@@ -164,9 +164,9 @@ class MCPClient:
 def image_allowed(win_exe: str, win_cls: str) -> tuple[bool, str]:
     """发图前敏感窗终判。
 
-    ★ 语义（真机踩的坑 + Kimi 探针 02）：`_win_sensitive` 返回 (hit, why)——
+    ★ 语义（真机踩的坑 + 外部探针 02）：`_win_sensitive` 返回 (hit, why)——
     hit=True = 命中敏感名单 = 要拦；本函数返回"是否允许发图"⇒ not hit 才放行。
-    ★ Kimi 探针 02：exe/cls **均不可得** ⇒ 无法证明该窗不敏感 ⇒ fail-closed 不发
+    ★ 外部探针 02：exe/cls **均不可得** ⇒ 无法证明该窗不敏感 ⇒ fail-closed 不发
     （"身份不明"不是"安全"的证据）。
     """
     if not (str(win_exe or "").strip() or str(win_cls or "").strip()):
@@ -224,7 +224,7 @@ def perceive(client: MCPClient, query: str = "") -> dict:
                       include_offscreen=False)
     if scr.get("ok"):
         d = scr.get("data") or {}
-        # ★ 信封解包（Kimi 独立核验探针 01）：真实回执的对象在 data.结果 里，
+        # ★ 信封解包（外部独立核验探针 01）：真实回执的对象在 data.结果 里，
         #   只读 data.objects ⇒ UIA 对象永远为空（LLM 全盲）。两层都试。
         payload = d.get("结果") if isinstance(d.get("结果"), dict) else d
         snap["screen"] = {
@@ -331,7 +331,7 @@ def _vision_locate(shot: dict, target_query: str, win: dict) -> list[dict]:
 
 
 def _pick_window(wins: list) -> Optional[dict]:
-    """v0 规则修订（Kimi 探针 14）：**不硬编码记事本**——前台优先，
+    """v0 规则修订（外部探针 14）：**不硬编码记事本**——前台优先，
     排除自家控制面（边框/面板），否则取第一个非最小化窗。"""
     if not isinstance(wins, list):
         return None
@@ -372,7 +372,7 @@ def decide(snapshot: dict, state: Optional[dict] = None) -> Optional[dict]:
         return None
     hwnd = int(target["hwnd"])
 
-    # 窗口身份绑定（Kimi 探针 15 修订）：hwnd 变了 ⇒ **重置计划与完成态**——
+    # 窗口身份绑定（外部探针 15 修订）：hwnd 变了 ⇒ **重置计划与完成态**——
     #   新窗口是新计划，旧窗的 typed/clicked 完成度不许继承（否则新窗秒收工）；
     #   真机预演的教训仍在：旧 hwnd 幽灵狂点 ⇒ code=5 洪水。
     plan_hwnd = st.get("plan_hwnd")
@@ -461,14 +461,14 @@ def build_episode(
     ok = 1 if resp.get("ok") else 0
     code = resp.get("code")
     outcome, verdict = verdict_from_code(ok, code)
-    # ★ Kimi 探针 27：code=9 = 闸门拒绝（denied）——outcome 记 **blocked**、
+    # ★ 外部探针 27：code=9 = 闸门拒绝（denied）——outcome 记 **blocked**、
     #   核验判 **unobservable**（动作没发出去：不是 failed，也不能当成功）。
     if code == 9 and not ok:
         outcome, verdict = "blocked", "unobservable"
     win = snapshot.get("target") or {}
     exe = str(win.get("process") or win.get("exe") or "")
     cls = str(win.get("class") or win.get("cls") or "")
-    # ★ Kimi 探针 24（隐私过滤双扩展）：①exe/cls **均缺失** ⇒ 身份不明，
+    # ★ 外部探针 24（隐私过滤双扩展）：①exe/cls **均缺失** ⇒ 身份不明，
     #   与命中名单同等待遇 fail-closed（文本一并滤除）；②过滤覆盖 **verify.expect**
     #   （"打出 XXX"里的敏感文本此前会从 expect 回流）。
     identity_known = bool(exe.strip() or cls.strip())
@@ -624,16 +624,16 @@ class AgentLoop:
         args = action.get("args") or {}
         if not isinstance(args, dict):
             args = {}
-        # ★ Kimi 探针 06：租约拿不到 ⇒ **不发动作**（对着闸门 hammer 只会刷出 code=10 洪水）。
+        # ★ 外部探针 06：租约拿不到 ⇒ **不发动作**（对着闸门 hammer 只会刷出 code=10 洪水）。
         if tool in ("ctl_click", "ctl_type", "ctl_fill", "ctl_keys", "ctl_scroll",
                     "ctl_focus", "ctl_browser"):
             if not self._ensure_lease():
                 self.actions_used += 1
                 return {"ok": False, "code": 10,
                         "warning": "无租约且获取失败 ⇒ 动作未发出（探针 06 口径）"}
-        # ★ Kimi 探针 18：保鲜+重定位的**每一步都要重过敏感闸**——重拍前重列窗口
+        # ★ 外部探针 18：保鲜+重定位的**每一步都要重过敏感闸**——重拍前重列窗口
         #   复核目标身份（窗口可能已换成敏感窗），命中 ⇒ 一个字节都不发。
-        # ★ Kimi 探针 11：重定位在新帧里找同一目标，新 xy + 新 capture_id 配对；
+        # ★ 外部探针 11：重定位在新帧里找同一目标，新 xy + 新 capture_id 配对；
         #   重定位失败 ⇒ 丢弃本次点击（宁可丢一步，不可点错）。
         if tool == "ctl_click" and args.get("vision_label") and args.get("hwnd"):
             hwnd_int = int(args["hwnd"])
@@ -703,18 +703,18 @@ class AgentLoop:
             % (self.actions_used, tool, json.dumps(args, ensure_ascii=False)[:160])
         )
         resp = self.client.call(tool, **args)
-        # ★ Kimi 探针 20：code=10 拒绝后**不得**重新拿租约再打一遍——
+        # ★ 外部探针 20：code=10 拒绝后**不得**重新拿租约再打一遍——
         #   闸门说不发就是不发；重试须由下一轮决策基于最新 state 另行判断。
         return resp
 
     def remember(self, ep: Episode, compact_every: int = 0, step_no: int = 0) -> int:
-        """入库+定期巩固（实例方法：便于测试打补丁，Kimi 探针 05/06 依赖）。"""
+        """入库+定期巩固（实例方法：便于测试打补丁，外部探针 05/06 依赖）。"""
         return remember(self.store, ep, compact_every, step_no)
 
     def run(self, max_steps: int = 3) -> list[Episode]:
         """跑 ≤max_steps 步写动作循环；每步落一条 episode。
 
-        ★ 徒劳熔断（Kimi 探针 17）：同一动作（工具+参数全同）**连续失败**两次
+        ★ 徒劳熔断（外部探针 17）：同一动作（工具+参数全同）**连续失败**两次
           ⇒ 停止循环（等环境/用户干预），不许对着闸门 hammer。
         """
         steps = 0
@@ -750,7 +750,7 @@ class AgentLoop:
                 "[ep#%d] kind=%s outcome=%s code=%s ok=%s"
                 % (ep_id, ep.kind, ep.outcome, code, ok)
             )
-            # ★ 三值语义（Kimi 探针 05 修正）：code=8「确认没变」只对 focus 等于
+            # ★ 三值语义（外部探针 05 修正）：code=8「确认没变」只对 focus 等于
             #   「已在目标状态」；对 type/click，打了/点了画面却没变 = **没生效**，
             #   不许推进状态（把 8 当达成会让重复打字被标成成功）。
             settled = ok or (code == 8 and action.get("kind") == "focus")

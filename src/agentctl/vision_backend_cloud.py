@@ -138,7 +138,7 @@ def _state_update(model: str, tokens_in: int, tokens_out: int,
 
 
 def _budget_check(model: str) -> None:
-    """日预算闸——**fail-closed**（Kimi 探针 19）：
+    """日预算闸——**fail-closed**（外部探针 19）：
     · 模型不在价格表（价格未知）⇒ 无法核算 ⇒ 拒发；
     · 状态文件不可读/损坏 ⇒ 消费无从对账 ⇒ 拒发；
     · 今日估算 ≥ 预算 ⇒ 拒发。

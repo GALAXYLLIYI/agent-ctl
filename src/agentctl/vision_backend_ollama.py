@@ -114,7 +114,7 @@ class OllamaBackend:
         """与 CloudBackend 同款三坐标口径容错（0-1 角点 / 0-1000 / 像素 / [x,y,w,h]）。"""
         import re
         text = (content or "").strip()
-        # ★ Kimi 探针 04：对象形态 {"label":…,"bbox_2d":[…]} 与数组形态 [{…,"bbox_2d":…}]
+        # ★ 外部探针 04：对象形态 {"label":…,"bbox_2d":[…]} 与数组形态 [{…,"bbox_2d":…}]
         #   必须**同语义**——先整包直解 JSON（保住 bbox_2d 原生标记），
         #   失败才退化到正则搜数组（旧路径会丢标记 ⇒ 同数据两种结果）。
         items = None

@@ -813,7 +813,7 @@ def t_timeline(args: dict) -> dict:
 
 
 def t_verify(args: dict) -> dict:
-    # ★ Kimi 探针 22：调用方请求的事件范围必须**转发**给 store 校验（此前被丢弃）。
+    # ★ 外部探针 22：调用方请求的事件范围必须**转发**给 store 校验（此前被丢弃）。
     kwargs = {"check_frames": bool(args.get("check_frames", True))}
     for k in ("from_event", "to_event"):
         if args.get(k) is not None:

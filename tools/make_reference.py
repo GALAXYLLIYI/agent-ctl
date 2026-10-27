@@ -2,6 +2,7 @@
 """生成 docx/reference.docx（只存样式）：正文宋体12pt/1.3行距/孤行控制、Source Code 双字体、
 分隔线段落下边框、表格表头加粗。"""
 import os
+import shutil
 import subprocess
 
 import docx
@@ -9,9 +10,9 @@ from docx.enum.text import WD_LINE_SPACING
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 
-REPO = r"F:\ZhuanZ\Documents\agent-ctl"
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REF = os.path.join(REPO, "docx", "reference.docx")
-PANDOC = r"F:\ZhuanZ\Documents\tools\pandoc-3.12.1\pandoc.exe"
+PANDOC = os.environ.get("AGENTCTL_PANDOC") or shutil.which("pandoc") or "pandoc"
 
 
 def set_east_asia(style_or_run, font_cn: str, font_ascii: str | None = None):

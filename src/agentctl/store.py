@@ -788,7 +788,7 @@ class Store:
         ok, first_bad, stats = (
             self._verify_full(check_frames=check_frames) if scope == "full"
             else self._verify_epoch(check_frames=check_frames))
-        # ★ Kimi 探针 22：调用方请求的范围必须**记账**——哈希链连续性校验仍须
+        # ★ 外部探针 22：调用方请求的范围必须**记账**——哈希链连续性校验仍须
         #   整段（跳过旧链点=校验作废），范围只约束报告口径（如实注明，不假装已滤）。
         if (from_event is not None or to_event is not None) and isinstance(stats, dict):
             stats["requested_range"] = {"from_event": from_event, "to_event": to_event,

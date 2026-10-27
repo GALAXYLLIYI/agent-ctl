@@ -15,7 +15,8 @@ import tempfile
 import zipfile
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-PANDOC = r"F:\ZhuanZ\Documents\tools\pandoc-3.12.1\pandoc.exe"
+# pandoc 走 PATH/环境变量，不写死本机路径（开源仓不许出现个人绝对路径）
+PANDOC = os.environ.get("AGENTCTL_PANDOC") or shutil.which("pandoc") or "pandoc"
 MD = os.path.join(REPO, "docs", "retina-memory-architecture.md")
 WORK = os.path.join(REPO, "work", "_排版管线_20261026")
 DIST = os.path.join(WORK, "dist")
@@ -53,7 +54,12 @@ def run_pandoc(out):
 
 
 def patch_settings(docx_path):
-    """pandoc 不写 updateFields；补一个，Word 打开会提示更新 TOC 域。"""
+    """pandoc 不写 updateFields；补一个，Word 打开会提示更新 TOC 域。
+
+    ★ 同时脱敏：图片的 descr/name 属性会带渲染中间目录的绝对路径（本机用户名/盘符）
+      ⇒ 全部替换成文件名，开源产物里不留个人路径。
+    """
+    abs_png = re.compile(r"[A-Za-z]:\\[^\"<>]*?\.png")
     tmp = docx_path + ".tmp"
     with zipfile.ZipFile(docx_path) as zin, zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zout:
         for item in zin.infolist():
@@ -63,6 +69,10 @@ def patch_settings(docx_path):
                 if "updateFields" not in s:
                     s = s.replace("</w:settings>",
                                   '<w:updateFields w:val="true"/></w:settings>')
+                data = s.encode("utf-8")
+            elif item.filename == "word/document.xml":
+                s = data.decode("utf-8")
+                s = abs_png.sub(lambda m: os.path.basename(m.group(0)), s)
                 data = s.encode("utf-8")
             zout.writestr(item, data)
     os.replace(tmp, docx_path)
