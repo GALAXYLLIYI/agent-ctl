@@ -1,96 +1,233 @@
-# agent-ctl · 桌面动作闸门
+<div align="center">
 
-> 给「敢让 AI 动手、但必须能事后证明它干了什么」的人：
-> **人类签发 → AI 执行 → 全程可审计 → 随时可急停。**
+# computer-use-gate
 
-Windows 上的「桌面动作闸门」：**人类签发通行证 → AI 执行 GUI 动作 → 全程留证据 → 急停文件一键全停。**
+## Windows 版 Computer Use
 
-> **TL;DR (English)** — A Windows-only **desktop action gate** for AI agents:
-> *human issues a pass → the agent acts → every action leaves evidence → one kill switch.*
-> Experimental 0.x personal project: no SLA, API may change. Needs **Windows 10/11 x64 + Python 3.12 + git**.
-> **Default-deny by design** (nothing moves until a human issues a pass); scope is deliberately narrow — see「适用范围（很有限）」below.
-> *Keywords: computer-use agent · MCP server · desktop action gate · Windows automation · agent safety · audit trail.*
+### 无需显卡 · 任何 AI 都能接 · 你不点头它不动手
 
-| 状态 | 协议 | 平台 | 授权 |
-|---|---|---|---|
-| **实验性（0.x，API 可能变）** | **Apache License 2.0** | Windows 10/11 x64（实测） | **默认关闭**，需人工签发 |
+**真正让你感受一下 Windows 版的 Computer Use。**
 
-> ⚠ **这是第一次开源的个人项目**：由作者与几位协作者共同维护，技术与运营都还不成熟。
-> **不提供 SLA、不承诺兼容性、会有破坏性变更。** 详见 [免责声明](#免责声明)。
+**让你的 AI 真正在 Windows 上动手：看屏幕、点按钮、打字、切窗口、操作网页。**
+**每一下都要你授权，每一下都留证据，按一个键全部停下。**
+
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+![Platform](https://img.shields.io/badge/Windows-10%20%2F%2011-0078D6)
+![GPU](https://img.shields.io/badge/GPU-不需要-brightgreen)
+![MCP](https://img.shields.io/badge/MCP-stdio%20%7C%20HTTP-8A2BE2)
+![Status](https://img.shields.io/badge/status-0.x%20实验版-orange)
+
+[5 分钟上手](#5-分钟上手) · [任何 AI 都能接](#任何-ai-都能接) · [为什么不要显卡](#为什么不要显卡) · [为什么敢让它动手](#为什么敢让它动手)
+
+*Computer Use for Windows. No GPU. Works with any agent via MCP, HTTP or CLI. Default-deny, evidence for every action, one-key emergency stop.*
+
+</div>
+
+> **TL;DR (English)** — **Computer Use for Windows**, running on your own desktop: your AI agent can see the screen, click, type, switch windows and drive web pages.
+> - **No GPU needed**: controls are read via Windows UI Automation, built-in Windows OCR and browser CDP, not a local vision model.
+> - **Works with any agent**: Claude Code, Codex, Gemini CLI, Cursor, Cherry Studio or your own scripts, via **MCP (stdio / HTTP)**, **HTTP API** or **CLI**.
+> - **Default-deny**: nothing moves until **you** click "Allow" on an on-screen prompt. A pass lasts 30 minutes or 60 actions.
+> - **Evidence for every action**: before/after screenshots, a hash-chained tamper-evident log, and exportable replay videos.
+> - **One-key stop**: `Ctrl+Alt+Home` halts everything immediately.
 >
-> **协作者**：本仓已开放 GitHub / Gitee 协作者权限，欢迎提 PR。
-> 贡献者名单见 [`CONTRIBUTORS.md`](CONTRIBUTORS.md)，贡献流程见 [`CONTRIBUTING.md`](CONTRIBUTING.md)。
-
-> **成熟度自评（2026-10-25 · 外部评审原话，作者接受）**
-> **设计层接近成熟，实现层半熟，验证层基本没有。**
-> · 设计：安全模型 / fail-open 防御 / capture 绑定 / 租约语义达到生产系统推演水准；
-> · 实现：闸门内核质量高，但 `core.py` 巨石、双 gate 生成、错误码历史包袱是**没还完的债**；
-> · 验证：判据全部跑在作者自己的机器上，A/B 只有 3/3 小样本，**零外部用户、零真实故障史**。
-> ⇒ **完成度很高，成熟度很低**；可以当“本机可控实验 + 设计参考”，**不建议现在拿它当生产防线**。
-> 走向成熟的关键路径：外部真实环境跑坏它 → 坏法变成判据 → 桌面判据进 CI（自托管 runner）→ `core.py` 瘦身 → API 冻结一个周期。
-
-Copyright (c) 2026 GALAXYLLIYI
-源码头部建议加一行 SPDX 标识：`# SPDX-License-Identifier: Apache-2.0`（统一补头由维护者处理）
+> Experimental 0.x: no SLA, APIs may change. Needs **Windows 10/11 x64 + Python 3.12 + git**. Quick start: [5 分钟上手](#5-分钟上手); scope and limits: [先说清楚适用范围](#先说清楚适用范围).
+>
+> *Keywords: computer-use agent · MCP server · Windows automation · desktop action gate · agent safety · audit trail.*
 
 ---
 
-## 只说三句
+## 一句话说明
 
-1. **AI 点之前，必须你点头；点之后，必须留下证据。**
-2. **一份通行证管 30 分钟 60 次，一个急停文件能立刻全停。**
-3. **它点错窗，这一击根本发不出去——并告诉你该关哪个窗；不会骗你说成功。**
-
-## 五道闸（每个 UI 动作落到键鼠之前，依次过）
-
-```
-人类签发（弹窗一次给 ABCD，30 分钟/60 次） → 租约（任务→窗口，只追加不覆盖，子随父亡）
-→ 帧凭据（旧帧点新画面 = 拒绝） → 敏感窗服务端终判（--xy 直点也拦）
-→ 急停一票否决（文件级，拉下即全灭） ⇒ 证据链（前后差分 / hit_test 归属 / 决策日志）
-```
-
-装完**默认关闭**：没有通行证，A/B/C/D 一律拒（这是设计，不是没装好）。急停三通道：面板 ⏹ / `Ctrl+Alt+Home` / 删急停标志；关面板 ≠ 解除急停。
-
-## 这是给谁的 / 不是给谁的
-
-**适合**
-
-- 愿意为**每一次动作**做授权与复核的人 —— 本项目的全部价值就在这一步。
-- 需要「事后能证明 AI 干了什么」的场景：合规留痕、复盘、交接。
-- 在**自己的机器**上跑、愿意接受「默认拒绝、逐次签发」这个节奏的实验者。
-
-**不适合**
-
-- ❌ **无人值守批量点击** —— 每 60 次动作就要人点一次授权，这正是它的设计，不是缺陷。
-- ❌ **绕过风控 / 验证码 / 权限边界** —— 本项目**不做**这个，也不应被用来做这个。
-- ❌ **需要 SLA 的生产环境** —— 实验性个人项目，无可用性承诺、无响应时限。
-- ❌ **需要稳定兼容性的集成方** —— 0.x 阶段，接口与契约会主动变。
-
-## 装之前先看三句
-
-1. **环境**：Windows 10/11 x64 + **Python 3.12** + **git**（建议 PowerShell 7）。Linux / macOS 不支持。
-2. **装完默认什么都不通**——这是设计，不是装坏了：没有通行证，A/B/C/D 一律拒；要先用面板「🔑 授权」或 CLI 签发。
-3. **目前不是安装包**：是脚本安装（`install.ps1`，不往系统目录写新 exe、因此无需代码签名）。从 Release 下 zip 的话，**先核 `agentctl.zip.sha256` 再装**。
-
-## 安装
-
-仓库拓扑（2026-10-24 起）：
-
-| 仓 | 地址 | 状态 | 角色 |
-|---|---|---|---|
-| **GitHub** | https://github.com/GALAXYLLIYI/computer-use-gate | **公开** | **主仓**：开发、Issue、PR、Release 以这里为准 |
-| **Gitee** | https://gitee.com/GALAXYLIYI/computer-use-gate | **公开** | **镜像**：每次推送同步，国内可直连安装 |
-
-> 两个仓都已公开；下载安装包请到 **Release**（附 `agentctl.zip.sha256`）。
+> 别的 Computer Use 方案，要么只能跑在 Linux 虚拟机里，要么要一块好显卡跑视觉模型，要么只认某一家的 AI。
 >
-> 主仓与镜像现同名 **computer-use-gate**（旧链接自动重定向）。
+> **computer-use-gate 直接跑在你自己的 Windows 桌面上，普通笔记本就够用，Claude、Codex、Gemini、Cursor、Cherry Studio，或者你自己写的脚本，都能接。**
 
-公开仓：
+| | 常见方案 | **computer-use-gate** |
+|---|---|---|
+| 跑在哪 | Linux 虚拟机 / 云端沙箱 | **你自己的 Windows 桌面** |
+| 要不要显卡 | 本地视觉模型要一块好显卡 | **不要**，Windows 自带的能力就够 |
+| 能接哪个 AI | 通常绑定一家 | **任何 AI**：MCP、HTTP、命令行三种接法 |
+| 动手前问不问你 | 装好就能动 | **默认全部拒绝**，你点"允许"才放行 |
+| 它说"成功了" | 动作发出去就算 | **再看一眼屏幕**，画面没变不算成功 |
+| 想叫停 | 关程序 | **`Ctrl+Alt+Home`**，立刻全停 |
+| 事后查账 | 基本没有 | **前后截图 + 防篡改日志 + 回放视频** |
+
+---
+
+## 为什么不要显卡
+
+很多 Computer Use 每走一步都要截一张图，丢给视觉模型去猜"按钮在哪"。又慢、又贵，本地跑还得有显卡。
+
+computer-use-gate 换了个思路：**先问 Windows，再看截图。**
+
+| 能力 | 用的是什么 | 要不要显卡 |
+|---|---|---|
+| 找按钮、读控件 | Windows 自带的 **UI Automation**，直接拿到控件的名字和位置 | ❌ |
+| 认屏幕上的字 | Windows 自带的 **OCR**，不用下载模型 | ❌ |
+| 读网页 | 浏览器自带的 **CDP**，直接读页面文字和元素 | ❌ |
+| 截图 | 窗口被挡住也能截 | ❌ |
+
+AI 拿到的是"保存按钮在 (812, 430)"这样的准确答案，不用自己从像素里猜。**普通笔记本、核显、轻薄本都能跑。**
+
+---
+
+## 任何 AI 都能接
+
+同一套工具，提供三种接法。**支持 MCP 的 AI 直接接；不支持的，用 HTTP 或命令行也能调。**
+
+| 接法 | 地址 / 命令 | 适合谁 |
+|---|---|---|
+| **MCP stdio** | `agentctl.cmd mcp` | 绝大多数 AI 客户端，最省事 |
+| **MCP HTTP** | `http://127.0.0.1:8761/mcp` + Bearer 令牌 | 想让多个客户端共用一个常驻服务 |
+| **HTTP API** | `http://127.0.0.1:8760/v1/...` + `X-AgentCtl-Token` | 自己写的 agent、Python / Node 脚本、工作流工具 |
+| **命令行** | `agentctl.cmd click --hwnd N --name 保存` | 批处理、PowerShell、人工调试 |
+
+下面的 `<安装目录>` 换成你实际的安装位置。令牌默认在 `%LOCALAPPDATA%\AgentCtl\state\token`，设了 `AGENTCTL_HOME` 的话就在 `%AGENTCTL_HOME%\state\token`。
+
+<details open>
+<summary><b>Claude Code</b></summary>
 
 ```powershell
-git clone https://gitee.com/GALAXYLIYI/computer-use-gate ; cd computer-use-gate ; pwsh -File .\install.ps1
+claude mcp add agentctl -- "<安装目录>\agentctl.cmd" mcp
+```
+</details>
+
+<details>
+<summary><b>Codex CLI</b></summary>
+
+```powershell
+codex mcp add agentctl -- "<安装目录>\agentctl.cmd" mcp
 ```
 
-一行装（先看清脚本再跑更稳）：
+或者接常驻的 HTTP 服务：
+
+```powershell
+$env:AGENTCTL_MCP_TOKEN = (Get-Content "$env:LOCALAPPDATA\AgentCtl\state\token" -Raw).Trim()
+codex mcp add agentctl --url http://127.0.0.1:8761/mcp --bearer-token-env-var AGENTCTL_MCP_TOKEN
+```
+</details>
+
+<details>
+<summary><b>Gemini CLI / Cursor / Cherry Studio / VS Code 等任何 MCP 客户端</b></summary>
+
+在客户端的 MCP 配置里加一个 stdio 服务器。大多数客户端都认这个格式（Gemini CLI 是 `~/.gemini/settings.json`，Cursor 是 `.cursor/mcp.json`，Cherry Studio 在设置界面里填同样的命令和参数）：
+
+```json
+{
+  "mcpServers": {
+    "agentctl": {
+      "command": "<安装目录>\\agentctl.cmd",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+</details>
+
+<details>
+<summary><b>不支持 MCP？直接用 HTTP</b></summary>
+
+先启动 HTTP 服务：
+
+```powershell
+agentctl.cmd serve
+```
+
+然后任何语言都能调，比如 Python：
+
+```python
+import os
+import requests
+
+token = open(os.path.expandvars(r"%LOCALAPPDATA%\AgentCtl\state\token"), encoding="utf-8").read().strip()
+api = "http://127.0.0.1:8760/v1"
+headers = {"X-AgentCtl-Token": token}
+
+print(requests.get(f"{api}/status", headers=headers).json())                 # 查状态
+print(requests.post(f"{api}/perceive/windows", json={}, headers=headers).json())  # 列窗口
+```
+
+完整接口见 [`docs/AGENT接口.md`](docs/AGENT接口.md)。
+</details>
+
+---
+
+## 它能做什么
+
+接上之后，你的 AI 会多出 20 多个桌面工具：
+
+| 类别 | 工具 | 用来做什么 |
+|---|---|---|
+| 👀 **看** | `ctl_windows` `ctl_shot` `ctl_tree` `ctl_find` `ctl_screen` | 列出窗口；截图（窗口被挡住也能截）；读控件名称和位置；按文字找按钮；OCR 认字 |
+| 🖱 **动** | `ctl_click` `ctl_type` `ctl_fill` `ctl_scroll` `ctl_keys` `ctl_focus` | 点击、打字（中文直接输入）、一步填好输入框、滚动、快捷键、切换窗口 |
+| 🌐 **网页** | `ctl_browser` | 通过 CDP 读网页文字、找元素、精确滚动 |
+| 🛡 **管** | `ctl_authorize` `ctl_lease` `ctl_brake` `ctl_preflight` `ctl_status` | 申请授权、一次只让一个 AI 动手、急停、动手前体检、查状态 |
+| 🧾 **证据** | `ctl_timeline` `ctl_verify` `ctl_replay` `ctl_record` `ctl_witness` | 查动作记录、校验记录有没有被改、导出回放视频、录屏、核对系统时间 |
+
+**你可以这样跟 AI 说：**
+
+> "打开记事本，写一段会议纪要，存到桌面。"
+> "把这个网页表格里的数据抄进 Excel。"
+> "帮我在设置里找到显示缩放，截图给我看现在是多少。"
+
+AI 会自己列窗口、找控件、点击、打字，每一步都先过闸门，做完给你看前后截图。
+
+---
+
+## 为什么敢让它动手
+
+把键鼠直接交给 AI，等于把电脑借给一个没见过面的人。computer-use-gate 在 AI 和键鼠中间加了五道闸，每个动作都要依次通过：
+
+```
+① 你签发通行证 → ② 租约绑定窗口 → ③ 截图必须是新的 → ④ 敏感窗口一律拦 → ⑤ 急停一票否决
+                                                                          ⇓
+                                                     每一步都写进证据链（前后截图 + 决策日志）
+```
+
+| 闸 | 防的是什么 | 怎么做到 |
+|---|---|---|
+| ① **通行证** | AI 偷偷动手 | 装完默认全部拒绝。屏幕弹窗由**你本人**点"允许"，一张通行证管 30 分钟或 60 个动作。AI 没法替你点这个弹窗 |
+| ② **租约** | 几个 AI 同时抢鼠标 | 同一时间只有一个 AI 能动手，其他的只能看 |
+| ③ **帧凭据** | 拿旧截图点新画面 | 每次点击都要带截图编号，画面已经变了就拒绝 |
+| ④ **敏感窗口** | AI 去点授权弹窗 | 授权弹窗由服务端直接拦截，给坐标也点不进去 |
+| ⑤ **急停** | 停不下来 | 面板 ⏹ 按钮、`Ctrl+Alt+Home` 全局快捷键、删除急停文件，任选一种，立刻全停 |
+
+控制期间屏幕四周会亮一圈细边框，你随时知道 AI 正在动手。
+
+### 它不会骗你说"成功了"
+
+每个动作做完，它都会再看一眼屏幕，给出三种结果之一：
+
+| 结果 | 代码 | 意思 |
+|---|---|---|
+| ✅ 生效 | `0` | 画面确实变了 |
+| ⚠ 确认没变 | `8` | 动作发出去了，画面没变，**不算成功** |
+| ❓ 没测出来 | `5` | 没测到或环境不稳，**可以重试**，也不算成功 |
+
+点错窗口时，这一下根本不会发出去，它还会告诉你该关掉哪个窗口。
+
+### 事后能查、能证明
+
+- 每个动作都记进时间线，记录带**哈希链**。改过一个字，`ctl_verify` 就能指出从第几条开始坏的。
+- 任意一段操作都能用 `ctl_replay` 导出回放视频，不用装 ffmpeg。
+- 复盘、交接、需要留记录的场景都用得上。
+
+---
+
+## 5 分钟上手
+
+**你需要**：Windows 10/11 x64、Python 3.12、git。**不需要显卡，不需要虚拟机，不需要 Docker。**
+
+### 1. 安装
+
+```powershell
+# 国内用 Gitee 镜像；海外换成 https://github.com/GALAXYLLIYI/computer-use-gate
+git clone https://gitee.com/GALAXYLIYI/computer-use-gate
+cd computer-use-gate
+pwsh -File .\install.ps1
+```
+
+想先看清脚本再运行（推荐）：
 
 ```powershell
 irm https://gitee.com/GALAXYLIYI/computer-use-gate/raw/main/install.ps1 -OutFile install.ps1
@@ -98,236 +235,119 @@ notepad install.ps1      # 看一眼
 .\install.ps1
 ```
 
-离线：`python -X utf8 tools\pack_dist.py` 生成 `dist\agentctl.zip`，目标机 `.\install.ps1 -Zip .\agentctl.zip`。更新=重跑同一条命令；`.\uninstall.ps1` 卸载（数据保留），`-Purge` 全清。旧版详细安装/构建/已知问题见 `docs\README_旧版存档_v1.2.md`。
-
-下载压缩包时**先核哈希再装**（发布页会同时提供 `agentctl.zip.sha256`）：
+从 Release 下载 zip 的话，先核对哈希：
 
 ```powershell
 Get-FileHash .\agentctl.zip -Algorithm SHA256
-# 与 .sha256 文件里的第一列逐字符比对；不一致就别装、重新下载
+# 和 agentctl.zip.sha256 里的值逐字比对，不一样就别装
 ```
 
+### 2. 接到你的 AI
 
-## 默认关闭（装完什么都不通，这是设计）
+按上面 [任何 AI 都能接](#任何-ai-都能接) 选一种方式，一条命令或一段配置就够了。
 
-- **默认无通行证 ⇒ 一切动作一律被拒**：`ctl_authorize` 之前，所有写动作都返回未授权；急停 flag 一票否决。
-- **怎么开**：调用 `ctl_authorize`（或跑 `python -X utf8 tools\申请授权.py`）→ **屏幕上弹窗**，由人点「允许」，
-  弹出时**现场签发密钥**（写进 `_auth\auth_pass.json`，默认 30 分钟 / 60 次）；弹窗不可被 agent 代点。
-- **怎么自验**：`python -X utf8 tests\_默认关闭_判据.py`（默认全拒、显式放行后才通、急停压过一切）。
+### 3. 签发通行证，开始干活
 
-## 明确不做什么
+让 AI 调用 `ctl_authorize`，屏幕上会弹出授权窗口，**你本人**点"允许"。接下来 30 分钟或 60 个动作内，它可以在你授权的范围里动手。
 
-- ❌ 不做通用 CUA（点得准是别人的战场）
-- ❌ 不做多 agent 调度平台（派单不是产品能力）
-- ❌ 不承诺 VLM 升级（未接线就是假承诺；`must_vlm` 只如实报"不可用原因"）
-- ❌ 不发布 IDG 隐形网格（p95 尾部未压到 400ms 前不上）
-
-## 能力边界与已知限制
-
-下面每条都来自仓内**已实测**的记录（文件名可回查），不是设计愿望。
-
-### 适用范围（很有限 —— 先看这条）
-
-**本项目现在只适合：Windows 桌面 + 已授权 + 有人值守的短时操作。** 很多能力仍在开发中，
-请不要按「通用 RPA / 无人值守框架」的预期来用它：
-
-- ✅ **能做**：在一台 Windows 机器上，让被授权的 agent 通过 MCP / CLI / 面板做**可留痕**的点击、打字、窗口操作；
-  慢应用有加长观测；出错给明确码（成功 / 没测出来 / 确认没变）。
-- ⛔ **不能做**：Linux / macOS；云端或远程控制；无人值守批量；验证码/风控绕过；需要 SLA 的生产集成；
-  Canvas、游戏、PDF 内嵌、未开无障碍的 Electron 等 UIA 看不见的界面（只能截图兜底，等于「看不清」）。
-- 🚧 **开发中**：多显示器与缩放适配、更丰富的感知通道、更多业务工具（答题/作业等）、跨机器配置迁移。
-
-> 一句话：**它是「安全可控的个人电脑操作面」，不是万能助手；功能会继续加，但现在请按上面的范围用。**
-
-### 等生效：有效预算比名义预算少一整轮
-
-- 生产点击路径的等生效预算是 **450ms**（`legacy_tools\act.py` 里 `do_click` 三处传 `budget_ms=int(_settle(450)*1000)`；
-  `AGENTCTL_SETTLE_MS` 环境变量可调）。⛔ `act.py` 里的 `POLL_BUDGET_MS = 800` **只是函数默认值、不是生产值** ——
-  拿 800 去定性能曲线会系统性偏一倍（`docs\七小时任务_阶段总结_20221022.md`、`docs\意见\意见_windowB_20221022.md`）。
-- 实测：名义 450ms **只能覆盖约 431ms 的响应延迟**。差的那一整轮不是应用慢，而是 `need=2` 迟滞要求「多一帧确认」，
-  在预算边界上把「看见了但来不及确认」判成了「没变」（`docs\发现_有效预算比名义预算少一轮_20221023.md`）。
-- 实测检测率矩阵（预算 450ms）：响应 **0ms / 100ms / 200ms 检出率 100%**，**300ms 及以上整段掉到 0%**
-  ⇒ **切线在 200ms，不在 450ms**（同上，§一）。
-- 填字路径的总预算是 **1500ms**（`POLL_BUDGET_MS_FILL`），与点击不是同一个数。
-- core 侧另有一层 300ms 的回落预算（`framecache.WAIT_BUDGET_MS = 300`）；M20「core 甲案」在判「确认没变」**之前**
-  用 core 自己的尺子再看 ≤300ms（`docs\实测_M20_core加长观测_20221023.md`）。
-
-### 判词是三态，不是两态
-
-| 判词 | 出口码 | 含义 |
-|---|---|---|
-| 生效 | `code=0` | 画面确实变了 |
-| 确认没变 | `code=8` | 动作发出去了、画面没变 —— **不是成功** |
-| 没测出来 | `code=5` | 没测到 / 读回失败 / 环境不稳 —— **可重试**，不许当成功 |
-
-M19 → M19′ → M19P → M19P2 这一串修复的就是这件事：**「没测出来」曾被报成「确认没变」**，现在统一走三态映射
-（`docs\实测_M19_语义修复_20221023.md`、`docs\实测_M19P2_同族两处_20221023.md`）。
-
-### 判据与桌面
-
-- **判据规模（2026-10-25 实测口径）**：主清单 **60 条**登记（`python -X utf8 tests\run_all.py --list`）；
-  仓库里 **76 个「判据」文件**、**107 个测试文件**。对外说数量请用这两个可核的数，别用记忆里的旧数。
-- **桌面相关判据必须在有交互桌面会话的 Windows 上跑**：无头会话 / 服务 / CI 跑不了。
-  `tests\run_all.py` 文件头的原话是「**别把它当 CI 判据使**」。
-- 部分窗口不支持 `PrintWindow`（部分 WinUI/DWM、DRM/游戏类画面）⇒ 取不到帧时**如实报「取不到」**，不猜。
-- UIA 控件树对自绘 / Canvas / 游戏 / PDF 视图只能拿到窗口壳 ⇒ 要退到「截图 + 编号标注」路线。
-
-### 视觉感知的已知代价
-
-- OCR 走系统自带 WinRT OCR（**不额外下模型**）；首扫有暖机成本：真页 **0.5s 只拿到 18 节点外壳，3s 稳定到 49 节点**
-  （`docs\AGENT接口.md` §ctl_screen）。
-- `must_vlm` 通道**未接线** —— 如实报「不可用原因」，不做假承诺。
-- 定位有多条路（坐标 / 元素 id / 控件名 / OCR / CDP），按可靠性递降；**旧帧点新画面一律拒绝**（`code=12`）。
-
-### 平台
-
-- Windows 10/11 x64（用到 WinRT OCR，需 Win10 1903+）；Python 3.10+（开发版本 3.12）。
-- ⛔ **不承诺特定 Windows 版本矩阵**，也不承诺与未来版本兼容。
-
-## 隐私与数据边界
-
-- **无遥测、不上传任何数据。** 本项目没有任何上报 / 统计 / 回传逻辑；服务只监听 `127.0.0.1`。
-- **证据只落本机 `work\` 目录**（时间线 jsonl、前后帧指纹、决策日志）。
-  ⚠ 证据里**含前后屏幕截图**，属**敏感本地数据** —— **不要提交到版本库**。
-  `work\` 已被 `.gitignore` 排除，但**发布前仍要自己核一遍**。
-- **动作日志含窗口标题与坐标** —— 窗口标题可能带文件名、账号、客户名；日志转发给别人前先过一遍。
-- 授权状态、通行证、急停标志写在**本机** `%LOCALAPPDATA%\AgentCtl\`（可用 `AGENTCTL_HOME` 改）。
-- 分发包**刻意不含**：`baseline\`（历史快照，含真实手机号 / 授权状态 / 明文 API Key）、`work\`、`dist\`、
-  `__pycache__`、`*.bak*`。打包走 `tools\pack_dist.py` 的白名单 + 隐私复扫，核验走 `tools\verify_dist.py`
-  （**独立重新实现**一遍判据，不信打包脚本 —— 同一份代码既是运动员又是裁判，出错就一起错）。
-- 提交前扫一遍：`python -X utf8 tools\presubmit_scan.py`（扫 **git 索引**里已暂存的内容：
-  手机号 / 密钥字面量 / 个人绝对路径 / 本地 agent 凭据引用 四类）。
-
-## 安全与授权边界
-
-- **只在用户明确授权的窗口上动作。** 授权通过**弹窗**现场签发，**弹窗不可被 agent 代点**；
-  密钥明文不落盘、不回显（只存加盐 SHA-256），主 agent 物理接触不到。
-- **默认关闭**：装完、开机、重启之后，没有通行证 ⇒ A/B/C/D 四档**一律被拒**。装完不会替你签任何证。
-- **急停三通道**（任选其一，**关面板 ≠ 解除急停**）：面板 ⏹ / `Ctrl+Alt+Home` 全局热键 / 删急停标志。
-  急停一拉下，所有自动控制当场停，并联动吊销当前租约。
-- **敏感窗服务端终判**：用户的授权弹窗（标题 `本地 agent电脑控制授权`）任何动作一律禁止 —— 不问、不放行。
-- **租约只追加不覆盖，子随父亡**：同一时刻只允许一个 agent 动手；拿不到租约就只能看。
-- **观测与动作绑定**：点击必须带 `from_capture`，不许凭记忆点坐标；**不拿「看起来对」当判据**。
-- ⛔ **不要用于绕过风控、验证码或权限边界。** 本项目是「让**授权过**的动作留下证据」，
-  **不是**「帮你通过它不该通过的检查」。
-- ⛔ **不要第一次就在生产机 / 有真实账号的机器上开闸。** 先在测试环境、测试账号上把整套流程走一遍。
-
-## 免责声明
-
-- 本项目是**实验性的个人项目**，由作者与几位协作者共同维护，**技术与运营都不成熟**。
-- **不提供 SLA**：没有可用性承诺、没有响应时限承诺、没有赔偿承诺。
-- **不承诺兼容性**：0.x 阶段 API、契约、判据口径都可能变；**会主动做破坏性变更**，
-  升级前请读 [`CHANGELOG.md`](CHANGELOG.md)。
-- **不承担因误用造成的损失**：包括但不限于误点、误填、误删、误提交、账号风控、设备异常。
-  本项目提供的是「让动作**可审计**」的能力，不是「保证动作**正确**」的能力。
-- 证据链只证明「**发生了什么**」，不证明「**这应该发生**」。
-- 自担风险，请先在测试环境验证。
-
-## 开发环境（要改这个仓的人看这节）
+想亲自验证"默认全拒"是不是真的：
 
 ```powershell
-# 建 .venv、装依赖、跑一遍无桌面依赖的闸门
-pwsh -File tools\dev_env.ps1
+python -X utf8 tests\_默认关闭_判据.py
 ```
 
-| 项 | 要求 |
-|---|---|
-| 系统 | **Windows 10/11 x64**（硬要求：控制链路走 UIA / 抓屏 / WinRT OCR） |
-| Python | ≥ 3.10（开发基线 3.12） |
-| Shell | PowerShell 7+ |
-| 桌面 | 跑**桌面类判据**必须有交互桌面会话；CI 跑不了那部分 |
-
-判据分三层（无桌面依赖 / 要桌面 / 已知红），一键脚本、环境变量表、目录速查、
-提交前流程、常见坑，全部在 **[`docs\开发环境.md`](docs/开发环境.md)**。
-
-> ★ 判据**分两层**这件事很重要：`tests\run_all.py` 要真弹窗、真抓屏、真抢全局热键，
-> 无头会话跑不了 —— 它的文件头就写着「**别把它当 CI 判据使**」。
-> CI 跑的是另一套（语法 / 静态 / 契约 / 提交前扫描），见
-> [`.github\workflows\ci.yml`](.github/workflows/ci.yml)。
+> 💡 第一次用，建议拿记事本这类无关紧要的窗口练手，别一上来就在有真实账号的软件上开闸。
 
 ---
 
-## 文档导航
+## 先说清楚适用范围
 
-### 公开可推荐
+**✅ 适合**
+
+- 在**自己的 Windows 电脑**上，让 AI 做有人看着的桌面操作
+- 需要事后说清楚"AI 到底干了什么"的场景
+- 愿意开工前点一下授权的人。这一步就是它的价值所在
+
+**⛔ 不适合**
+
+- **无人值守批量点击**：每 30 分钟或 60 个动作要重新授权，这是设计，不是缺陷
+- **绕过验证码、风控或权限检查**：不做，也请不要这样用
+- **Linux / macOS、云端或远程控制**：目前只支持本机 Windows
+- **需要 SLA 的生产环境**：这是 0.x 实验项目，接口还会变
+
+**🚧 已知限制**
+
+- Canvas、游戏、PDF 内容、没开无障碍的 Electron 应用读不到控件，只能靠截图兜底
+- 多显示器和屏幕缩放（125%、150%）的适配还在开发中，点击位置可能偏
+- 界面响应超过约 200ms 时，可能误报"确认没变"
+- OCR 第一次识别要暖机，大约 3 秒
+
+---
+
+## 隐私：数据不出你的电脑
+
+- **没有遥测，不上传任何数据**，服务只监听 `127.0.0.1`
+- 证据存在本机 `work\` 目录，**里面有屏幕截图和窗口标题，属于敏感数据**，别提交到仓库，也别随手发给别人
+- 授权状态、通行证、急停标志默认存在 `%LOCALAPPDATA%\AgentCtl\`，可以用 `AGENTCTL_HOME` 环境变量改到别的盘
+- 通行证密钥只存加盐哈希，不存明文
+
+---
+
+## 更新与卸载
+
+| 操作 | 命令 |
+|---|---|
+| 更新 | 重新运行 `.\install.ps1` |
+| 卸载（保留数据） | `.\uninstall.ps1` |
+| 卸载并清空数据 | `.\uninstall.ps1 -Purge` |
+| 离线安装 | `python -X utf8 tools\pack_dist.py` 生成 zip，目标机运行 `.\install.ps1 -Zip .\agentctl.zip` |
+
+---
+
+## 项目状态
+
+**实验性 0.x，由作者与几位协作者共同维护。** 当前版本 `v0.1.1`（2026-10-24）。
+
+- 设计接近成熟：安全模型、授权租约、帧凭据都经过推演
+- 实现还有欠账，接口还会调整
+- 判据都在维护者自己的电脑上跑过，**外部用户还很少**
+
+所以最需要的，是**你来把它跑坏**。遇到问题请提 Issue，写清版本、复现步骤、看到了什么、期望看到什么。
+
+本仓已开放 GitHub / Gitee 协作者权限，欢迎提 PR。贡献者名单见 [`CONTRIBUTORS.md`](CONTRIBUTORS.md)，贡献流程见 [`CONTRIBUTING.md`](CONTRIBUTING.md)。
+
+**第一次来？照着 [`docs/贡献者上手指南.md`](docs/贡献者上手指南.md) 走**：接受邀请 → 配环境 → 认证 → 切分支 → 提 PR，每一步都有命令和常见坑。
+
+---
+
+## 文档
 
 | 文档 | 内容 |
 |---|---|
-| [`docs\开发环境.md`](docs/开发环境.md) | **开发环境**：一键脚本、判据分层、环境变量表、提交前流程、常见坑 |
-| [`docs\AGENT接口.md`](docs/AGENT接口.md) | **接口文档**（给 agent 的接入说明书，自包含）。路径已脱敏（本机绝对路径已替换为占位符）。~~原警告~~（第 724 / 743 行），公开前需替换 |
-| [`docs\开源声明_隐私与安全边界.md`](docs/开源声明_隐私与安全边界.md) | 隐私 / 安全 / 免责 / 使用范围的正式声明 |
-| [`docs\调研_等生效策略_20221023.md`](docs/调研_等生效策略_20221023.md) | 调研：等生效该等多久、怎么判 |
-| [`docs\复核_调研_等生效策略_主控核稿_20221023.md`](docs/复核_调研_等生效策略_主控核稿_20221023.md) | 调研的独立复核稿 |
-| [`docs\发现_有效预算比名义预算少一轮_20221023.md`](docs/发现_有效预算比名义预算少一轮_20221023.md) | 实测结论：有效预算 431ms、检测率矩阵 |
-| [`docs\实测_M15_视觉接地_20221022.md`](docs/实测_M15_视觉接地_20221022.md) | 实测：坐标口径统一、字框↔UIA 对齐 |
-| [`docs\实测_M17B_UIA与抓帧_20221022.md`](docs/实测_M17B_UIA与抓帧_20221022.md) | 实测：UIA 与抓帧成本 |
-| [`docs\实测_M17C_时间线与未归因_20221022.md`](docs/实测_M17C_时间线与未归因_20221022.md) | 实测：时间线与未归因部分 |
-| [`docs\实测_M18a_eid复核_20221023.md`](docs/实测_M18a_eid复核_20221023.md) | 实测：eid 复核 |
-| [`docs\实测_M18c_落盘段_20221023.md`](docs/实测_M18c_落盘段_20221023.md) | 实测：落盘段成本 |
-| [`docs\实测_M20_core加长观测_20221023.md`](docs/实测_M20_core加长观测_20221023.md) | 实测：core 甲案「加长观测」 |
-| [`docs\实测_就绪轮询_20221022.md`](docs/实测_就绪轮询_20221022.md) | 实测：就绪轮询 |
-| [`docs\实测_动作链分段_20221022.md`](docs/实测_动作链分段_20221022.md) | 实测：动作链分段计时 |
-| [`docs\电脑控制_社区路径调研_20261002.md`](docs/电脑控制_社区路径调研_20261002.md) | 调研：社区已有的电脑控制路径 |
-| [`docs\视觉参考书目_20261019.md`](docs/视觉参考书目_20261019.md) | 视觉方向的公开文献书目 |
-| [`docs\判据有效性清单_20261017.md`](docs/判据有效性清单_20261017.md) | 判据清单与有效性口径 |
-| [`docs\判据降载清单.md`](docs/判据降载清单.md) | 判据降载方案（快车道 vs 发布前审计） |
-| [`docs\README_旧版存档_v1.2.md`](docs/README_旧版存档_v1.2.md) | 旧版详细安装 / 构建 / 已知问题 |
-
-### 历史实测记录（保留本机路径，仅供追溯）
-
-> ⚠ 这一组文档**保留了当时那台机器的绝对路径**，仅供追溯当时的实测现场；
-> 它们**不是**面向外部读者的推荐阅读材料，路径需在公开前脱敏。
-
-`docs\实测_M16_加速第二刀_20221022.md`｜`docs\实测_M17A_导入归因_20221022.md`｜`docs\实测_M18d_numpy轻量化_20221023.md`｜
-`docs\实测_M19_语义修复_20221023.md`｜`docs\实测_M19P2_同族两处_20221023.md`｜`docs\七小时任务_阶段总结_20221022.md`｜
-`docs\交接_M19P与下一刀_20221023.md`｜`docs\意见\*`（裁决与意见存档）
-
-## 许可
-
-本项目采用 **Apache License 2.0**，详见 [`LICENSE`](LICENSE)。
-
-- 允许使用、修改、分发、再分发，**包括闭源商业使用**。
-- 保留版权声明与 NOTICE，注明变更。
-- Apache-2.0 额外提供**专利授权**与**专利诉讼终止**条款。
-- 本仓库**不设任何附加限制** —— 不追加任何与 Apache-2.0 冲突的使用条款。
-- Copyright (c) 2026 GALAXYLLIYI
-- 源码头部建议加 `# SPDX-License-Identifier: Apache-2.0`（统一补头由维护者处理）
-
-## 第三方许可
-
-本项目**再分发**了第三方组件（`vendor\` 里的预编译包、`requirements.txt` 的直接依赖）。
-完整的清单、版本、SPDX 许可证标识、来源 URL 与用途见 **[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)**。
-
-⚠ Apache-2.0 §4(a)/(d) 要求随分发附上本许可原文，并在第三方组件带 NOTICE 时保留其 NOTICE 声明；
-各依赖自身的许可条款同样必须遵守。第三方许可原文**已随包提供**（逐项见 `THIRD_PARTY_NOTICES.md`）。
-
-## 漏洞报告
-
-**优先走平台的 Private Vulnerability Reporting**（Gitee 仓库页的漏洞报告入口）——
-这样漏洞细节在修复前不公开可见。
-
-
-报告请写清：版本 / commit、复现步骤、观察到的行为、期望的行为。
-**不要**在公开 issue 里先发漏洞细节。
-
-处理方式：**先私下修好，再公开发布修复**，并给受影响版本留出升级期。详见 [`SECURITY.md`](SECURITY.md)。
-
-## 贡献指南
-
-见 [`CONTRIBUTING.md`](CONTRIBUTING.md)，行为准则见 [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md)。
-
-**第一次来？照着 [`docs\贡献者上手指南.md`](docs\贡献者上手指南.md) 走** ——
-接受邀请 → 配环境 → 认证 → 切分支 → 提 PR，一步一步带命令和常见坑。
-
-一句话版本：**0.x 阶段 API 可能变**，请以 `docs\` 里的实测记录为准；PR 要附**判据退出码 + 复现步骤**。
-
-## 致谢
-
-- 仓里 44 条判据（`tests\`）与「**注入必红**」的自证纪律，是这个仓最值钱的部分。
-- 视觉方向的公开文献书目见 `docs\视觉参考书目_20261019.md`；社区已有路径的调研见 `docs\电脑控制_社区路径调研_20261002.md`。
-- 感谢每一个提 issue、跑判据、补文档的人。
-- **本仓贡献者名单见 [`CONTRIBUTORS.md`](CONTRIBUTORS.md)**（协作者与署名贡献者都在那里）。
+| [`docs/AGENT接口.md`](docs/AGENT接口.md) | 给 AI 的完整接入说明 |
+| [`docs/开发环境.md`](docs/开发环境.md) | 想改代码的人看这里 |
+| [`docs/开源声明_隐私与安全边界.md`](docs/开源声明_隐私与安全边界.md) | 隐私、安全、免责的正式声明 |
+| [`CHANGELOG.md`](CHANGELOG.md) | 更新日志 |
+| [`SECURITY.md`](SECURITY.md) | 漏洞报告（请走私密渠道，别发公开 Issue） |
+| [`CONTRIBUTING.md`](CONTRIBUTING.md) | 贡献指南 |
+| [`CONTRIBUTORS.md`](CONTRIBUTORS.md) | 贡献者名单 |
 
 ---
 
-验收口径（端到端注入必红 5~8 条 / 人工交互 ≤1 / 点错窗报成功 = 0）见 `docs\判据降载清单.md`。
+## 免责声明
+
+本项目让 AI 的动作**可以审计**，不保证动作**一定正确**。证据链只能证明"发生了什么"，不能证明"这应该发生"。因误点、误填、误删、账号风控等造成的损失，作者不承担责任。请先在测试环境和测试账号上验证。
+
+## 许可
+
+[Apache License 2.0](LICENSE)，允许商用。第三方组件许可见 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)。
+
+Copyright (c) 2026 GALAXYLLIYI
+
+<div align="center">
+
+**无需显卡，任何 AI长眼睛接管你自己的 Windows。**
+
+**觉得有用？点个 ⭐ Star，让更多人用上 Windows 版的 Computer Use。**
+
+</div>
