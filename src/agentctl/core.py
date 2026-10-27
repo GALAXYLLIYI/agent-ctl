@@ -813,7 +813,12 @@ def t_timeline(args: dict) -> dict:
 
 
 def t_verify(args: dict) -> dict:
-    ok, bad, stats = store().verify(check_frames=bool(args.get("check_frames", True)))
+    # ★ Kimi 探针 22：调用方请求的事件范围必须**转发**给 store 校验（此前被丢弃）。
+    kwargs = {"check_frames": bool(args.get("check_frames", True))}
+    for k in ("from_event", "to_event"):
+        if args.get(k) is not None:
+            kwargs[k] = int(args[k])
+    ok, bad, stats = store().verify(**kwargs)
     return env(ok=ok, code=0 if ok else gate.CODE_NO_CTRL,
                data={"first_bad": bad, "stats": stats},
                warning=None if ok else "时间线校验未通过")

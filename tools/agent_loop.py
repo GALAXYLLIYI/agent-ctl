@@ -331,22 +331,21 @@ def _vision_locate(shot: dict, target_query: str, win: dict) -> list[dict]:
 
 
 def _pick_window(wins: list) -> Optional[dict]:
-    """v0 规则：优先记事本族，其次任意可见非最小化窗。"""
+    """v0 规则修订（Kimi 探针 14）：**不硬编码记事本**——前台优先，
+    排除自家控制面（边框/面板），否则取第一个非最小化窗。"""
     if not isinstance(wins, list):
         return None
-    notepad_keys = ("notepad", "记事本", "notepad.exe")
-    best = None
-    for w in wins:
-        if not isinstance(w, dict) or w.get("minimized"):
-            continue
-        blob = " ".join(
-            str(w.get(k) or "") for k in ("title", "process", "class", "exe", "name")
-        ).lower()
-        if any(k in blob for k in notepad_keys):
-            return w
-        if best is None and w.get("hwnd") is not None:
-            best = w
-    return best
+    cands = [w for w in wins
+             if isinstance(w, dict) and not w.get("minimized")
+             and w.get("hwnd") is not None]
+    if not cands:
+        return None
+    for w in cands:
+        blob = " ".join(str(w.get(k) or "") for k in ("title", "class", "process", "exe"))
+        if w.get("is_foreground") or w.get("foreground"):
+            if "AgentCtlCtrlBorder" not in blob and "agent-ctl" not in blob.lower():
+                return w
+    return cands[0]
 
 
 # ── 决策（v0 规则；LLM 可注入）──────────────────────────────────────────────
@@ -373,18 +372,20 @@ def decide(snapshot: dict, state: Optional[dict] = None) -> Optional[dict]:
         return None
     hwnd = int(target["hwnd"])
 
-    # 窗口身份绑定：计划绑的是哪个窗，snapshot 里那窗没了就别拿兜底窗硬凑
-    # （真机预演踩过：记事本被关后 decide 拿旧 hwnd 狂 focus ⇒ code=5 洪水 + 触发动作面刹车）
+    # 窗口身份绑定（Kimi 探针 15 修订）：hwnd 变了 ⇒ **重置计划与完成态**——
+    #   新窗口是新计划，旧窗的 typed/clicked 完成度不许继承（否则新窗秒收工）；
+    #   真机预演的教训仍在：旧 hwnd 幽灵狂点 ⇒ code=5 洪水。
     plan_hwnd = st.get("plan_hwnd")
     if plan_hwnd is None:
         st["plan_hwnd"] = hwnd
     elif int(plan_hwnd) != hwnd:
-        blob = " ".join(str(target.get(k) or "") for k in
-                        ("title", "process", "class", "exe", "name")).lower()
-        if not any(k in blob for k in ("notepad", "记事本")):
-            # 计划窗消失且新挑的不是记事本 ⇒ 本轮感知找不到正经靶子，收工（诚实退出）
-            st["plan_lost"] = True
-            return None
+        st["plan_hwnd"] = hwnd
+        st["focused"] = False
+        st["typed"] = False
+        st["clicked"] = False
+        st["last_result"] = ""
+        st["last_type_ok"] = False
+        st["last_args_text"] = ""
 
     if not st.get("focused"):
         return {
@@ -460,13 +461,19 @@ def build_episode(
     ok = 1 if resp.get("ok") else 0
     code = resp.get("code")
     outcome, verdict = verdict_from_code(ok, code)
+    # ★ Kimi 探针 27：code=9 = 闸门拒绝（denied）——outcome 记 **blocked**、
+    #   核验判 **unobservable**（动作没发出去：不是 failed，也不能当成功）。
+    if code == 9 and not ok:
+        outcome, verdict = "blocked", "unobservable"
     win = snapshot.get("target") or {}
     exe = str(win.get("process") or win.get("exe") or "")
     cls = str(win.get("class") or win.get("cls") or "")
-    # ★ 隐私边界（Kimi 独立核验探针 03）：目标窗命中敏感名单 ⇒ episode **不带窗口身份**、
-    #   **不保留发往敏感窗的动作参数文本**（尝试本身留痕：kind+outcome+win_filtered 说明）。
+    # ★ Kimi 探针 24（隐私过滤双扩展）：①exe/cls **均缺失** ⇒ 身份不明，
+    #   与命中名单同等待遇 fail-closed（文本一并滤除）；②过滤覆盖 **verify.expect**
+    #   （"打出 XXX"里的敏感文本此前会从 expect 回流）。
+    identity_known = bool(exe.strip() or cls.strip())
     try:
-        sens_hit = bool(_win_sensitive(exe, cls)[0])
+        sens_hit = (not identity_known) or bool(_win_sensitive(exe, cls)[0])
     except Exception:  # noqa: BLE001 —— 与 harvest 同源 fail-closed
         sens_hit = True
     if sens_hit:
@@ -480,6 +487,7 @@ def build_episode(
             "tool": action.get("tool"),
             "target": "[已滤]",
             "args": args_out,
+            "expect": "[已滤]",
         }
     else:
         obs = "win=%s|%s hwnd=%s gen=%s" % (
@@ -488,6 +496,7 @@ def build_episode(
             "tool": action.get("tool"),
             "target": action.get("target", ""),
             "args": action.get("args") or {},
+            "expect": action.get("expect", ""),
         }
     result = "ok=%s code=%s" % (resp.get("ok"), code)
     if resp.get("warning"):
@@ -511,7 +520,7 @@ def build_episode(
         action=action_payload,
         result=result,
         verify={
-            "expect": str(action.get("expect") or ""),
+            "expect": str(action_payload.get("expect") or ""),
             "verdict": verdict,
             "cred": {"code": code, "ok": bool(resp.get("ok"))},
         },
@@ -622,12 +631,29 @@ class AgentLoop:
                 self.actions_used += 1
                 return {"ok": False, "code": 10,
                         "warning": "无租约且获取失败 ⇒ 动作未发出（探针 06 口径）"}
-        # ★ Kimi 探针 11：凭据保鲜**不得把旧 xy 绑到新证据上**——重拍后必须在
-        #   新帧里**重新定位**同一目标（带 vision_label），拿到新 xy + 新 capture_id；
+        # ★ Kimi 探针 18：保鲜+重定位的**每一步都要重过敏感闸**——重拍前重列窗口
+        #   复核目标身份（窗口可能已换成敏感窗），命中 ⇒ 一个字节都不发。
+        # ★ Kimi 探针 11：重定位在新帧里找同一目标，新 xy + 新 capture_id 配对；
         #   重定位失败 ⇒ 丢弃本次点击（宁可丢一步，不可点错）。
         if tool == "ctl_click" and args.get("vision_label") and args.get("hwnd"):
+            hwnd_int = int(args["hwnd"])
+            wins_now = self.client.call("ctl_windows", only_visible=True, limit=40)
+            exe_now = cls_now = ""
+            found_now = False
+            for w2 in (wins_now.get("data") or {}).get("windows") or []:
+                if isinstance(w2, dict) and int(w2.get("hwnd") or 0) == hwnd_int:
+                    exe_now = str(w2.get("process") or w2.get("exe") or "")
+                    cls_now = str(w2.get("class") or w2.get("cls") or "")
+                    found_now = True
+                    break
+            ok_send, why_send = image_allowed(exe_now, cls_now)
+            if (not ok_send) or (not found_now):
+                self.actions_used += 1
+                return {"ok": False, "code": 11,
+                        "warning": "保鲜重检：目标窗敏感或已消失 ⇒ 拒发图拒点击"
+                                   f"（{why_send or '窗口不在清单'}）"}
             try:
-                fresh = self.client.call("ctl_shot", hwnd=int(args["hwnd"]),
+                fresh = self.client.call("ctl_shot", hwnd=hwnd_int,
                                          why="点击前凭据保鲜+重定位", inline=False)
                 fd = fresh.get("data") or {}
                 new_cap = fd.get("capture_id")
@@ -677,12 +703,8 @@ class AgentLoop:
             % (self.actions_used, tool, json.dumps(args, ensure_ascii=False)[:160])
         )
         resp = self.client.call(tool, **args)
-        # code=10 ⇒ 补租约后原地重放一次（只重放一次，防死循环）
-        if (not resp.get("ok")) and resp.get("code") == 10 and not action.get("_retried"):
-            if self._ensure_lease():
-                action = dict(action, _retried=True)
-                self.log("[act#%d] code=10 ⇒ 补租约重放" % self.actions_used)
-                resp = self.client.call(tool, **args)
+        # ★ Kimi 探针 20：code=10 拒绝后**不得**重新拿租约再打一遍——
+        #   闸门说不发就是不发；重试须由下一轮决策基于最新 state 另行判断。
         return resp
 
     def remember(self, ep: Episode, compact_every: int = 0, step_no: int = 0) -> int:
@@ -690,13 +712,25 @@ class AgentLoop:
         return remember(self.store, ep, compact_every, step_no)
 
     def run(self, max_steps: int = 3) -> list[Episode]:
-        """跑 ≤max_steps 步写动作循环；每步落一条 episode。"""
+        """跑 ≤max_steps 步写动作循环；每步落一条 episode。
+
+        ★ 徒劳熔断（Kimi 探针 17）：同一动作（工具+参数全同）**连续失败**两次
+          ⇒ 停止循环（等环境/用户干预），不许对着闸门 hammer。
+        """
         steps = 0
+        last_fail_sig = None
+        last_settled = True
         while steps < int(max_steps) and self.actions_used < self.max_actions:
             snapshot = perceive(self.client, query=self.query)
             action = self.decide_fn(snapshot, self.state)
             if action is None:
                 self.log("[done] decide 返回 None —— 收工")
+                break
+            sig = (str(action.get("tool") or "") + "|"
+                   + json.dumps(action.get("args") or {},
+                                ensure_ascii=False, sort_keys=True))
+            if not last_settled and sig == last_fail_sig:
+                self.log("[breaker] 同一动作连续失败 ⇒ 停止（探针 17 口径：终止或等待）")
                 break
             resp = self._act(action)
             sv = None
@@ -716,7 +750,6 @@ class AgentLoop:
                 "[ep#%d] kind=%s outcome=%s code=%s ok=%s"
                 % (ep_id, ep.kind, ep.outcome, code, ok)
             )
-            # 规则状态推进（LLM 决策时可自己维护 state）
             # ★ 三值语义（Kimi 探针 05 修正）：code=8「确认没变」只对 focus 等于
             #   「已在目标状态」；对 type/click，打了/点了画面却没变 = **没生效**，
             #   不许推进状态（把 8 当达成会让重复打字被标成成功）。
@@ -725,6 +758,10 @@ class AgentLoop:
             self.state["last_result"] = f"{action.get('tool')} code={code} ok={ok}"
             self.state["last_type_ok"] = bool(action.get("kind") == "type" and settled)
             self.state["last_args_text"] = str((action.get("args") or {}).get("text") or "")
+            if settled:
+                self.state["any_success"] = True
+            last_settled = settled
+            last_fail_sig = None if settled else sig
             if action.get("kind") == "focus" and settled:
                 self.state["focused"] = True
             if action.get("kind") == "type" and settled:

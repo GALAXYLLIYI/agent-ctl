@@ -159,7 +159,8 @@ def _normalize(tool: str, args: Any, snapshot: dict) -> Optional[dict]:
                 "target": f"hwnd={hwnd} keys={keys}",
                 "expect": f"按键 {keys}（画面变化）"}
     if tool == "ctl_click":
-        a = {"hwnd": hwnd, "expect": "点击"}
+        # ★ Kimi 探针 16：args 不放泛化 expect——点击的核验期望要**点名观测到的元素**。
+        a = {"hwnd": hwnd}
         if args.get("xy"):
             # ★ Kimi 探针 08：模型给的 xy 若来自**视觉候选**，必须绑视觉自己的
             #   from_capture（截图凭据）——绑 UIA 快照凭据是张冠李戴，必 code=12。
@@ -180,6 +181,18 @@ def _normalize(tool: str, args: Any, snapshot: dict) -> Optional[dict]:
                         "target": f"hwnd={hwnd} vision_xy={xy}",
                         "expect": "点击视觉候选"}
             a["xy"] = xy
+            # ★ Kimi 探针 25：xy 必须绑定一个**真实候选**（视觉命中或本屏 UIA 对象）——
+            #   凭空坐标 [9999,9999] 是幻觉，直接丢弃（不绑任何凭据发出去）。
+            snap_objs = (snapshot.get("screen") or {}).get("objects") or []
+            bound = any(
+                isinstance(o, dict) and o.get("interactive")
+                and isinstance(o.get("rect"), list) and len(o.get("rect")) == 4
+                and o["rect"][0] <= xy[0] <= o["rect"][2]
+                and o["rect"][1] <= xy[1] <= o["rect"][3]
+                for o in snap_objs
+            )
+            if not bound:
+                return None
             cap = (snapshot.get("screen") or {}).get("capture_id")
             if cap:
                 a["from_capture"] = str(cap)
@@ -190,17 +203,19 @@ def _normalize(tool: str, args: Any, snapshot: dict) -> Optional[dict]:
             # ★ eid 幻觉硬闸（Kimi 探针 10 同源）：eid 必须在本屏快照白名单里；
             #   编造的 ⇒ **直接丢弃**（不静默换目标——静默改靶会点错东西）。
             snap_objs = (snapshot.get("screen") or {}).get("objects") or []
-            valid_eids = {str(o.get("eid")) for o in snap_objs
-                          if isinstance(o, dict) and o.get("eid")}
-            if str(args["eid"]) not in valid_eids:
+            valid = next((o for o in snap_objs
+                          if isinstance(o, dict) and str(o.get("eid")) == str(args["eid"])), None)
+            if valid is None:
                 return None
             a["eid"] = str(args["eid"])
             cap = (snapshot.get("screen") or {}).get("capture_id")
             if cap:
                 a["from_capture"] = str(cap)
+            # ★ Kimi 探针 16：期望**点名观测到的元素**，不是一句泛泛的"点击"
+            label = str(valid.get("label") or "").strip()
             return {"tool": tool, "kind": "click", "args": a,
                     "target": f"hwnd={hwnd} eid={args['eid']}",
-                    "expect": "点击生效"}
+                    "expect": f"点击『{label}』生效" if label else "点击生效"}
         return None
     if tool == "ctl_focus":
         return {"tool": tool, "kind": "focus", "args": {"hwnd": hwnd},
@@ -290,10 +305,26 @@ def make_llm_decide(task: str, fallback=None, log=None,
                 raise ValueError("回复里没有 JSON")
             obj = json.loads(m.group(0))
             tool = str(obj.get("tool") or "")
-            # ★ Kimi 探针 10：done 不是 _normalize 的职责——在这层直接收工。
+            # ★ Kimi 探针 13：done 需要**客观完成证据**（本会话至少一次 settled 成功）。
+            #   证据不足时模型说 done ⇒ **不收工也不停**——转规则决策继续干活
+            #   （规则会从"目标窗未 focus"这类第一步续起）。
             if tool == "done":
-                log(f"[L1 LLM#{st_counts['llm_used']}] done — {obj.get('args', {}).get('why') or '任务完成'}")
-                return None
+                if st.get("any_success"):
+                    log(f"[L1 LLM#{st_counts['llm_used']}] done — "
+                        f"{(obj.get('args') or {}).get('why') or '任务完成（有成功证据）'}")
+                    return None
+                # ★ 证据不足 ⇒ 忽略 done，**就地转规则续命**（从目标窗 focus 续起）；
+                #   不经 fallback（探针的 fallback 可能是 None 桩 ⇒ 收工=中了模型的懒）。
+                win = snapshot.get("target") or {}
+                try:
+                    hwnd = int(win.get("hwnd"))
+                except (TypeError, ValueError) as exc:
+                    raise ValueError("done 无证据且无目标窗 ⇒ 无法继续") from exc
+                st["focused"] = False
+                log("[L1] 无证据 done ⇒ 忽略，转规则继续（focus 目标窗）")
+                return {"tool": "ctl_focus", "kind": "focus", "args": {"hwnd": hwnd},
+                        "target": f"hwnd={hwnd}",
+                        "expect": "窗口切到前台（done 无证据，继续任务）"}
             action = _normalize(tool, obj.get("args") or {}, snapshot)
             if action is None:
                 raise ValueError(f"工具/参数不合法: {tool}")

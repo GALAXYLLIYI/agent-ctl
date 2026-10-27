@@ -38,7 +38,7 @@ ROOT = Path(__file__).resolve().parent.parent
 LEGACY_SRC = None            # 由 main() 现场生成后填入
 
 # 进包的目录（白名单，不在表里的一律不发）
-DIRS = ["src", "contract", "stubs", "vendor"]
+DIRS = ["src", "contract", "stubs", "vendor", "assets"]   # 2026-10-27：assets（图标）进包，否则托盘加载器回退默认图
 
 # 进包的单文件（白名单）
 FILES = [

@@ -767,7 +767,9 @@ class Store:
         return n
 
     # ── 就地验证（★ 正式验证请用独立验证器 verify\agentctl_verify.py）──
-    def verify(self, *, check_frames: bool = True, scope: str = "epoch") -> tuple[bool, dict | None, dict]:
+    def verify(self, *, check_frames: bool = True, scope: str = "epoch",
+               from_event: int | None = None, to_event: int | None = None
+               ) -> tuple[bool, dict | None, dict]:
         """返回 (ok, first_bad, stats)。**这里只是自检**——同一份代码写和验不算独立。
 
         ★ M8（设计稿 §6.3）：`scope` 两个取值 ——
@@ -779,9 +781,19 @@ class Store:
             段与段之间**只看段锚对不对得上**（当前纪元第一条的 prev_hash
             必须等于上一段锚的 head_hash）。
         """
-        if scope == "full":
-            return self._verify_full(check_frames=check_frames)
-        return self._verify_epoch(check_frames=check_frames)
+        if from_event is not None and to_event is not None \
+                and int(from_event) > int(to_event):
+            raise ValueError(
+                f"verify 范围非法: from_event={from_event} > to_event={to_event}")
+        ok, first_bad, stats = (
+            self._verify_full(check_frames=check_frames) if scope == "full"
+            else self._verify_epoch(check_frames=check_frames))
+        # ★ Kimi 探针 22：调用方请求的范围必须**记账**——哈希链连续性校验仍须
+        #   整段（跳过旧链点=校验作废），范围只约束报告口径（如实注明，不假装已滤）。
+        if (from_event is not None or to_event is not None) and isinstance(stats, dict):
+            stats["requested_range"] = {"from_event": from_event, "to_event": to_event,
+                                        "note": "哈希链校验仍为整段；范围仅约束报告口径"}
+        return ok, first_bad, stats
 
     def _verify_full(self, *, check_frames: bool = True) -> tuple[bool, dict | None, dict]:
         """老口径：从 GENESIS 顺链验，第一个断点即停。"""

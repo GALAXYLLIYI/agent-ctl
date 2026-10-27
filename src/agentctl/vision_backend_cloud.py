@@ -138,23 +138,33 @@ def _state_update(model: str, tokens_in: int, tokens_out: int,
 
 
 def _budget_check(model: str) -> None:
-    """日预算闸：今日估算消费 ≥ 预算 ⇒ 拒发（→ unobservable）。价格未知的模型不受预算闸限（显示未知）。"""
-    price = _price(model)
-    if price is None:
-        return
+    """日预算闸——**fail-closed**（Kimi 探针 19）：
+    · 模型不在价格表（价格未知）⇒ 无法核算 ⇒ 拒发；
+    · 状态文件不可读/损坏 ⇒ 消费无从对账 ⇒ 拒发；
+    · 今日估算 ≥ 预算 ⇒ 拒发。
+    全部 RuntimeError → locate_safe 判 unobservable（flash 免费档在表内，正常放行）。"""
+    if model not in PRICE_TABLE:
+        raise RuntimeError(
+            f"模型 {model!r} 无价格记录 ⇒ 预算闸无法核算 ⇒ fail-closed 拒发"
+            f"（可加入 PRICE_TABLE 或换已核算模型）")
+    price = PRICE_TABLE[model]
+    path = _state_path()
+    st = {}
     try:
-        with open(_state_path(), "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             st = json.load(f)
-        if st.get("day") == date.today().isoformat():
-            budget = _env_float(ENV_BUDGET, DEFAULT_DAILY_BUDGET)
-            if float(st.get("est_cost_today", 0.0)) >= budget:
-                raise RuntimeError(
-                    f"日预算已用尽（今日 ≈¥{st.get('est_cost_today')} ≥ ¥{budget}）；"
-                    f"调 {ENV_BUDGET} 可调")
-    except RuntimeError:
-        raise
-    except Exception:
-        pass
+    except FileNotFoundError:
+        st = {}
+    except Exception as exc:
+        raise RuntimeError(f"预算状态不可读（{path}）：{exc} ⇒ fail-closed 拒发") from exc
+    if st.get("day") == date.today().isoformat():
+        budget = _env_float(ENV_BUDGET, DEFAULT_DAILY_BUDGET)
+        spent = float(st.get("est_cost_today", 0) or 0)
+        if spent >= budget:
+            raise RuntimeError(
+                f"日预算已用尽（今日 ≈¥{spent} ≥ ¥{budget}）；"
+                f"调 {ENV_BUDGET} 可调")
+    price = price  # (free 档 (0,0) 天然放行)
 
 
 _PROMPT = "找出图片中「%s」的位置，给出边界框（0-1 归一化坐标，[x1,y1,x2,y2] 格式）。"
