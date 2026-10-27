@@ -542,6 +542,16 @@ def run(hook=None):
     root.configure(bg=BG)
     root.attributes('-topmost', True)
     root.resizable(False, False)
+    # ★ 2026-10-27：面板窗图标（动漫风 ICO）。失败安静跳过，绝不因缺图标崩面板。
+    try:
+        _ico = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(
+                os.path.abspath(__file__)))),
+            'assets', 'agentctl.ico')
+        if os.path.isfile(_ico):
+            root.iconbitmap(_ico)
+    except Exception:
+        pass
     # 去掉系统标题栏：省 30px 高度，且标题栏会盖住内容区（第一版就是这么挤没的）
     try:
         root.overrideredirect(True)

@@ -12,6 +12,7 @@
 """
 import ctypes
 import ctypes.wintypes as wt
+import os
 import queue
 import threading
 
@@ -21,7 +22,28 @@ WM_LBUTTONDBLCLK, WM_RBUTTONUP, WM_LBUTTONUP = 0x0203, 0x0205, 0x0202
 NIF_MESSAGE, NIF_ICON, NIF_TIP = 0x1, 0x2, 0x4
 NIM_ADD, NIM_DELETE = 0x0, 0x2
 IDI_APPLICATION = 32512
+IMAGE_ICON = 1
+LR_LOADFROMFILE = 0x0010
 TPM_RETURNCMD, TPM_NONOTIFY = 0x0100, 0x0080
+
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_ICO_PATH = os.path.join(_REPO_ROOT, "assets", "agentctl.ico")
+
+
+def _load_tray_icon(user32):
+    """优先 LoadImageW 从 assets/agentctl.ico 加载；失败回退 IDI_APPLICATION。
+
+    图标缺失/损坏绝不许崩托盘 —— 所以每一步都吞异常并落到系统默认图标。
+    """
+    try:
+        if os.path.isfile(_ICO_PATH):
+            h = user32.LoadImageW(None, _ICO_PATH, IMAGE_ICON, 0, 0,
+                                  LR_LOADFROMFILE)
+            if h:
+                return h
+    except Exception:
+        pass
+    return user32.LoadIconW(None, IDI_APPLICATION)
 
 
 class NOTIFYICONDATA(ctypes.Structure):
@@ -138,7 +160,7 @@ class Tray:
         nid.uID = 1
         nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP
         nid.uCallbackMessage = WM_TRAY
-        nid.hIcon = user32.LoadIconW(None, IDI_APPLICATION)
+        nid.hIcon = _load_tray_icon(user32)
         nid.szTip = self._tip[:120]
         if not shell32.Shell_NotifyIconW(NIM_ADD, ctypes.byref(nid)):
             return

@@ -243,3 +243,9 @@ desktop.ini
 !tools/agent_loop.py
 !tools/launch_agentctl.py
 !tools/llm_decide.py
+# ⑰ 动漫图标资产（2026-10-27）：托盘/面板共用 ICO+PNG，必须进仓（上方 *.png 通配会误伤 assets/）
+!assets/
+!assets/agentctl.ico
+!assets/agentctl_64.png
+# make_icon.py 随资产一起进仓，否则干净克隆无法重打 ICO
+!tools/make_icon.py
