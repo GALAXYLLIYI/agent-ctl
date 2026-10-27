@@ -28,6 +28,11 @@ r"""D1 治本：干净克隆冒烟测试 —— 把「运行期必需但没进�
       2026-10-12 冒烟实测抓到并在工作区修好（UTF-8 无 BOM + chcp 65001，GBK/UTF-8 双控制台
       实测通过）—— **在修复提交之前，clone@HEAD 跑本脚本 5b 会红**，那是冒烟如实反映
       已提交状态，不是脚本误报。
+  E4  install.ps1 会写 **HKCU Run 自启项**（AgentCtlMcpHttp，install.ps1:402-405）——
+      HKCU 是用户级全局，`-Dir` 沙箱隔离不了它。2026-10-24 冒烟把沙箱守护脚本路径写进了
+      用户真实 Run 键且无人回收 ⇒ 临时目录一删，开机自启指向已删沙箱、服务静默死
+      （2026-10-27 实测 8761 DOWN 抓到）。桌面快捷方式早有清理先例（见下方清理段），
+      本批把 Run 键补进同一套「装前记值 → 装后恢复/删除」清理网。
 
 用法：
     python -X utf8 tools\\smoke_clean_clone.py                    # 全自动（临时目录，跑完即删）
@@ -40,6 +45,7 @@ import stat
 import subprocess
 import sys
 import time
+import winreg
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
@@ -79,6 +85,32 @@ def rm_readonly(func, path, exc):
         func(path)
     except OSError:
         raise exc
+
+
+# ── E4：install.ps1 还会写 HKCU Run 自启项（HKCU 是用户级全局，-Dir 隔离不了）────
+_RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+_RUN_NAME = "AgentCtlMcpHttp"
+
+
+def _run_value():
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _RUN_KEY) as k:
+            return winreg.QueryValueEx(k, _RUN_NAME)[0]
+    except OSError:
+        return None
+
+
+def _set_run_value(v):
+    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, _RUN_KEY) as k:
+        winreg.SetValueEx(k, _RUN_NAME, 0, winreg.REG_SZ, v)
+
+
+def _del_run_value():
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _RUN_KEY, 0, winreg.KEY_SET_VALUE) as k:
+            winreg.DeleteValue(k, _RUN_NAME)
+    except FileNotFoundError:
+        pass
 
 
 def step(name, rc, extra=""):
@@ -133,6 +165,8 @@ def main():
     # 4) 沙箱安装（-Dir 隔离，不碰 %LOCALAPPDATA%）
     #    install.ps1 会写桌面快捷方式（install.ps1:279-280）—— 记下装前是否存在，
     #    冒烟自己创建的那个在清理时删掉，不给用户留指向已删沙箱的死快捷方式。
+    #    ★ 同理还会写 HKCU Run 自启项（E4）—— 装前记值，清理时恢复/删除（见清理段）。
+    run_pre = _run_value()
     desk = subprocess.run(["powershell", "-NoProfile", "-Command",
                            "[Environment]::GetFolderPath('Desktop')"],
                           capture_output=True, text=True, encoding="utf-8",
@@ -168,6 +202,17 @@ def main():
         if lnk and not lnk_preexisted and os.path.exists(lnk):
             os.remove(lnk)
             print("本次冒烟创建的桌面快捷方式已删除（它本来不存在，是 install 建的）")
+        # ★ E4 清理（沿桌面快捷方式同一先例）：只清「冒烟写的那条」——
+        #   现值指向冒烟沙箱 ⇒ 恢复装前原值（原先没有就删掉）；
+        #   现值不指沙箱（用户中途自己改过）⇒ 一个字节不碰。
+        now = _run_value()
+        if now is not None and "agentctl_smoke_" in str(now).lower():
+            if run_pre is not None:
+                _set_run_value(run_pre)
+                print("Run 键 AgentCtlMcpHttp 已恢复装前原值（install 写成了冒烟沙箱路径）")
+            else:
+                _del_run_value()
+                print("冒烟写入的 Run 键 AgentCtlMcpHttp 已删除（装前本不存在）")
     else:
         print("现场保留在：%s" % dest)
     return 1 if total else 0
