@@ -620,7 +620,13 @@ def _my_integrity() -> dict:
       不会因为换了完整性级别就踩到没跑过的分支。**可靠性优先于花哨。**
     """
     if _INTEGRITY_CACHE:
-        return _INTEGRITY_CACHE
+        # ★ 2026-10-27（沙箱能力边界探测）：必须返回**普通 dict**，不能把
+        #   LockedDict 对象本身交出去 —— 它继承自 object（不是 dict），
+        #   json.dumps 直接抛 "Object of type LockedDict is not JSON serializable"
+        #   ⇒ t_status() 里 st["service"]["integrity"] = _my_integrity()
+        #   会让**整个 ctl_status 响应序列化失败**（实测 code=-32603 内部错误）。
+        #   ⇒ 缓存仍在（语义不变：只真正探测一次），但交出去的是拷贝。
+        return dict(_INTEGRITY_CACHE.items())
     names = {0x0000: "Untrusted", 0x1000: "Low", 0x2000: "Medium",
              0x2100: "MediumPlus", 0x3000: "High", 0x4000: "System"}
     out: dict = {"rid": None, "name": "未探测"}
@@ -651,7 +657,8 @@ def _my_integrity() -> dict:
     else:
         out["note"] = "读不到自己的完整性级别（whoami 输出里没找到 Mandatory Label）"
     _INTEGRITY_CACHE.update(out)
-    return _INTEGRITY_CACHE
+    # ★ 同上：交出去的是普通 dict 拷贝，不是 LockedDict 对象本身。
+    return dict(_INTEGRITY_CACHE.items())
 
 
 # ── 指示层：默认常开（2026-10-18 用户拍板「没影响就默认开」）──────────────────

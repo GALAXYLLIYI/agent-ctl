@@ -439,6 +439,14 @@ CRITERIA = (
      "第 76 条（2026-10-26 排版管线刀C）：**排版闸门** —— 真源/产物扫 box 字符画、文本分隔线、"
      "伪表格（列数不一致）与 100+ 字单元格；docx 结构断言（表格数、标题不跳级、TOC 域、"
      "updateFields、嵌入型图片）。期望退出码：正跑 0、--inject 1（注入必红）"),
+    ("ctl_status序列化", "_P3_ctl_status序列化_判据.py", (),
+     "第 77 条（2026-10-27 沙箱能力边界探测）：**ctl_status 的响应必须能 JSON 序列化** —— "
+     "① `_my_integrity()` 不许返回 LockedDict 对象本身（它继承自 object 不是 dict ⇒ "
+     "json.dumps 必抛 'Object of type LockedDict is not JSON serializable' ⇒ "
+     "**整个 ctl_status 挂掉**，而 ctl_status 是「任何 agent 开工第一件事」、"
+     "它的 integrity 字段恰恰是用来诊断 UIPI/完整性级别问题的）；"
+     "② 缓存语义保留（仍只真正探测一次）；③ t_status() 整个返回值端到端可序列化。"
+     "期望退出码：正跑 0、--inject 1（注入回 LockedDict 必须变红）"),
 
 )
 
