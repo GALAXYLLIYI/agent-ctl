@@ -164,10 +164,13 @@ class MCPClient:
 def image_allowed(win_exe: str, win_cls: str) -> tuple[bool, str]:
     """发图前敏感窗终判。
 
-    ★ 语义（真机踩的坑）：`_win_sensitive` 返回 (hit, why)——**hit=True = 命中敏感名单 = 要拦**。
-    本函数返回"是否允许发图"⇒ **not hit** 才放行；判不了（异常）⇒ fail-closed 不发。
-    （此前把 hit 当 allowed 用 ⇒ 非敏感窗全被拦、敏感窗反而放行——完全颠倒，2026-10-27 修。）
+    ★ 语义（真机踩的坑 + Kimi 探针 02）：`_win_sensitive` 返回 (hit, why)——
+    hit=True = 命中敏感名单 = 要拦；本函数返回"是否允许发图"⇒ not hit 才放行。
+    ★ Kimi 探针 02：exe/cls **均不可得** ⇒ 无法证明该窗不敏感 ⇒ fail-closed 不发
+    （"身份不明"不是"安全"的证据）。
     """
+    if not (str(win_exe or "").strip() or str(win_cls or "").strip()):
+        return False, "窗口身份不可得（exe/cls 均空）⇒ fail-closed 不发图"
     try:
         hit, why = _win_sensitive(str(win_exe or ""), str(win_cls or ""))
         return (not bool(hit)), (why or "")
@@ -220,11 +223,15 @@ def perceive(client: MCPClient, query: str = "") -> dict:
     scr = client.call("ctl_screen", hwnd=hwnd, query=query or "", top=60, cdp=False,
                       include_offscreen=False)
     if scr.get("ok"):
+        d = scr.get("data") or {}
+        # ★ 信封解包（Kimi 独立核验探针 01）：真实回执的对象在 data.结果 里，
+        #   只读 data.objects ⇒ UIA 对象永远为空（LLM 全盲）。两层都试。
+        payload = d.get("结果") if isinstance(d.get("结果"), dict) else d
         snap["screen"] = {
-            "screen_version": (scr.get("data") or {}).get("screen_version"),
-            "capture_id": (scr.get("data") or {}).get("capture_id"),
-            "objects": (scr.get("data") or {}).get("objects") or [],
-            "window": (scr.get("data") or {}).get("window"),
+            "screen_version": payload.get("screen_version"),
+            "capture_id": d.get("capture_id") or payload.get("capture_id"),
+            "objects": payload.get("objects") or [],
+            "window": payload.get("window"),
         }
 
     # 视觉兜底触发（第 2 步口径修订）：不止"UIA 零可交互对象"——
@@ -310,6 +317,8 @@ def _vision_locate(shot: dict, target_query: str, win: dict) -> list[dict]:
                 "xy": [cx, cy],                    # 屏幕物理坐标（与 ctl_click --xy 同口径）
                 "bbox": [bx + ox, by + oy, bw, bh],
                 "label": f"[视觉] {c.get('label') or target_query}",
+                "vision_label": target_query,      # 保鲜重定位时按同一目标再找（探针 11）
+                "origin": [ox, oy],                # 截图原点（重定位换算用）
                 "role": "VisualCandidate",
                 "interactive": True,
                 "confidence": c.get("confidence"),
@@ -452,17 +461,34 @@ def build_episode(
     code = resp.get("code")
     outcome, verdict = verdict_from_code(ok, code)
     win = snapshot.get("target") or {}
-    obs = "win=%s|%s hwnd=%s gen=%s" % (
-        win.get("process") or win.get("exe") or "?",
-        win.get("class") or win.get("cls") or "?",
-        win.get("hwnd"),
-        snapshot.get("gen"),
-    )
-    action_payload = {
-        "tool": action.get("tool"),
-        "target": action.get("target", ""),
-        "args": action.get("args") or {},
-    }
+    exe = str(win.get("process") or win.get("exe") or "")
+    cls = str(win.get("class") or win.get("cls") or "")
+    # ★ 隐私边界（Kimi 独立核验探针 03）：目标窗命中敏感名单 ⇒ episode **不带窗口身份**、
+    #   **不保留发往敏感窗的动作参数文本**（尝试本身留痕：kind+outcome+win_filtered 说明）。
+    try:
+        sens_hit = bool(_win_sensitive(exe, cls)[0])
+    except Exception:  # noqa: BLE001 —— 与 harvest 同源 fail-closed
+        sens_hit = True
+    if sens_hit:
+        obs = "win_filtered=敏感窗已滤 hwnd=%s gen=%s" % (
+            win.get("hwnd"), snapshot.get("gen"))
+        args_out = dict(action.get("args") or {})
+        for k in ("text", "keys"):
+            if args_out.get(k):
+                args_out[k] = "[已滤]"
+        action_payload = {
+            "tool": action.get("tool"),
+            "target": "[已滤]",
+            "args": args_out,
+        }
+    else:
+        obs = "win=%s|%s hwnd=%s gen=%s" % (
+            exe or "?", cls or "?", win.get("hwnd"), snapshot.get("gen"))
+        action_payload = {
+            "tool": action.get("tool"),
+            "target": action.get("target", ""),
+            "args": action.get("args") or {},
+        }
     result = "ok=%s code=%s" % (resp.get("ok"), code)
     if resp.get("warning"):
         result += " warning=%s" % str(resp.get("warning"))[:80]
@@ -589,21 +615,62 @@ class AgentLoop:
         args = action.get("args") or {}
         if not isinstance(args, dict):
             args = {}
-        # ★ 凭据保鲜（code=12 洪水的教训）：视觉点击的 from_capture 是感知时签的，
-        #   LLM 决策耗 1-8s 后 TTL（15s）逼近 ⇒ 执行前**重拍一张**拿新鲜 capture_id
-        #   （xy 是刚定位的屏幕坐标，沿用；这正是 ctl_click 双凭据设计的正确用法）。
-        if tool == "ctl_click" and args.get("from_capture") and args.get("xy") and args.get("hwnd"):
-            fresh = self.client.call("ctl_shot", hwnd=int(args["hwnd"]),
-                                     why="点击前凭据保鲜", inline=False)
-            if fresh.get("ok"):
-                d = fresh.get("data") or {}
-                new_cap = d.get("capture_id")
-                if new_cap:
-                    args = dict(args, from_capture=str(new_cap))
+        # ★ Kimi 探针 06：租约拿不到 ⇒ **不发动作**（对着闸门 hammer 只会刷出 code=10 洪水）。
+        if tool in ("ctl_click", "ctl_type", "ctl_fill", "ctl_keys", "ctl_scroll",
+                    "ctl_focus", "ctl_browser"):
+            if not self._ensure_lease():
+                self.actions_used += 1
+                return {"ok": False, "code": 10,
+                        "warning": "无租约且获取失败 ⇒ 动作未发出（探针 06 口径）"}
+        # ★ Kimi 探针 11：凭据保鲜**不得把旧 xy 绑到新证据上**——重拍后必须在
+        #   新帧里**重新定位**同一目标（带 vision_label），拿到新 xy + 新 capture_id；
+        #   重定位失败 ⇒ 丢弃本次点击（宁可丢一步，不可点错）。
+        if tool == "ctl_click" and args.get("vision_label") and args.get("hwnd"):
+            try:
+                fresh = self.client.call("ctl_shot", hwnd=int(args["hwnd"]),
+                                         why="点击前凭据保鲜+重定位", inline=False)
+                fd = fresh.get("data") or {}
+                new_cap = fd.get("capture_id")
+                shot_path = None
+                try:
+                    raw_shot = (json.loads(fd.get("raw") or "{}").get("截图") or {})
+                    shot_path = raw_shot.get("文件")
+                    area = raw_shot.get("区域")
+                except Exception:
+                    area = None
+                relocated = None
+                if new_cap and shot_path and os.path.isfile(shot_path):
+                    from agentctl.vision_backend_ollama import OllamaBackend
+                    from agentctl import vision_assist as _va
+                    with open(shot_path, "rb") as f:
+                        png = f.read()
+                    rr = _va.locate_safe(png, str(args["vision_label"]), None,
+                                         backend=OllamaBackend(), timeout_sec=75.0)
+                    if rr.get("ok") and (rr.get("candidates") or []):
+                        c0 = rr["candidates"][0]
+                        bx, by, bw, bh = c0["bbox"]
+                        origin = [int(area[0]), int(area[1])] if isinstance(area, list) and len(area) >= 2 else [0, 0]
+                        relocated = [int(bx + bw / 2) + origin[0], int(by + bh / 2) + origin[1]]
+                if relocated and new_cap:
+                    args = dict(args, xy=relocated, from_capture=str(new_cap))
+                    self.log("[vision] 重定位成功 xy=%s" % (relocated,))
+                else:
+                    self.log("[vision] 重定位失败 ⇒ 丢弃本次点击（不绑旧 xy 到新证据）")
+                    self.actions_used += 1
+                    return {"ok": False, "code": 12,
+                            "warning": "凭据保鲜重定位失败 ⇒ 点击丢弃（探针 11 口径）"}
+            except Exception as exc:  # noqa: BLE001
+                self.log("[vision] 保鲜异常 ⇒ 丢弃本次点击: %s" % exc)
+                self.actions_used += 1
+                return {"ok": False, "code": 12,
+                        "warning": "凭据保鲜异常 ⇒ 点击丢弃"}
         # 动作前置租约：没有租约的动作会被闸门 code=10 拒（真机预演踩过）
         if tool in ("ctl_click", "ctl_type", "ctl_fill", "ctl_keys", "ctl_scroll",
                     "ctl_focus", "ctl_browser"):
-            self._ensure_lease()
+            if not self._ensure_lease():
+                self.actions_used += 1
+                return {"ok": False, "code": 10,
+                        "warning": "无租约且获取失败 ⇒ 动作未发出"}
         self.actions_used += 1
         self.log(
             "[act#%d] %s %s"
@@ -617,6 +684,10 @@ class AgentLoop:
                 self.log("[act#%d] code=10 ⇒ 补租约重放" % self.actions_used)
                 resp = self.client.call(tool, **args)
         return resp
+
+    def remember(self, ep: Episode, compact_every: int = 0, step_no: int = 0) -> int:
+        """入库+定期巩固（实例方法：便于测试打补丁，Kimi 探针 05/06 依赖）。"""
+        return remember(self.store, ep, compact_every, step_no)
 
     def run(self, max_steps: int = 3) -> list[Episode]:
         """跑 ≤max_steps 步写动作循环；每步落一条 episode。"""
@@ -636,7 +707,7 @@ class AgentLoop:
                 sv = int(sv)
             ep = build_episode(snapshot, action, resp, self.session_id, screen_version=sv)
             ep.validate()
-            ep_id = remember(self.store, ep, self.compact_every, step_no=steps + 1)
+            ep_id = self.remember(ep, self.compact_every, step_no=steps + 1)
             ep.id = ep_id
             self.episodes.append(ep)
             code = resp.get("code")
@@ -646,9 +717,10 @@ class AgentLoop:
                 % (ep_id, ep.kind, ep.outcome, code, ok)
             )
             # 规则状态推进（LLM 决策时可自己维护 state）
-            # ★ 三值语义：code=8「确认没变」对 focus = 已在目标状态（预演踩过：
-            #   窗口本就在前台 ⇒ focus 后画面零变化 ⇒ 8），规则应视为达成，不是失败重试。
-            settled = ok or (code == 8)
+            # ★ 三值语义（Kimi 探针 05 修正）：code=8「确认没变」只对 focus 等于
+            #   「已在目标状态」；对 type/click，打了/点了画面却没变 = **没生效**，
+            #   不许推进状态（把 8 当达成会让重复打字被标成成功）。
+            settled = ok or (code == 8 and action.get("kind") == "focus")
             # ★ 给 LLM 决策核的反馈（防重复打字/盲目重试）：上一步工具+三值结果
             self.state["last_result"] = f"{action.get('tool')} code={code} ok={ok}"
             self.state["last_type_ok"] = bool(action.get("kind") == "type" and settled)

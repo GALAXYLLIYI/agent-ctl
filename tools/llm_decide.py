@@ -79,7 +79,7 @@ def _project_snapshot(snapshot: dict, state: dict) -> str:
     last_tool = hist.split(" ")[0] if hist else ""
     # ★ 完成度证据链（DSH 难点①配套）——**放在投影最前**（实测放对象清单后面模型读漏）：
     task_text = ""
-    mt = re.search(r"[打写输入][:：]?\s*[『\"“]?([^』\"”，。]+)", task or "")
+    mt = re.search(r"(?:输入|打字|写入|打)[:：]?\s*[『\"“]?([^』\"”，。]+)", task or "")
     if mt:
         task_text = mt.group(1).strip()
     typed_ok = bool(state.get("last_type_ok"))
@@ -127,8 +127,10 @@ def _normalize(tool: str, args: Any, snapshot: dict) -> Optional[dict]:
         hwnd = int(win.get("hwnd"))
     except (TypeError, ValueError):
         return None
+    # ★ Kimi 探针 10：done 不是可归位的动作——归一层对 done 返回 None
+    #   （收工判定在 llm_decide 的调用层处理，normalize 只管"会改变屏幕状态的动作"）。
     if tool == "done":
-        return {"__done__": True, "why": str(args.get("why") or "模型判定任务完成")}
+        return None
     # 参数归位：模型混用 text/keys ⇒ 按工具修正
     if tool == "ctl_type":
         text = str(args.get("text") or args.get("keys") or "").strip()
@@ -143,49 +145,70 @@ def _normalize(tool: str, args: Any, snapshot: dict) -> Optional[dict]:
         if not keys:
             return None
         # code=5 洪水的教训：按键需要窗口在前台且焦点正确——给 allow_foreground 提高命中
+        # ★ Kimi 探针 09：ctrl/times 等模型给的参数**透传**，不许丢。
+        ka = {"hwnd": hwnd, "keys": keys, "allow_foreground": True}
+        if args.get("ctrl"):
+            ka["ctrl"] = True
+        try:
+            if args.get("times") is not None:
+                ka["times"] = int(args["times"])
+        except (TypeError, ValueError):
+            pass
         return {"tool": tool, "kind": "keys",
-                "args": {"hwnd": hwnd, "keys": keys, "allow_foreground": True},
+                "args": ka,
                 "target": f"hwnd={hwnd} keys={keys}",
                 "expect": f"按键 {keys}（画面变化）"}
     if tool == "ctl_click":
         a = {"hwnd": hwnd, "expect": "点击"}
+        if args.get("xy"):
+            # ★ Kimi 探针 08：模型给的 xy 若来自**视觉候选**，必须绑视觉自己的
+            #   from_capture（截图凭据）——绑 UIA 快照凭据是张冠李戴，必 code=12。
+            xy = [int(t) for t in args["xy"]]
+            matched = None
+            for vh in (snapshot.get("vision_hits") or []):
+                if isinstance(vh, dict) and [int(t) for t in (vh.get("xy") or [])] == xy:
+                    matched = vh
+                    break
+            if matched is not None:
+                a["xy"] = xy
+                a["from_capture"] = str(matched.get("from_capture"))
+                if matched.get("vision_label"):
+                    a["vision_label"] = str(matched["vision_label"])
+                if matched.get("origin"):
+                    a["win_origin"] = list(matched["origin"])
+                return {"tool": tool, "kind": "click", "args": a,
+                        "target": f"hwnd={hwnd} vision_xy={xy}",
+                        "expect": "点击视觉候选"}
+            a["xy"] = xy
+            cap = (snapshot.get("screen") or {}).get("capture_id")
+            if cap:
+                a["from_capture"] = str(cap)
+            return {"tool": tool, "kind": "click", "args": a,
+                    "target": f"hwnd={hwnd} xy={xy}",
+                    "expect": "点击生效"}
         if args.get("eid"):
-            # ★ eid 幻觉硬闸（code=12 洪水的教训）：eid 必须在本屏快照白名单里，
-            #   编造的直接改走视觉候选 xy（若本屏无候选则拒绝该动作）。
+            # ★ eid 幻觉硬闸（Kimi 探针 10 同源）：eid 必须在本屏快照白名单里；
+            #   编造的 ⇒ **直接丢弃**（不静默换目标——静默改靶会点错东西）。
             snap_objs = (snapshot.get("screen") or {}).get("objects") or []
             valid_eids = {str(o.get("eid")) for o in snap_objs
                           if isinstance(o, dict) and o.get("eid")}
-            vh = (snapshot.get("vision_hits") or [])
             if str(args["eid"]) not in valid_eids:
-                if vh:
-                    v0 = vh[0]
-                    return {"tool": tool, "kind": "click",
-                            "args": {"hwnd": hwnd, "xy": v0["xy"],
-                                     "from_capture": v0["from_capture"],
-                                     "expect": "点击(视觉候选纠偏)"},
-                            "target": f"hwnd={hwnd} vision_xy={v0['xy']}",
-                            "expect": "点击视觉候选"}
-                return None   # 无处可点：把这个动作丢弃（比喂给闸门吃 code=12 强）
+                return None
             a["eid"] = str(args["eid"])
             cap = (snapshot.get("screen") or {}).get("capture_id")
             if cap:
                 a["from_capture"] = str(cap)
-        elif args.get("xy"):
-            a["xy"] = args["xy"]
-            cap = (snapshot.get("screen") or {}).get("capture_id")
-            if cap:
-                a["from_capture"] = str(cap)
-        else:
-            return None
-        return {"tool": tool, "kind": "click", "args": a,
-                "target": f"hwnd={hwnd} {a.get('eid') or a.get('xy')}",
-                "expect": "点击生效"}
+            return {"tool": tool, "kind": "click", "args": a,
+                    "target": f"hwnd={hwnd} eid={args['eid']}",
+                    "expect": "点击生效"}
+        return None
     if tool == "ctl_focus":
         return {"tool": tool, "kind": "focus", "args": {"hwnd": hwnd},
                 "target": f"hwnd={hwnd}", "expect": "窗口切前台"}
     if tool == "ctl_scroll":
         return {"tool": tool, "kind": "scroll",
-                "args": {"hwnd": hwnd, "amount": int(args.get("amount") or -3)},
+                "args": {"hwnd": hwnd, "amount": int(args.get("amount") or -3),
+                         "allow_foreground": True},
                 "target": f"hwnd={hwnd}", "expect": "滚动"}
     return None
 
@@ -256,15 +279,21 @@ def make_llm_decide(task: str, fallback=None, log=None,
             return fallback(snapshot, st)
 
         try:
+            # ★ Kimi 探针 07：预算按**尝试**计数（超时/坏输出同样烧预算）——
+            #   否则持续超时的本地模型会被无限重试（hammering）。
+            st_counts["llm_used"] += 1
             user = _project_snapshot(snapshot, st)
             raw = _ollama_chat([{"role": "system", "content": SYS_PROMPT},
                                 {"role": "user", "content": user}])
-            st_counts["llm_used"] += 1
             m = _JSON_RE.search(raw)
             if not m:
                 raise ValueError("回复里没有 JSON")
             obj = json.loads(m.group(0))
             tool = str(obj.get("tool") or "")
+            # ★ Kimi 探针 10：done 不是 _normalize 的职责——在这层直接收工。
+            if tool == "done":
+                log(f"[L1 LLM#{st_counts['llm_used']}] done — {obj.get('args', {}).get('why') or '任务完成'}")
+                return None
             action = _normalize(tool, obj.get("args") or {}, snapshot)
             if action is None:
                 raise ValueError(f"工具/参数不合法: {tool}")

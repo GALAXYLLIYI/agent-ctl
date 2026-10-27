@@ -83,9 +83,11 @@ def _payload_brief(kind: str, p: dict) -> tuple[str, str, str, str, str]:
     win_filtered = ""
     if isinstance(win, dict) and win:
         exe, cls = str(win.get("exe") or ""), str(win.get("cls") or "")
-        hit, why = _win_sensitive(exe, cls)
+        hit, _why = _win_sensitive(exe, cls)
         if hit:
-            win_filtered = why
+            # ★ Kimi 探针 03：泛化原因文本——authstate 的 why 里带着 exe 名
+            #   （"终端族 cmd.exe…"），原样入库 = 身份经"原因"回流。
+            win_filtered = "命中敏感窗名单（窗口身份与原因已滤）"
         else:
             win_txt = "win={}|{}".format(exe or "?", cls or "?")
 

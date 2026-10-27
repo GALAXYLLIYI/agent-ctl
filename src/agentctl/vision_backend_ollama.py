@@ -114,18 +114,37 @@ class OllamaBackend:
         """与 CloudBackend 同款三坐标口径容错（0-1 角点 / 0-1000 / 像素 / [x,y,w,h]）。"""
         import re
         text = (content or "").strip()
-        m = re.search(r"\[[\s\S]*\]|\{[\s\S]*\}", text)
-        if not m:
-            raise RuntimeError("回复里没有 JSON")
+        # ★ Kimi 探针 04：对象形态 {"label":…,"bbox_2d":[…]} 与数组形态 [{…,"bbox_2d":…}]
+        #   必须**同语义**——先整包直解 JSON（保住 bbox_2d 原生标记），
+        #   失败才退化到正则搜数组（旧路径会丢标记 ⇒ 同数据两种结果）。
+        items = None
         try:
-            items = json.loads(m.group(0))
-        except ValueError as exc:
-            raise RuntimeError(f"JSON 解不开：{exc}") from exc
+            direct = json.loads(text)
+        except Exception:
+            direct = None
+        if isinstance(direct, dict):
+            hit_item = None
+            for key in ("bbox_2d", "box_2d", "bbox"):
+                v = direct.get(key)
+                if isinstance(v, list) and len(v) == 4 \
+                        and all(isinstance(t, (int, float)) for t in v):
+                    hit_item = {"label": str(direct.get("label") or direct.get("name")
+                                              or target_name),
+                                key: v}
+                    break
+            items = [hit_item] if hit_item else []
+        elif isinstance(direct, list):
+            items = direct
+        else:
+            m = re.search(r"\[[\s\S]*\]", text)
+            if not m:
+                raise RuntimeError("回复里没有 JSON")
+            try:
+                items = json.loads(m.group(0))
+            except ValueError as exc:
+                raise RuntimeError(f"JSON 解不开：{exc}") from exc
 
-        if isinstance(items, dict):
-            items = next((v for v in items.values()
-                          if isinstance(v, list) and len(v) == 4
-                          and all(isinstance(t, (int, float)) for t in v)), [])
+        # 归一：纯数字四元组（无字段名）⇒ 当作一只框（键名留空，按口径阶梯判）
         if (isinstance(items, list) and len(items) == 4
                 and all(isinstance(t, (int, float)) for t in items)):
             items = [{"bbox": items}]
