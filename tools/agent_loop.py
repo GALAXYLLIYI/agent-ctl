@@ -758,7 +758,11 @@ class AgentLoop:
             self.state["last_result"] = f"{action.get('tool')} code={code} ok={ok}"
             self.state["last_type_ok"] = bool(action.get("kind") == "type" and settled)
             self.state["last_args_text"] = str((action.get("args") or {}).get("text") or "")
-            if settled:
+            # ★ Kimi 独立复核 P1-3（2026-10-27，主控代改署名）：focus 不算完成证据——
+            #   focus 的 code=8 只说明「已在目标状态」，计入 any_success 会让模型
+            #   只 focus 一下就能 done 空跑收工（负例：任务「输入abc」未输入即收工）。
+            #   完成证据 = 内容动作（type/click/fill/keys/scroll/browser）至少一次 settled。
+            if settled and action.get("kind") != "focus":
                 self.state["any_success"] = True
             last_settled = settled
             last_fail_sig = None if settled else sig

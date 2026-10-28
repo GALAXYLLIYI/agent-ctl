@@ -10,14 +10,16 @@ r"""tests\_P5_记忆层判据.py —— 记忆层 v0 集成判据（记忆层刀
     · 检索必须命中且带出处（episode 命中 vs 段摘要命中要分得清）。
     · workflow 提炼：重复成功会话入库、数字归一、过期可辨。
 
-断什么（11 组）：
+断什么（13 组）：
     ① 三值映射 verdict_from_code 全表；② store 幂等 + sqlite_vec/numpy 两路径同序同分；
     ③ embedder 跨实例确定性 + L2；④ 合成 timeline → harvest：数量/结局/会话切分/游标幂等；
     ⑤ promote：时间断裂切段 + ANCHOR_N 强制锚点；⑥ merge 滞回：中间带不动、高相似合并出父段、锚点不被稀释；
     ⑦ compact 幂等（二跑零新增零合并）；⑧ 检索：针命中 + 段摘要命中带 source 标记；
     ⑨ distill：重复成功会话提炼 workflow、数字归一、last_verified 落库；
     ⑩ 敏感窗筛选：deny_window 命中的窗口身份不落 obs、留 win_filtered 标记、普通窗不受影响；
-    ⑪ ctl_memory 工具接线：契约条目在 + core.TOOLS 有映射 + dispatch 三态（stats/query/未知 action）走通。
+    ⑪ ctl_memory 工具接线：契约条目在 + core.TOOLS 有映射 + dispatch 三态（stats/query/未知 action）走通；
+    ⑫ 混合时区（naive+aware）promote 不崩（Kimi 复核 P1-2 回归）；
+    ⑬ 时间倒序入库（新 id 旧时间）：段成员 ep_ids 按时间序、检索命中晚写 episode（Kimi 复核 P1-1 回归）。
 
 --inject（自证判据是活的，注入后**必须变红**）：
     把 contract.verdict_from_code 换成「code=8 也判 success」的谎言版，
@@ -238,11 +240,11 @@ def t_merge_hysteresis(tmp: str) -> None:
         e2 = st.add_episode(mk_ep(2, "excel 操作二"))
         e3 = st.add_episode(mk_ep(3, "excel 操作三"))
         sA = st.add_segment(level=0, t_start="2026-10-26T10:00:00+08:00", t_end="2026-10-26T10:01:00+08:00",
-                            first_ep=e1, last_ep=e1, summary=SUM_A, n_ep=1)
+                            first_ep=e1, last_ep=e1, ep_ids=[e1], summary=SUM_A, n_ep=1)
         sB = st.add_segment(level=0, t_start="2026-10-26T10:01:00+08:00", t_end="2026-10-26T10:02:00+08:00",
-                            first_ep=e2, last_ep=e2, summary=SUM_B, n_ep=1)
+                            first_ep=e2, last_ep=e2, ep_ids=[e2], summary=SUM_B, n_ep=1)
         sC = st.add_segment(level=0, t_start="2026-10-26T10:02:00+08:00", t_end="2026-10-26T10:03:00+08:00",
-                            first_ep=e3, last_ep=e3, summary=SUM_C, n_ep=1)
+                            first_ep=e3, last_ep=e3, ep_ids=[e3], summary=SUM_C, n_ep=1)
         from agentctl.memory.compact import Compactor
 
         simAB = _cos(SUM_A, SUM_B)
@@ -391,6 +393,54 @@ def t_tool_wiring(tmp: str) -> None:
         os.environ.pop("AGENTCTL_MEMORY_DB", None)
 
 
+# ── ⑫ 混合时区（Kimi 复核 P1-2 回归）───────────────────────────────────────
+
+def t_mixed_timezone(tmp: str) -> None:
+    db = os.path.join(tmp, "p5_tz.db")
+    with MemoryStore(db) as st:
+        # aware（harvest 写 timeline 带 +08:00）与 naive（agent_loop build_episode 本地时间）混存
+        st.add_episode(mk_ep(1, "混合时区甲", t="2026-10-26T10:00:00+08:00"))
+        st.add_episode(mk_ep(2, "混合时区乙", t="2026-10-26T10:00:30"))        # naive
+        st.add_episode(mk_ep(3, "混合时区丙", t="2026-10-26T10:01:00+08:00"))
+        from agentctl.memory.compact import Compactor, _gap_sec
+
+        # 混合对直接相减必须已归一成有限秒数（旧代码此处抛 TypeError）
+        g = _gap_sec("2026-10-26T10:00:30", "2026-10-26T10:01:00+08:00")
+        assert g == 30.0, f"混合时区 gap 应=30s，实 {g}"
+        stat = Compactor(st).promote()   # 全程不许崩
+        segs = list(st.iter_segments(live_only=True, level=0))
+        assert stat["segments_created"] == len(segs) and segs, "混合时区下必须正常成段"
+        for s in segs:
+            assert not (s["first_ep"] <= 1 <= s["last_ep"] and s["first_ep"] == s["last_ep"]), "sanity"
+        assert st.get_meta("promoted_until") == "3", "三条全部入段"
+
+
+# ── ⑬ 时间倒序入库（Kimi 复核 P1-1 回归：新 id 旧时间）──────────────────────
+
+def t_time_inversion(tmp: str) -> None:
+    db = os.path.join(tmp, "p5_inv.db")
+    with MemoryStore(db) as st:
+        # 按写入顺序：id1(10:00) → id2(10:05) → 晚写者 id3(10:02)、id4(10:03)
+        # 按时间排序后段成员应为 [1,3,4,2] —— 旧代码区间 {1,2} 会漏 3、4
+        st.add_episode(mk_ep(1, "季度报表数据 打开表格", t="2026-10-26T10:00:00+08:00"))
+        st.add_episode(mk_ep(2, "季度报表数据 保存表格", t="2026-10-26T10:05:00+08:00"))
+        st.add_episode(mk_ep(3, "德尔特库存清单 导出明细", t="2026-10-26T10:02:00+08:00"))
+        st.add_episode(mk_ep(4, "德尔特库存清单 核对数量", t="2026-10-26T10:03:00+08:00"))
+        from agentctl.memory.compact import Compactor
+        from agentctl.memory.retrieve import Retriever
+
+        Compactor(st).compact()
+        for s in st.iter_segments(live_only=True):
+            assert s["n_ep"] == len(json.loads(s["ep_ids"] or "[]")), \
+                f"段 {s['id']} n_ep 与 ep_ids 成员数不一致（区间口径复发）"
+        seg_sets = [json.loads(s["ep_ids"]) for s in st.iter_segments(live_only=True)]
+        assert [3, 4] in seg_sets, \
+            f"晚写者(id3,id4)必须按时间序同段显式落库，实 {seg_sets}"
+        out = Retriever(st).query("德尔特 库存清单 明细", k=5)
+        ep_ids_hit = [h["id"] for h in out["hits"] if h["source"] == "episode"]
+        assert 3 in ep_ids_hit[:3], f"晚写 episode(id3) 必须命中前 3，实 {ep_ids_hit}"
+
+
 # ── --inject：判据是活的（注入谎言映射必须变红）─────────────────────────────
 
 def t_inject_self() -> None:
@@ -436,6 +486,8 @@ def main() -> int:
     check("⑨ workflow 提炼与数字归一", lambda: t_distill(tmp))
     check("⑩ 敏感窗筛选", lambda: t_sensitive_filter(tmp))
     check("⑪ ctl_memory 工具接线", lambda: t_tool_wiring(tmp))
+    check("⑫ 混合时区 promote 不崩", lambda: t_mixed_timezone(tmp))
+    check("⑬ 时间倒序入库检索命中", lambda: t_time_inversion(tmp))
     if FAILS:
         print(f"RED x{len(FAILS)}")
         for f in FAILS:

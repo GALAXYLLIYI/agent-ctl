@@ -113,6 +113,15 @@ tools/*
 #      · 依赖：只用标准库 + legacy_tools\act.py（**用它自己的注入路径** ⇒ 与产品同源不会漂）。
 #      · 它开的是记事本测试窗（%TEMP% 临时文件），测完自己关掉删掉 ⇒ 不碰用户真实文档。
 !tools/probe_input_injection.py
+#   ⑪ tools\probe_type_cost.py —— **C 级（打字）耗时归因**：注入成本 vs 字符间隙。
+#      · 2026-10-27 实测结论：C 级打字的耗时**几乎全是 send_text 里那个固定的
+#        字符间隙**（默认 gap=0.012 ⇒ 12ms/字符），而**真正的注入只要 ~0.5ms/字符**
+#        （gap=0 时每字符 0.53ms；耗时与 gap 严格线性、斜率≈1）。
+#        ⇒ 想给 C 级提速，**只能调 gap**，动注入没有意义。
+#        而 gap 是**故意留的**（act.py 记着「2026-10-10 记事本 229 → 224 字」的实测坑：
+#        打太快目标程序会漏收）⇒ 提速要连着「漏收率」一起改，不能只看耗时。
+#      · 依赖：只用标准库 + legacy_tools\act.py（**用它自己的注入路径** ⇒ 与产品同源）。
+!tools/probe_type_cost.py
 #   ⑩ tools\ab_target_py.py —— AB 靶场的 **python 版**（WinForms，8 控件）。
 #      · 为什么要有它：仓里已有的 ab_target_winforms.ps1 用 **pwsh** 跑
 #        ⇒ 窗的属主进程是 pwsh.exe ⇒ 命中 act.py 的 BLOCKED_PROCESSES_TERMINAL

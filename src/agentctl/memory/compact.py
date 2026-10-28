@@ -50,9 +50,15 @@ def cosine_l2(a: Optional[list[float]], b: Optional[list[float]]) -> float:
 def _parse_t(t: str) -> Optional[datetime]:
     s = (t or "").replace("Z", "+00:00")
     try:
-        return datetime.fromisoformat(s)
+        dt = datetime.fromisoformat(s)
     except ValueError:
         return None
+    if dt.tzinfo is None:
+        # ★ Kimi 复核 P1-2（2026-10-27）：库里同时存在 aware（harvest 写 timeline 的
+        #   +08:00）与 naive（agent_loop build_episode 写的本地时间）两种时间戳，
+        #   直接相减抛 TypeError。naive 按本机时区补齐后再算。
+        dt = dt.astimezone()
+    return dt
 
 
 def _gap_sec(t1: str, t2: str) -> float:
@@ -116,14 +122,19 @@ class Compactor:
             if not buf_rows:
                 return
             summary = "\n".join(buf_text)[: contract.SUMMARY_MAX_CHARS]
+            # ★ Kimi 复核 P1-1（2026-10-27）：段的候选集只认**显式成员 ep_ids**
+            #   （按时间序的真实成员），不再靠 first_ep..last_ep 区间猜——
+            #   多写者下「新 id 旧时间」会让区间倒挂/覆盖错 episode（真库 46 段实锤）。
             self.store.add_segment(
                 level=0,
                 t_start=str(buf_rows[0].get("t") or ""),
                 t_end=str(buf_rows[-1].get("t") or ""),
-                first_ep=int(buf_rows[0]["id"]),
-                last_ep=int(buf_rows[-1]["id"]),
+                ep_ids=[int(r["id"]) for r in buf_rows],
                 summary=summary,
                 n_ep=len(buf_rows),
+                # first/last_ep 仅为展示口径（成员 ID 的 min/max）；时间序在 ep_ids 里
+                first_ep=min(int(r["id"]) for r in buf_rows),
+                last_ep=max(int(r["id"]) for r in buf_rows),
             )
             n_segments += 1
 
@@ -209,14 +220,23 @@ class Compactor:
                 summary = (
                     str(a.get("summary") or "") + "\n" + str(b.get("summary") or "")
                 )[: contract.SUMMARY_MAX_CHARS]
+                # ★ P1-1 同源：父段成员 = 子段 ep_ids 顺序拼接（不拼区间）
+                import json as _json
+                try:
+                    ep_ids = [int(x) for x in _json.loads(a.get("ep_ids") or "[]")] + [
+                        int(x) for x in _json.loads(b.get("ep_ids") or "[]")
+                    ]
+                except (TypeError, ValueError):
+                    ep_ids = []
                 parent_id = self.store.add_segment(
                     level=level + 1,
                     t_start=str(a.get("t_start") or ""),
                     t_end=str(b.get("t_end") or ""),
-                    first_ep=int(a.get("first_ep") or 0),
-                    last_ep=int(b.get("last_ep") or 0),
+                    ep_ids=ep_ids,
                     summary=summary,
-                    n_ep=n_ep,
+                    n_ep=len(ep_ids) or n_ep,
+                    first_ep=min(ep_ids) if ep_ids else int(a.get("first_ep") or 0),
+                    last_ep=max(ep_ids) if ep_ids else int(b.get("last_ep") or 0),
                 )
                 self.store.mark_merged(
                     [int(a["id"]), int(b["id"])], int(parent_id)

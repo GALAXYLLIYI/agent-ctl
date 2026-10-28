@@ -133,8 +133,13 @@ def _state_update(model: str, tokens_in: int, tokens_out: int,
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(st, f, ensure_ascii=False, indent=1)
         os.replace(tmp, path)
-    except Exception:
-        pass  # 面板展示是副产物，主路不许被它绊倒
+    except Exception as exc:
+        # ★ Kimi 独立复核 P2（2026-10-27，主控代改署名）：写坏不许绊倒识别主路
+        #   （原设计正确），但**静默 pass = 安全机制静默失效**——预算/消费数字
+        #   缺了没人知道。改为响亮留痕（stderr），主路依旧不受影响。
+        import sys
+        print(f"[vision_backend_cloud] 记账状态写失败（面板/预算数字将缺失）: "
+              f"{type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
 
 
 def _budget_check(model: str) -> None:

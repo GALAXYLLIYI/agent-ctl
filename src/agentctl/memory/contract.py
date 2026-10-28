@@ -26,7 +26,11 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 
 # ── 版本 ────────────────────────────────────────────────────────────────────
-SCHEMA_VERSION = 1
+# v2（2026-10-27）：segments 增加 ep_ids 显式成员列。起因（Kimi 独立复核 P1-1）：
+#   旧段用 first_ep..last_ep 区间当候选集，但 episode 按时间排序成段后 ID 会倒挂
+#   （多写者下「新 id 旧时间」），区间覆盖错 episode ⇒ 检索漏检。
+#   真实库实锤：46 段 n_ep≠区间长、2 段反向。ep_ids 存实际成员，区间字段保留仅作展示。
+SCHEMA_VERSION = 2
 MEMORY_VERSION = "0.1.0"
 
 # ── 结局三态+一（§2.2 / §6.6 第 2 步）───────────────────────────────────────
@@ -109,6 +113,7 @@ CREATE TABLE IF NOT EXISTS segments(
   t_end TEXT NOT NULL,
   first_ep INTEGER NOT NULL,
   last_ep INTEGER NOT NULL,
+  ep_ids TEXT NOT NULL DEFAULT '[]',
   summary TEXT NOT NULL DEFAULT '',
   embed BLOB,
   n_ep INTEGER NOT NULL DEFAULT 0,

@@ -68,10 +68,16 @@ class Retriever:
         top = [seg for _, seg in scored[:3]]
 
         cand: list[int] = []
+        import json as _json
         for seg in top:
-            lo = int(seg.get("first_ep") or 0)
-            hi = int(seg.get("last_ep") or 0)
-            cand.extend(range(lo, hi + 1))
+            # ★ Kimi 复核 P1-1（2026-10-27）：候选集只认段的**显式成员 ep_ids**。
+            #   旧实现用 first_ep..last_ep 区间——多写者下「新 id 旧时间」使区间
+            #   倒挂/覆盖错 episode（真库 46 段实锤）⇒ 检索漏检。空成员段不猜。
+            try:
+                ids = [int(x) for x in _json.loads(seg.get("ep_ids") or "[]")]
+            except (TypeError, ValueError):
+                ids = []
+            cand.extend(ids)
         if len(cand) < k:
             return None
         return cand

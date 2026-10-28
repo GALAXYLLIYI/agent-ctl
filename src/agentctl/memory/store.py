@@ -59,10 +59,25 @@ class MemoryStore:
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.executescript(contract.SQL_SCHEMA)
+        self._migrate_segments()
 
         self.use_sqlite_vec = self._setup_vec(use_sqlite_vec)
         self._ensure_meta()
         self.conn.commit()
+
+    def _migrate_segments(self) -> None:
+        """v1→v2 迁移：segments 补 ep_ids 列；旧段（区间口径）整体作废待重建。
+
+        起因（Kimi 独立复核 P1-1，2026-10-27）：多写者下「新 id 旧时间」使
+        promote 的按时间成段与 first_ep..last_ep 区间脱钩——真实库 46 段
+        n_ep≠区间长、2 段反向 ⇒ 旧段不可信，检索也不再读区间。
+        旧段由 episodes 完全可重建：wipe + promoted_until 归零，下次 compact 全量重promote。
+        """
+        cols = [r[1] for r in self.conn.execute("PRAGMA table_info(segments)").fetchall()]
+        if "ep_ids" not in cols:
+            self.conn.execute("ALTER TABLE segments ADD COLUMN ep_ids TEXT NOT NULL DEFAULT '[]'")
+            self.conn.execute("DELETE FROM segments")
+            self.conn.execute("UPDATE meta SET v='0' WHERE k='promoted_until'")
 
     # ── 初始化 ──────────────────────────────────────────────────────────────
 
@@ -438,20 +453,25 @@ class MemoryStore:
         last_ep: int,
         summary: str,
         n_ep: int,
+        ep_ids: list[int] | None = None,
     ) -> int:
+        """ep_ids：段的**实际成员**（按时间序）——检索候选集只认它，不再读区间
+        （区间字段保留仅作展示；不传时退化为空表，等价「无候选」，宁可漏不猜）。"""
         blob = contract.pack_vec(
             self._embedder.embed(contract.normalize_text(summary or ""))
         )
+        ids_json = json.dumps([int(x) for x in (ep_ids or [])], ensure_ascii=False)
         cur = self.conn.execute(
             "INSERT INTO segments("
-            "level, t_start, t_end, first_ep, last_ep, summary, embed, n_ep, created_at"
-            ") VALUES(?,?,?,?,?,?,?,?,?)",
+            "level, t_start, t_end, first_ep, last_ep, ep_ids, summary, embed, n_ep, created_at"
+            ") VALUES(?,?,?,?,?,?,?,?,?,?)",
             (
                 int(level),
                 str(t_start),
                 str(t_end),
                 int(first_ep),
                 int(last_ep),
+                ids_json,
                 str(summary or ""),
                 blob,
                 int(n_ep),

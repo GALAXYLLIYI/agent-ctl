@@ -37,6 +37,10 @@ def main(argv: list[str] | None = None) -> int:
     p_h.add_argument("--timeline", default=None, help="timeline 目录（默认 AGENTCTL_TIMELINE 或仓内 work/timeline）")
 
     p_c = sub.add_parser("compact", help="巩固：promote + merge（幂等）")
+    p_c.add_argument(
+        "--rebuild-segments", action="store_true",
+        help="作废全部段并从 episodes 全量重 promote（段口径升级/区间损坏时用）",
+    )
 
     p_d = sub.add_parser("distill", help="经验提炼：成功会话 → workflows（幂等 upsert）")
 
@@ -61,6 +65,10 @@ def main(argv: list[str] | None = None) -> int:
         elif args.cmd == "compact":
             from agentctl.memory.compact import Compactor
 
+            if getattr(args, "rebuild_segments", False):
+                store.conn.execute("DELETE FROM segments")
+                store.set_meta("promoted_until", "0")
+                print("旧段已作废，promoted_until 归零，全量重建…", file=sys.stderr)
             _emit(Compactor(store).compact())
         elif args.cmd == "distill":
             from agentctl.memory.distill import distill_workflows
