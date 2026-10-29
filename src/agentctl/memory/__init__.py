@@ -60,9 +60,28 @@ def default_db_path() -> str:
 
 
 def open_store(db_path: Optional[str] = None, **kwargs):
-    """延迟导入的便捷工厂（避免包导入期强依赖并行开发中的 store.py）。"""
+    """延迟导入的便捷工厂（避免包导入期强依赖并行开发中的 store.py）。
+    v6：按库 meta['embedder'] 自动匹配嵌入器——库用什么编码，连接就用什么编码，
+    杜绝「库是 bge、连接拿哈希写」的口径混写。新库（无 meta）用哈希（轻量默认，
+    轻量路径不依赖模型文件）。"""
     if db_path is None:
         db_path = default_db_path()
     from agentctl.memory.store import MemoryStore
 
+    if "embedder" not in kwargs:
+        import sqlite3 as _sq
+        name = None
+        try:
+            con = _sq.connect(f"file:{db_path}?mode=ro", uri=True)
+            try:
+                row = con.execute(
+                    "SELECT v FROM meta WHERE k='embedder'").fetchone()
+                name = row[0] if row else None
+            finally:
+                con.close()
+        except Exception:
+            name = None
+        if name and "bge" in str(name):
+            from agentctl.memory.embedder_bge import BgeEmbedder
+            kwargs["embedder"] = BgeEmbedder()
     return MemoryStore(db_path, **kwargs)

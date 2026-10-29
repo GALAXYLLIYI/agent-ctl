@@ -31,8 +31,17 @@ from typing import Any, Optional
 #   旧段用 first_ep..last_ep 区间当候选集，但 episode 按时间排序成段后 ID 会倒挂
 #   （多写者下「新 id 旧时间」），区间覆盖错 episode ⇒ 检索漏检。
 #   真实库实锤：46 段 n_ep≠区间长、2 段反向。ep_ids 存实际成员，区间字段保留仅作展示。
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 MEMORY_VERSION = "0.1.0"
+
+# v6（2026-10-30 晨，用户拍板「换生产嵌入器」）：EMBED_DIM 256→512 + 嵌入器口径
+#   hash-ngram-zh-v1 → bge-small-zh-v1.5。依据（离线评估 embedder_eval.py，12 条真实
+#   教训金标准 + 同义改写查询，独立 agent 审计通过）：哈希 hit@1=6/12 MRR=0.592，
+#   bge hit@1=11/12 MRR=0.925——同义改写是词面哈希的路线性硬伤（它量字面重合，
+#   经验检索恰恰是『换个说法找同件事』）。
+#   纪律：episode_text 拼接口径**仍一字不动**（旧向量全体作废=预期内，reembed 全量重算）；
+#   meta['embedder'] 记录库的编码口径，open_store 按 meta 自动匹配嵌入器——
+#   库用什么编码，连接就用什么编码，杜绝混写。
 
 # v5（2026-10-29 晚，DSH 执行 / ZCode 派单「记忆层 v5 扩展」Phase 1）：
 #   episodes 增加 recurrences / source / dedup_key 三列，治「同一观测的循环写回堆行」——
@@ -221,7 +230,8 @@ CREATE INDEX IF NOT EXISTS ix_seg_live ON segments(level, merged_into);
 """
 
 # ── 向量 BLOB 口径 ──────────────────────────────────────────────────────────
-EMBED_DIM = 256
+# v6：256→512（bge-small-zh-v1.5 输出 512 维）。旧 256 维 BLOB 在新口径下按长度判废。
+EMBED_DIM = 512
 
 def pack_vec(values: list[float]) -> bytes:
     """float32 小端打包；长度必须等于 EMBED_DIM。"""

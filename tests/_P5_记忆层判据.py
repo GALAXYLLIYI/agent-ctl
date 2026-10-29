@@ -890,6 +890,98 @@ def t_actor_attribution(tmp: str) -> None:
         st2.close()
 
 
+
+# ── ⑱ v6 嵌入器换装（2026-10-30：bge-small 512 维 + 口径守门 + reembed）───────────
+
+def t_embedder_v6(tmp: str) -> None:
+    import math
+
+    import agentctl.memory as mem_pkg
+    from agentctl.memory.embedder import HashNGramEmbedder
+    from agentctl.memory.embedder_bge import BGE_QUERY_PREFIX, BgeEmbedder
+
+    assert C.EMBED_DIM == 512, f"v6 应为 512 维，得到 {C.EMBED_DIM}"
+
+    # 1) bge 确定性 + 维度 + 查询前缀 + 语义分离（模型不在 ⇒ 判据红，不静默跳过）
+    bge = BgeEmbedder()
+    v1 = bge.embed("回测 突破 代理基线 结论")
+    v2 = bge.embed("回测 突破 代理基线 结论")
+    assert len(v1) == C.EMBED_DIM, f"bge 维度 {len(v1)} != {C.EMBED_DIM}"
+    assert v1 == v2, "bge 同文本两次编码不一致（确定性破坏）"
+    assert bge.embed_query("回测 突破") == bge.embed(BGE_QUERY_PREFIX + "回测 突破"), \
+        "embed_query 与 前缀+embed 不等价"
+
+    def _cos(a, b):
+        na = math.sqrt(sum(x * x for x in a)) or 1e-12
+        nb = math.sqrt(sum(x * x for x in b)) or 1e-12
+        return sum(x * y for x, y in zip(a, b)) / (na * nb)
+
+    same = _cos(bge.embed("写进数据库的新记录要马上能被查到"),
+                bge.embed("刚写回去的新结论转头就能被搜到"))
+    diff = _cos(bge.embed("写进数据库的新记录要马上能被查到"),
+                bge.embed("收盘信号当天成交是未来函数"))
+    assert same > diff, f"语义分离失败: same={same:.3f} <= diff={diff:.3f}"
+
+    # 2) 口径守门：库=hash 时拿 bge 直开必须炸（豁免通道 allow_switch 除外）
+    db = os.path.join(tmp, "v6.db")
+    st = MemoryStore(db)
+    st.add_episode(Episode(
+        t="2026-10-30T09:00:00+08:00", kind="type", outcome="success",
+        obs="回测 突破 代理基线 结论甲", action={"type": "type", "target": "t1"},
+        result="r", verify={"verdict": "success"},
+        session_id="s-v6-1", subject="agent", src_seq=None))
+    st.close()
+    try:
+        MemoryStore(db, embedder=bge)
+        raise AssertionError("口径守门失效：库=hash 却用 bge 无豁免开库成功")
+    except RuntimeError as exc:
+        assert "口径冲突" in str(exc), f"守门报错不明确: {exc}"
+
+    # 3) reembed 换挡（豁免通道）：meta 换 bge、blob 全 512、同义改写可检
+    st3 = MemoryStore(db, embedder=bge, allow_switch=True)
+    try:
+        res = st3.reembed_all(batch_size=8)
+        assert res["episodes_reembedded"] == 1 and res["dim"] == C.EMBED_DIM
+        assert "bge" in st3.get_meta("embedder")
+        assert st3.get_meta("embed_dim") == str(C.EMBED_DIM)
+        blob_len = st3.conn.execute(
+            "SELECT length(embed) FROM episodes").fetchone()[0]
+        assert blob_len == C.EMBED_DIM * 4, f"blob 长度 {blob_len} 不符 512 维"
+        from agentctl.memory.retrieve import Retriever
+        hits = [h for h in Retriever(st3).query(
+            "刚写回去的新结论转头就能被搜到", k=3,
+            subject="agent")["hits"] if h.get("source") == "episode"]
+        assert hits, "reembed 后同义改写应命中"
+        # 旧维废 blob 的精确不变量：**向量路径**跳过它（不崩、不贡献向量分）；
+        # 关键词路径与 blob 无关，照常命中是正当行为
+        st3.conn.execute("UPDATE episodes SET embed = ? WHERE id = 1", (b"12345678",))
+        st3.conn.commit()
+        st3._invalidate_matrix()
+        qvec = st3.embedder.embed("回测 突破 代理基线")
+        vec_hits = st3.search_episodes(qvec, k=5, candidate_ids=[1])
+        assert vec_hits == [], "向量路径竟检回废维 blob（长度判废失效）"
+        # 恢复合法 blob，向量路径应重新可见
+        st3.reembed_all(batch_size=8)
+        vec_hits2 = st3.search_episodes(qvec, k=5, candidate_ids=[1])
+        assert vec_hits2 != [], "reembed 后向量路径未恢复"
+    finally:
+        st3.close()
+
+    # 4) open_store 自动匹配：meta=bge 的库 ⇒ 开出来就是 bge 连接；反向（hash 开）仍炸
+    st4 = mem_pkg.open_store(db)
+    try:
+        assert "bge" in str(getattr(st4.embedder, "NAME", "")), \
+            "open_store 未按 meta 匹配 bge"
+    finally:
+        st4.close()
+    try:
+        MemoryStore(db, embedder=HashNGramEmbedder())
+        raise AssertionError("口径守门失效：meta=bge 却用哈希开库成功")
+    except RuntimeError:
+        pass
+
+
+
 # ── 入口 ────────────────────────────────────────────────────────────────────
 
 def t_inject_v5() -> list[str]:
@@ -964,6 +1056,7 @@ def main() -> int:
     check("⑫ 混合时区 promote 不崩", lambda: t_mixed_timezone(tmp))
     check("⑬ 时间倒序入库检索命中", lambda: t_time_inversion(tmp))
     check("⑭ v3 主体分仓（迁移/范围/新近回退）", lambda: t_subject_v3(tmp))
+    check("⑱ v6 嵌入器换装（bge/reembed/守门）", lambda: t_embedder_v6(tmp))
     check("⑮ v5 intake 去重合并（recurrences/source）", lambda: t_intake_dedup(tmp))
     check("⑯ v5 教训 JSONL（断点续收/出处强制/映射）", lambda: t_lessons_ingest(tmp))
     check("⑰ v5 主体归因 actor（词表/映射/回填）", lambda: t_actor_attribution(tmp))

@@ -44,7 +44,10 @@ class MemoryStore:
         *,
         embedder=None,
         use_sqlite_vec: bool | None = None,
+        allow_switch: bool = False,
     ):
+        """allow_switch（v6）：显式豁免嵌入器口径守门——只给 reembed 换挡流程用；
+        正常开库一律走守门（库=bge 却拿哈希连 ⇒ 响亮报错，防口径混写）。"""
         self.db_path = os.fspath(db_path)
         if self.db_path != ":memory:":
             parent = os.path.dirname(os.path.abspath(self.db_path))
@@ -52,21 +55,32 @@ class MemoryStore:
                 os.makedirs(parent, exist_ok=True)
 
         self._embedder = embedder if embedder is not None else HashNGramEmbedder()
+        self._allow_switch = allow_switch
         self._mat_ids: list[int] | None = None
         self._mat: np.ndarray | None = None
 
         self.conn: sqlite3.Connection | None = sqlite3.connect(self.db_path)
         self.conn.row_factory = sqlite3.Row
-        self.conn.execute("PRAGMA journal_mode=WAL")
-        self.conn.executescript(contract.SQL_SCHEMA)
-        self._migrate_segments()
-        self._migrate_subject()
-        self._migrate_segments_subject()
-        self._migrate_v5_intake()
+        try:
+            self.conn.execute("PRAGMA journal_mode=WAL")
+            self.conn.executescript(contract.SQL_SCHEMA)
+            self._migrate_segments()
+            self._migrate_subject()
+            self._migrate_segments_subject()
+            self._migrate_v5_intake()
 
-        self.use_sqlite_vec = self._setup_vec(use_sqlite_vec)
-        self._ensure_meta()
-        self.conn.commit()
+            self.use_sqlite_vec = self._setup_vec(use_sqlite_vec)
+            self._ensure_meta()
+            self.conn.commit()
+        except Exception:
+            # 初始化中途失败（如口径守门拒绝）：必须自关连接——
+            # 泄漏的连接会锁住 WAL，让下一次合法开库 database is locked（⑱ 判据抓到）
+            try:
+                self.conn.close()
+            except Exception:  # noqa: BLE001
+                pass
+            self.conn = None
+            raise
 
     def _migrate_segments(self) -> None:
         """v1→v2 迁移：segments 补 ep_ids 列；旧段（区间口径）整体作废待重建。
@@ -300,7 +314,9 @@ class MemoryStore:
         return n
 
     def _setup_vec(self, mode: bool | None) -> bool:
-        """按需加载 sqlite_vec 并建 vec0 影子表；返回最终是否启用。"""
+        """按需加载 sqlite_vec 并建 vec0 影子表；返回最终是否启用。
+        v6：维度口径换挡（256→512）时旧影子表整表作废重建——
+        vec0 表的维度在建表时定死，混维度只有重建一条路。"""
         if mode is False:
             return False
         try:
@@ -324,16 +340,27 @@ class MemoryStore:
                 pass
 
         try:
+            # v6 维度换挡：meta 记的是建影子表时的维度，与新口径不符 ⇒ 旧表作废重建
+            stale_dim = self.get_meta("embed_dim")
+            if stale_dim is not None and int(stale_dim) != contract.EMBED_DIM:
+                self.conn.execute("DROP TABLE IF EXISTS vec_episodes")
+                self.set_meta("embed_dim", str(contract.EMBED_DIM))
             self.conn.execute(
                 "CREATE VIRTUAL TABLE IF NOT EXISTS vec_episodes "
                 f"USING vec0(a float[{contract.EMBED_DIM}])"
             )
+            self.conn.execute(
+                "INSERT OR IGNORE INTO meta(k, v) VALUES('embed_dim', ?)",
+                (str(contract.EMBED_DIM),),
+            )
             # 兼容「上次以 numpy 路径写入、这次启用 vec」的库：补插缺失行。
+            # v6：只补**长度符合当前口径**的 BLOB——旧维度残 blob 不进影子表（按长度判废）。
             self.conn.execute(
                 "INSERT INTO vec_episodes(rowid, a) "
                 "SELECT id, embed FROM episodes "
-                "WHERE embed IS NOT NULL "
-                "AND id NOT IN (SELECT rowid FROM vec_episodes)"
+                "WHERE embed IS NOT NULL AND length(embed) = ? "
+                "AND id NOT IN (SELECT rowid FROM vec_episodes)",
+                (contract.EMBED_DIM * 4,),
             )
         except Exception as exc:  # pragma: no cover - 环境差异分支
             if mode:
@@ -342,7 +369,9 @@ class MemoryStore:
         return True
 
     def _ensure_meta(self) -> None:
-        """只在缺失时写入口径版本，绝不覆盖已有 meta。"""
+        """只在缺失时写入口径版本，绝不覆盖已有 meta。
+        v6 新增守门：meta 里已记录的 embedder 与当前连接的嵌入器不一致 ⇒ 响亮报错——
+        口径混写（一半 bge 一半哈希）比检索差更危险，宁可不开库。"""
         name = getattr(self._embedder, "NAME", type(self._embedder).__name__)
         self.conn.execute(
             "INSERT OR IGNORE INTO meta(k, v) VALUES('embedder', ?)", (str(name),)
@@ -351,6 +380,63 @@ class MemoryStore:
             "INSERT OR IGNORE INTO meta(k, v) VALUES('schema_version', ?)",
             (str(contract.SCHEMA_VERSION),),
         )
+        stored = self.get_meta("embedder")
+        if stored is not None and stored != str(name) and not self._allow_switch:
+            raise RuntimeError(
+                f"嵌入器口径冲突：库按 {stored!r} 编码，当前连接用 {name!r}。"
+                "请用 open_store()（按 meta 自动匹配）；换口径请走 reembed 流程"
+                "（MemoryStore(..., allow_switch=True) + reembed_all）。"
+            )
+
+    def reembed_all(self, batch_size: int = 64) -> dict:
+        """v6 口径换挡：全库重嵌（episodes + 存活段摘要），只信 text 列（episode_text
+        口径未变），重算 embed BLOB 并重建 vec 影子表。返回计数。"""
+        n_need = contract.EMBED_DIM * 4
+        rows = self.conn.execute(
+            "SELECT id, text FROM episodes ORDER BY id"
+        ).fetchall()
+        texts = [str(r["text"] or "") for r in rows]
+        ids = [int(r["id"]) for r in rows]
+        vecs = self._embedder.embed_batch(texts, batch_size=batch_size) \
+            if hasattr(self._embedder, "embed_batch") \
+            else [self._embedder.embed(t) for t in texts]
+        self.conn.execute("UPDATE episodes SET embed = NULL")
+        for eid, vec in zip(ids, vecs):
+            self.conn.execute(
+                "UPDATE episodes SET embed = ? WHERE id = ?",
+                (contract.pack_vec(vec), eid),
+            )
+        self.conn.commit()
+        n_ep = len(ids)
+        # 存活段摘要重嵌
+        n_seg = 0
+        for seg in self.iter_segments(live_only=True):
+            vec = self._embedder.embed(contract.normalize_text(str(seg.get("summary") or "")))
+            self.conn.execute(
+                "UPDATE segments SET embed = ? WHERE id = ?",
+                (contract.pack_vec(vec), int(seg["id"])),
+            )
+            n_seg += 1
+        self.conn.commit()
+        # vec 影子表整表重建（维度可能已换挡）
+        if self.use_sqlite_vec:
+            self.conn.execute("DROP TABLE IF EXISTS vec_episodes")
+            self.conn.execute(
+                "CREATE VIRTUAL TABLE vec_episodes "
+                f"USING vec0(a float[{contract.EMBED_DIM}])"
+            )
+            self.conn.execute(
+                "INSERT INTO vec_episodes(rowid, a) "
+                "SELECT id, embed FROM episodes WHERE embed IS NOT NULL AND length(embed) = ?",
+                (n_need,),
+            )
+            self.conn.commit()
+        self._invalidate_matrix()
+        self.set_meta("embedder", str(getattr(self._embedder, "NAME", "unknown")))
+        self.set_meta("embed_dim", str(contract.EMBED_DIM))
+        return {"episodes_reembedded": n_ep, "segments_reembedded": n_seg,
+                "embedder": str(getattr(self._embedder, "NAME", "unknown")),
+                "dim": contract.EMBED_DIM}
 
     @property
     def embedder(self):
@@ -612,7 +698,12 @@ class MemoryStore:
             if not ranked:
                 return []
             rows = self._rows_by_ids(ranked)
-            ids = [i for i in ranked if i in rows]
+            # v6：blob 长度不符当前口径 = 废（episodes 与影子表可能短暂分叉），
+            # 按废跳过而不是 unpack 崩——⑱ 判据注入抓到的健壮性缺口
+            need = contract.EMBED_DIM * 4
+            ids = [i for i in ranked if i in rows
+                   and rows[i]["embed"] is not None
+                   and len(rows[i]["embed"]) == need]
             if not ids:
                 return []
             mat = np.asarray(

@@ -57,6 +57,12 @@ def main(argv: list[str] | None = None) -> int:
 
     sub.add_parser("stats", help="库内计数与游标")
 
+    p_re = sub.add_parser(
+        "reembed", help="v6 口径换挡：按当前连接的嵌入器全库重嵌（episodes+段摘要）"
+    )
+    p_re.add_argument("--batch-size", type=int, default=64)
+    p_re.add_argument("--device", default="cpu", help="cpu（默认，显存留给训练）/cuda")
+
     args = ap.parse_args(argv)
 
     store = mem.open_store(args.db)
@@ -93,6 +99,20 @@ def main(argv: list[str] | None = None) -> int:
                 promote=not getattr(args, "no_promote", False),
                 cursor_path=args.cursor,
             ))
+        elif args.cmd == "reembed":
+            # 口径换挡必须显式指定新嵌入器（open_store 按 meta 匹配，等于自己重嵌自己）
+            store.close()
+            from agentctl.memory.embedder_bge import BgeEmbedder
+            from agentctl.memory.store import MemoryStore
+
+            st2 = MemoryStore(args.db or mem.default_db_path(),
+                              embedder=BgeEmbedder(device=args.device),
+                              allow_switch=True)
+            try:
+                _emit(st2.reembed_all(batch_size=args.batch_size))
+            finally:
+                st2.close()
+            return 0
         elif args.cmd == "stats":
             rows = list(store.iter_episode_rows())
             by_outcome: dict[str, int] = {}
