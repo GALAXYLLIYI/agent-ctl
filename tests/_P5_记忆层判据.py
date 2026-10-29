@@ -998,6 +998,27 @@ def t_embedder_v6(tmp: str) -> None:
     finally:
         st5.close()
 
+    # 4.8) 排除机制的饥饿豁免（A/B 分析实锤：低多样性语料 + 60 条排除窗 =
+    #      唯一相关经验被长期压死 → 116/128 轮零召回）。不变量：
+    #      全部命中都在排除集时，最高分一条必须带 shown_before 放行。
+    st6 = MemoryStore(db2, embedder=bge)
+    try:
+        rows = st6.conn.execute(
+            "SELECT id FROM episodes ORDER BY id").fetchall()
+        all_ids = [int(r["id"]) for r in rows]
+        from agentctl.memory.recall import recall as _recall6
+        rec6 = _recall6(st6, "akshare 拉取 数据接口", k=3, subject="agent",
+                        exclude_ids=all_ids)
+        assert rec6["recalled"] and len(rec6["hits"]) == 1, \
+            f"饥饿豁免失效: {rec6['n']} 条"
+        assert rec6["hits"][0].get("shown_before") is True, \
+            "豁免命中缺 shown_before 标记"
+        rec7 = _recall6(st6, "akshare 拉取 数据接口", k=3, subject="agent",
+                        exclude_ids=[])
+        assert rec7["n"] >= 2, "无排除时应出多命中（兄弟结局+复制品合并）"
+    finally:
+        st6.close()
+
     # 5) open_store 自动匹配：meta=bge 的库 ⇒ 开出来就是 bge 连接；反向（hash 开）仍炸
     st4 = mem_pkg.open_store(db)
     try:

@@ -48,13 +48,12 @@ def recall(
         res = Retriever(store).query(text, k=max(int(k) * 4, 12), subject=subject)
         hits: list[dict] = []
         seen_obs: set[str] = set()
+        excluded_top: dict | None = None          # 被排除命中里的最高分（饥饿豁免用）
         for h in res.get("hits", []):
             if h.get("source") != "episode":
                 continue
             score = float(h.get("score") or 0.0)
             if score <= floor:
-                continue
-            if excl and h.get("id") is not None and int(h["id"]) in excl:
                 continue
             h_subject = h.get("subject") or contract.SUBJECT_AGENT
             if subject and h_subject != subject:
@@ -65,8 +64,9 @@ def recall(
             key = f"{obs[:_OBS_KEY_CHARS]}\x1f{h.get('outcome', '')}"
             if key in seen_obs:
                 continue
-            seen_obs.add(key)
-            hits.append({
+            is_excluded = bool(excl and h.get("id") is not None
+                               and int(h["id"]) in excl)
+            item = {
                 "score": round(score, 3),
                 "outcome": h.get("outcome", ""),
                 "subject": h_subject,
@@ -78,9 +78,21 @@ def recall(
                 # v5：被验证过多少次 + 谁写的（机器仓内跨宿主可见，这正是扩展的目的）
                 "recurrences": int(h.get("recurrences") or 1),
                 "actor": h.get("actor") or contract.ACTOR_UNKNOWN,
-            })
+            }
+            if is_excluded:
+                # 排除 ≠ 湮没：低多样性语料里把唯一相关经验长期压死 = 义务式召回
+                # 被自己的去重饿死（A/B 分析 v5·B 时代 116/128 轮零召回的根因）。
+                # 豁免规则：被排除命中中分数最高的一条始终放行，标记 shown_before。
+                if excluded_top is None or score > float(excluded_top["score"]):
+                    excluded_top = item
+                continue
+            seen_obs.add(key)
+            hits.append(item)
             if len(hits) >= int(k):
                 break
+        if not hits and excluded_top is not None:
+            excluded_top["shown_before"] = True
+            hits.append(excluded_top)
         lines = [f"[记忆召回 {len(hits)} 条｜subject={subject}｜地板={floor}]"]
         for x in hits:
             times = f" ×{x['recurrences']}" if x["recurrences"] > 1 else ""
