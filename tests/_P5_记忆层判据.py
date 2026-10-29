@@ -967,7 +967,38 @@ def t_embedder_v6(tmp: str) -> None:
     finally:
         st3.close()
 
-    # 4) open_store 自动匹配：meta=bge 的库 ⇒ 开出来就是 bge 连接；反向（hash 开）仍炸
+    # 4.5) recall 展示去重不并兄弟结局（DSH P2-3 回归）：
+    #      同 obs 先 failed 后 success 是两行独立信息，必须双双可出示；
+    #      同 obs 同 outcome 的复制品仍合并为一。
+    db2 = os.path.join(tmp, "v6_dedup.db")
+    st5 = MemoryStore(db2, embedder=bge)
+    try:
+        for seq, (oc, res_txt) in enumerate([
+                ("failed", "第一次尝试失败：接口断连"),
+                ("success", "重试成功：换源后拿到数据")]):
+            st5.add_episode(Episode(
+                t=f"2026-10-30T1{seq}:00:00+08:00", kind="type", outcome=oc,
+                obs="akshare 拉取 日K 数据接口 请求",
+                action={"type": "type", "target": f"t{seq}"},
+                result=res_txt, verify={"verdict": oc},
+                session_id=f"s-v6-d{seq}", subject="agent", src_seq=None))
+        st5.add_episode(Episode(  # 同 obs 同 outcome 的复制品（应被展示去重合并）
+            t="2026-10-30T12:00:00+08:00", kind="type", outcome="success",
+            obs="akshare 拉取 日K 数据接口 请求",
+            action={"type": "type", "target": "t2b"},
+            result="重试成功：换源后拿到数据", verify={"verdict": "success"},
+            session_id="s-v6-d2b", subject="agent", src_seq=None))
+        from agentctl.memory.recall import recall as _recall
+        rec = _recall(st5, "akshare 拉取 数据接口", k=6, subject="agent")
+        outs = sorted(h["outcome"] for h in rec["hits"])
+        assert outs == ["failed", "success"], \
+            f"兄弟结局被展示去重吃掉: {outs}"
+        succ = [h for h in rec["hits"] if h["outcome"] == "success"]
+        assert len(succ) == 1, f"同结局复制品未合并: {len(succ)} 条"
+    finally:
+        st5.close()
+
+    # 5) open_store 自动匹配：meta=bge 的库 ⇒ 开出来就是 bge 连接；反向（hash 开）仍炸
     st4 = mem_pkg.open_store(db)
     try:
         assert "bge" in str(getattr(st4.embedder, "NAME", "")), \

@@ -60,7 +60,9 @@ def recall(
             if subject and h_subject != subject:
                 continue
             obs = str(h.get("obs") or "")
-            key = obs[:_OBS_KEY_CHARS]
+            # DSH 验收 P2-3 修正：去重键带 outcome——同一观测先 failed 后 success
+            # 是两行独立信息（intake 去重键同口径），展示层不许把兄弟结局并掉
+            key = f"{obs[:_OBS_KEY_CHARS]}\x1f{h.get('outcome', '')}"
             if key in seen_obs:
                 continue
             seen_obs.add(key)
