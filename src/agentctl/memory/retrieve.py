@@ -22,6 +22,10 @@ from agentctl.memory.compact import _row_vec, cosine_l2
 
 __all__ = ["Retriever"]
 
+# 新近回退：粗筛候选集并入最近 N 条 episode——未 promote 的新写入对检索可见
+# （ZCode 本体实验实锤「写读经 promote 耦合」：回灌后不 compact 即 0 命中）。
+RECENT_FALLBACK_N = 200
+
 
 def _normalize_row(row: dict) -> dict:
     """检索结果不带 embed BLOB（便于上层 JSON 序列化）。"""
@@ -148,13 +152,33 @@ class Retriever:
                 break
         return hits
 
-    def query(self, text: str, k: int = 5) -> dict:
+    def query(self, text: str, k: int = 5, subject: str | None = None) -> dict:
         qtext = contract.normalize_text(text or "")
         qvec = self.store.embedder.embed(qtext)
 
         candidate_ids: list[int] | None = None
         if qvec and any(abs(x) > 1e-12 for x in qvec):
             candidate_ids = self._coarse_candidates(qvec, k)
+
+        # v3 新近回退：候选集并入最近 N 条（只影响带候选的路径；先并集再过滤主体，
+        # 否则空主体查询会把别的主体新写入漏进来）
+        if candidate_ids is not None:
+            fn = getattr(self.store, "recent_episode_ids", None)
+            if callable(fn):
+                have = set(candidate_ids)
+                candidate_ids = candidate_ids + [
+                    i for i in fn(RECENT_FALLBACK_N) if i not in have
+                ]
+
+        # v3 主体分仓：候选集与主体集取交集（不传 subject = 不分仓，全库可检）
+        if subject:
+            fn = getattr(self.store, "subject_ids", None)
+            if callable(fn):
+                sids = fn(subject)
+                if candidate_ids is None:
+                    candidate_ids = list(sids)
+                else:
+                    candidate_ids = [i for i in candidate_ids if i in sids]
 
         fine = self._fine_hits(qtext, qvec, k, candidate_ids) if qvec else []
         segs = self._segment_hits(qvec) if qvec else []
@@ -164,6 +188,7 @@ class Retriever:
         hits = segs + fine
         return {
             "query": text or "",
+            "subject": subject,
             "hits": hits,
             "workflows": wfs,
             "candidate_ids": candidate_ids,

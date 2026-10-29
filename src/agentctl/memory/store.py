@@ -60,6 +60,7 @@ class MemoryStore:
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.executescript(contract.SQL_SCHEMA)
         self._migrate_segments()
+        self._migrate_subject()
 
         self.use_sqlite_vec = self._setup_vec(use_sqlite_vec)
         self._ensure_meta()
@@ -78,6 +79,36 @@ class MemoryStore:
             self.conn.execute("ALTER TABLE segments ADD COLUMN ep_ids TEXT NOT NULL DEFAULT '[]'")
             self.conn.execute("DELETE FROM segments")
             self.conn.execute("UPDATE meta SET v='0' WHERE k='promoted_until'")
+
+    def _migrate_subject(self) -> None:
+        """v2→v3 迁移：episodes 补 subject 列 + 存量分仓回填。
+
+        存量回填口径（E4 实验）：桌面时间线 harvest 的 episode 必带 src_seq=人的动作
+        ⇒ 'human'；代理经验批（feed/loop/写回）src_seq IS NULL ⇒ 保持 DEFAULT 'agent'。
+        旧库无该列时执行一次；已迁移的库幂等跳过。对运行中的旧代码安全：
+        旧 INSERT 是显式列清单，新列由 DEFAULT 兜底。
+        """
+        cols = [r[1] for r in self.conn.execute("PRAGMA table_info(episodes)").fetchall()]
+        if "subject" in cols:
+            return
+        self.conn.execute(
+            "ALTER TABLE episodes ADD COLUMN subject TEXT NOT NULL DEFAULT 'agent'"
+        )
+        cur = self.conn.execute(
+            "UPDATE episodes SET subject = 'human' WHERE src_seq IS NOT NULL"
+        )
+        self.conn.execute(
+            "INSERT INTO meta(k, v) VALUES('schema_version', ?) "
+            "ON CONFLICT(k) DO UPDATE SET v = excluded.v",
+            (str(contract.SCHEMA_VERSION),),
+        )
+        self.conn.commit()
+        # 迁移摘要留 meta，方便验收对账（不覆盖、只首迁写）
+        if self.get_meta("v3_subject_backfill") is None:
+            self.set_meta(
+                "v3_subject_backfill",
+                f"human={int(cur.rowcount)} at {_now_iso()}",
+            )
 
     # ── 初始化 ──────────────────────────────────────────────────────────────
 
@@ -245,14 +276,15 @@ class MemoryStore:
         blob = contract.pack_vec(self._embedder.embed(row["text"]))
         cur = self.conn.execute(
             "INSERT OR IGNORE INTO episodes("
-            "t, src_seq, kind, session_id, screen_version, obs, action, "
+            "t, src_seq, kind, session_id, subject, screen_version, obs, action, "
             "result, outcome, verify, text, embed"
-            ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+            ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 row["t"],
                 row["src_seq"],
                 row["kind"],
                 row["session_id"],
+                row["subject"],
                 row["screen_version"],
                 row["obs"],
                 row["action"],
@@ -297,6 +329,21 @@ class MemoryStore:
         )
         for row in cur:
             yield dict(row)
+
+    def recent_episode_ids(self, n: int = 200) -> list[int]:
+        """最近 n 条 episode id（新近回退用：未入段的最新写入对检索可见——
+        ZCode 本体实验实锤「写读经 promote 耦合」的治标，配合检索候选集并集）。"""
+        rows = self.conn.execute(
+            "SELECT id FROM episodes ORDER BY id DESC LIMIT ?", (int(n),)
+        ).fetchall()
+        return [int(r["id"]) for r in rows]
+
+    def subject_ids(self, subject: str) -> set[int]:
+        """某主体的全部 episode id（范围检索的过滤集）。"""
+        rows = self.conn.execute(
+            "SELECT id FROM episodes WHERE subject = ?", (str(subject),)
+        ).fetchall()
+        return {int(r["id"]) for r in rows}
 
     def count_episodes(self) -> int:
         row = self.conn.execute("SELECT COUNT(*) AS n FROM episodes").fetchone()

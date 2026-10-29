@@ -461,6 +461,89 @@ def t_inject_self() -> None:
         C.verdict_from_code = saved
 
 
+# ── ⑭ v3 主体分仓（2026-10-29：subject 列 + scope 检索 + 新近回退）───────────
+
+def t_subject_v3(tmp: str) -> None:
+    from agentctl.memory.compact import Compactor
+    from agentctl.memory.retrieve import Retriever
+
+    db = os.path.join(tmp, "v3.db")
+    st = MemoryStore(db)
+
+    # 1) 非法 subject 拒收
+    try:
+        Episode(t="2026-10-29T10:00:00+08:00", kind="click", outcome="success",
+                subject="robot").validate()
+        raise AssertionError("非法 subject 未被拒收")
+    except ValueError:
+        pass
+
+    # 2) 双主体写入 + scope 检索互斥
+    def put(seq, obs, subject):
+        st.add_episode(Episode(
+            t=f"2026-10-29T10:{seq:02d}:00+08:00", kind="type", outcome="success",
+            obs=obs, action={"type": "type", "target": f"t{seq}"},
+            result="r", verify={"verdict": "success"},
+            session_id=f"s-{subject}-{seq}", subject=subject, src_seq=None))
+
+    put(1, "回测 突破 策略 IS OOS 双正", C.SUBJECT_AGENT)
+    put(2, "回测 突破 策略 人工复盘 笔记", C.SUBJECT_HUMAN)
+    put(3, "突破 参数 稳健带 扫描 结论", C.SUBJECT_AGENT)
+
+    ra = Retriever(st).query("回测 突破 策略", k=5, subject=C.SUBJECT_AGENT)
+    rh = Retriever(st).query("回测 突破 策略", k=5, subject=C.SUBJECT_HUMAN)
+    got_a = {h.get("subject") for h in ra["hits"] if h.get("source") == "episode"}
+    got_h = {h.get("subject") for h in rh["hits"] if h.get("source") == "episode"}
+    assert got_a <= {C.SUBJECT_AGENT}, f"agent 范围混入 {got_a}"
+    assert got_h <= {C.SUBJECT_HUMAN}, f"human 范围混入 {got_h}"
+    assert ra["hits"] and rh["hits"], "scope 检索两边都应为空不可、也都不该空"
+
+    # 3) 新近回退：新写入不 compact 立即可检索（写读耦合治标）
+    put(4, "跨品种 期货 趋势 栖息地 结论", C.SUBJECT_AGENT)
+    rr = Retriever(st).query("期货 趋势 栖息地", k=5, subject=C.SUBJECT_AGENT)
+    hit_new = [h for h in rr["hits"] if h.get("source") == "episode"
+               and "栖息地" in str(h.get("obs"))]
+    assert hit_new, "新近回退失效：未 promote 的新写入检索不到"
+
+    # 4) compact 后幂等仍在
+    Compactor(st).promote()
+    st.close()
+
+    # 5) v2 老库迁移：无 subject 列 + src_seq 行 → 自动补列回填 human
+    legacy = os.path.join(tmp, "legacy_v2.db")
+    con = sqlite3.connect(legacy)
+    con.executescript(
+        "CREATE TABLE meta(k TEXT PRIMARY KEY, v TEXT NOT NULL);"
+        "CREATE TABLE episodes("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, t TEXT NOT NULL, src_seq INTEGER,"
+        "kind TEXT NOT NULL, session_id TEXT NOT NULL DEFAULT '', screen_version INTEGER,"
+        "obs TEXT NOT NULL DEFAULT '', action TEXT NOT NULL DEFAULT '{}',"
+        "result TEXT NOT NULL DEFAULT '', outcome TEXT NOT NULL,"
+        "verify TEXT NOT NULL DEFAULT '{}', text TEXT NOT NULL DEFAULT '', embed BLOB,"
+        "UNIQUE(src_seq, t));"
+        "INSERT INTO episodes(t, src_seq, kind, session_id, obs, outcome) VALUES"
+        "('2026-10-01T09:00:00+08:00', 7, 'click', 's-old', '桌面 点击', 'success'),"
+        "('2026-10-01T09:05:00+08:00', NULL, 'type', 's-old2', '代理 经验', 'success');"
+    )
+    con.commit()
+    con.close()
+    st2 = MemoryStore(legacy)
+    cols = [r[1] for r in st2.conn.execute("PRAGMA table_info(episodes)").fetchall()]
+    assert "subject" in cols, "v2 老库迁移未补 subject 列"
+    assert st2.get_meta("schema_version") == str(C.SCHEMA_VERSION)
+    human_n = st2.conn.execute(
+        "SELECT COUNT(*) FROM episodes WHERE subject='human'").fetchone()[0]
+    agent_n = st2.conn.execute(
+        "SELECT COUNT(*) FROM episodes WHERE subject='agent'").fetchone()[0]
+    assert (human_n, agent_n) == (1, 1), f"回填口径错: human={human_n} agent={agent_n}"
+    # 旧代码路径兼容：显式列 INSERT 不带 subject 也能落库（DEFAULT 兜底）
+    st2.conn.execute(
+        "INSERT INTO episodes(t, src_seq, kind, session_id, obs, outcome) VALUES"
+        "('2026-10-01T09:10:00+08:00', 9, 'click', 's-old3', '旧代码直插', 'success')")
+    st2.conn.commit()
+    st2.close()
+
+
 # ── 入口 ────────────────────────────────────────────────────────────────────
 
 def main() -> int:
@@ -488,6 +571,7 @@ def main() -> int:
     check("⑪ ctl_memory 工具接线", lambda: t_tool_wiring(tmp))
     check("⑫ 混合时区 promote 不崩", lambda: t_mixed_timezone(tmp))
     check("⑬ 时间倒序入库检索命中", lambda: t_time_inversion(tmp))
+    check("⑭ v3 主体分仓（迁移/范围/新近回退）", lambda: t_subject_v3(tmp))
     if FAILS:
         print(f"RED x{len(FAILS)}")
         for f in FAILS:

@@ -30,8 +30,16 @@ from typing import Any, Optional
 #   旧段用 first_ep..last_ep 区间当候选集，但 episode 按时间排序成段后 ID 会倒挂
 #   （多写者下「新 id 旧时间」），区间覆盖错 episode ⇒ 检索漏检。
 #   真实库实锤：46 段 n_ep≠区间长、2 段反向。ep_ids 存实际成员，区间字段保留仅作展示。
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 MEMORY_VERSION = "0.1.0"
+
+# v3（2026-10-29）：episodes 增加 subject 主体分仓列。起因（ZCode 本体实验 E4 + 用户拍板
+#   「宪法条款要么进结构要么不存在」）：桌面时间线 harvest 是**人的**情景记忆，代理经验批
+#   （feed/nightloop/zcode 写回）是**代理的**情景记忆——两种记忆同库混存会互相污染
+#   （330 条知识库映射 MM 子概念零覆盖=理论独有贡献）。harvest 写 'human'，其余默认 'agent'。
+SUBJECT_AGENT = "agent"
+SUBJECT_HUMAN = "human"
+VALID_SUBJECTS = frozenset({SUBJECT_AGENT, SUBJECT_HUMAN})
 
 # ── 结局三态+一（§2.2 / §6.6 第 2 步）───────────────────────────────────────
 OUTCOME_SUCCESS = "success"            # 效果已发生且被证实（ok=1, code=0）
@@ -96,6 +104,7 @@ CREATE TABLE IF NOT EXISTS episodes(
   src_seq INTEGER,
   kind TEXT NOT NULL,
   session_id TEXT NOT NULL DEFAULT '',
+  subject TEXT NOT NULL DEFAULT 'agent',
   screen_version INTEGER,
   obs TEXT NOT NULL DEFAULT '',
   action TEXT NOT NULL DEFAULT '{}',
@@ -198,6 +207,7 @@ class Episode:
     result: str = ""
     verify: dict = field(default_factory=dict)
     session_id: str = ""
+    subject: str = SUBJECT_AGENT
     src_seq: Optional[int] = None
     screen_version: Optional[int] = None
     id: Optional[int] = None
@@ -210,6 +220,10 @@ class Episode:
         if self.outcome not in VALID_OUTCOMES:
             raise ValueError(
                 f"episode.outcome 非法: {self.outcome!r}，合法值 {sorted(VALID_OUTCOMES)}"
+            )
+        if self.subject not in VALID_SUBJECTS:
+            raise ValueError(
+                f"episode.subject 非法: {self.subject!r}，合法值 {sorted(VALID_SUBJECTS)}"
             )
         if not isinstance(self.action, dict):
             raise ValueError("episode.action 必须是 dict")
@@ -227,6 +241,7 @@ class Episode:
             "src_seq": self.src_seq,
             "kind": self.kind,
             "session_id": self.session_id,
+            "subject": self.subject,
             "screen_version": self.screen_version,
             "obs": self.obs,
             "action": _json.dumps(self.action, ensure_ascii=False),
@@ -245,6 +260,7 @@ class Episode:
             src_seq=row.get("src_seq"),
             kind=row["kind"],
             session_id=row.get("session_id") or "",
+            subject=row.get("subject") or SUBJECT_AGENT,
             screen_version=row.get("screen_version"),
             obs=row.get("obs") or "",
             action=_json.loads(row.get("action") or "{}"),

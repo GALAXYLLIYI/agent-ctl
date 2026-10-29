@@ -233,6 +233,8 @@ class TimelineHarvester:
                     "win_filtered": win_filtered,
                 },
                 session_id=session_id,
+                # v3 主体分仓：timeline 是**人的**桌面动作 ⇒ 人的情景记忆仓
+                subject=contract.SUBJECT_HUMAN,
                 src_seq=int(seq),
             )
             self.store.add_episode(ep)
