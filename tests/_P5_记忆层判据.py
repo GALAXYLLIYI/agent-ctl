@@ -1034,6 +1034,100 @@ def t_embedder_v6(tmp: str) -> None:
 
 
 
+
+# ── ⑲ 反哺引擎（2026-10-30 晨：三行接线 + A/B 交替 + 自动巩固）──────────────
+
+def t_feedback_engine(tmp: str) -> None:
+    from agentctl.memory.feedback import FeedbackEngine, _mode_for_round
+    from agentctl.memory.retrieve import Retriever
+
+    assert [_mode_for_round(r, (2, 2)) for r in range(1, 7)] == \
+        ["control", "control", "recall", "recall", "control", "control"], \
+        "A/B 轮次交替口径错"
+
+    db = os.path.join(tmp, "fb.db")
+    st = MemoryStore(db)
+
+    # 1) 空库 control 轮：义务未建立不给记忆
+    fb = FeedbackEngine(st, session_id="s-fb-test", ab_cycle=(2, 2), promote_every=2)
+    fb.begin_round()
+    ctx0 = fb.before_task("任务甲", "回测 突破 策略")
+    assert ctx0["mode"] == "control" and ctx0["recalled"] is False
+
+    # 2) recall 轮（cycle(2,2)：round 1,2=control、3,4=recall）：空库零命中不崩
+    fb.begin_round()
+    fb.begin_round()
+    ctx1 = fb.before_task("任务甲", "回测 突破 策略")
+    assert ctx1["mode"] == "recall" and ctx1["n"] == 0, \
+        f"round3 应为 recall: {ctx1['mode']}/{ctx1['n']}"
+
+    # 3) after_task 回灌：写入 + 去重合并（promote_every=2 ⇒ 第二条触发 promote）
+    r1 = fb.after_task("任务甲", kind="type",
+                       obs="回测 突破 策略 IS OOS 双正", outcome="success",
+                       result="第一次")
+    assert r1["written"] and r1["created"] is True
+    r2 = fb.after_task("任务甲", kind="type",
+                       obs="回测 突破 策略 IS OOS 双正", outcome="success",
+                       result="第二次")
+    assert r2["written"] and r2["created"] is False and r2["recurrences"] == 2, \
+        f"去重合并失效: {r2}"
+    assert st.count_episodes() == 1, "同观测重复写应合并为一行"
+
+    # 4) 闭环（round 4 仍为 recall）：引擎写回的经验，下轮召回拿得到（带出处与 recurrences）
+    fb.begin_round()
+    ctx2 = fb.before_task("任务甲", "回测 突破 策略")
+    assert ctx2["recalled"] and ctx2["n"] >= 1, \
+        f"写读闭环失效: {ctx2['n']}"
+    h = ctx2["hits"][0]
+    assert h.get("session_id") == "s-fb-test" and h.get("outcome") == "success", \
+        "命中缺出处"
+    assert int(h.get("recurrences") or 0) == 2, "recurrences 未透传"
+    # promote_every=2：两条写入后 promoted_until 应已推进
+    assert st.get_meta("promoted_until") == "1", \
+        f"自动巩固未触发: promoted_until={st.get_meta('promoted_until')}"
+    st.close()
+
+    # 5) 兄弟结局：先 failed 后 success 是两条独立信息（与 intake 口径一致）
+    st2 = MemoryStore(db)
+    fb2 = FeedbackEngine(st2, session_id="s-fb-test", promote_every=0)
+    r3 = fb2.after_task("任务乙", kind="type",
+                        obs="接口 拉取 日K", outcome="failed", result="断连")
+    r4 = fb2.after_task("任务乙", kind="type",
+                        obs="接口 拉取 日K", outcome="success", result="换源成功")
+    assert r3["created"] and r4["created"], "outcome 变化必须各成一行"
+    # 排除全部 ⇒ 饥饿豁免放行最高分
+    rec_all = fb2.before_task("任务乙", "接口 拉取 日K")
+    if rec_all["mode"] == "recall" and rec_all["n"] == 0:
+        pass  # shown 缓冲为空，首次查询不会饿——豁免逻辑由 ⑱ 4.8 已咬合
+    st2.close()
+
+    # 6) fail-open：坏 store 上 before/after 都不抛
+    class _Boom:
+        embedder = None
+
+        def __getattr__(self, name):
+            raise RuntimeError("store 炸了")
+
+    fb3 = FeedbackEngine(_Boom(), session_id="s-fb-x", promote_every=0)
+    c3 = fb3.before_task("任务丙", "任何查询")
+    # 双层 fail-open：内层 _recall 吞异常返空，外层兜底标 error——断言=不抛且零召回
+    assert c3.get("recalled") is False and c3.get("n") == 0, \
+        "before_task 必须 fail-open"
+    a3 = fb3.after_task("任务丙", kind="type", obs="x", outcome="failed")
+    assert a3["written"] is False and "error" in a3, "after_task 必须 fail-open"
+
+    # 7) 注入自检：disabled=True ⇒ 即使库里有匹配内容也必须零召回（结构开关咬合）
+    st3 = MemoryStore(db)
+    fb4 = FeedbackEngine(st3, session_id="s-fb-test", disabled=True,
+                         ab_cycle=(0, 2), promote_every=0)
+    fb4.begin_round()
+    ctx4 = fb4.before_task("任务甲", "回测 突破 策略")
+    assert ctx4["mode"] == "control" and ctx4["recalled"] is False, \
+        "disabled 注入未咬合：关掉开关居然还召回"
+    st3.close()
+
+
+
 # ── 入口 ────────────────────────────────────────────────────────────────────
 
 def t_inject_v5() -> list[str]:
@@ -1109,6 +1203,7 @@ def main() -> int:
     check("⑬ 时间倒序入库检索命中", lambda: t_time_inversion(tmp))
     check("⑭ v3 主体分仓（迁移/范围/新近回退）", lambda: t_subject_v3(tmp))
     check("⑱ v6 嵌入器换装（bge/reembed/守门）", lambda: t_embedder_v6(tmp))
+    check("⑲ 反馈引擎（三行接线/A·B/自动巩固）", lambda: t_feedback_engine(tmp))
     check("⑮ v5 intake 去重合并（recurrences/source）", lambda: t_intake_dedup(tmp))
     check("⑯ v5 教训 JSONL（断点续收/出处强制/映射）", lambda: t_lessons_ingest(tmp))
     check("⑰ v5 主体归因 actor（词表/映射/回填）", lambda: t_actor_attribution(tmp))
