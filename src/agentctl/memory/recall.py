@@ -35,12 +35,16 @@ def recall(
     k: int = 3,
     subject: Optional[str] = DEFAULT_SUBJECT,
     floor: float = SCORE_FLOOR,
+    exclude_ids: Optional[list[int]] = None,
 ) -> dict:
     """结构化召回。返回 {"recalled", "n", "hits", "block", "subject"}；
-    失败时 recalled=False（附 error），绝不抛异常。"""
+    失败时 recalled=False（附 error），绝不抛异常。
+    exclude_ids（DSH 验收 P2-2）：调用方排除最近已出示的 episode id——
+    真库 95% 语料是同一观测的循环写回，不去重的话义务式召回每次都是同一条。"""
     try:
         from agentctl.memory.retrieve import Retriever
 
+        excl = {int(x) for x in (exclude_ids or [])}
         res = Retriever(store).query(text, k=max(int(k) * 4, 12), subject=subject)
         hits: list[dict] = []
         seen_obs: set[str] = set()
@@ -49,6 +53,8 @@ def recall(
                 continue
             score = float(h.get("score") or 0.0)
             if score <= floor:
+                continue
+            if excl and h.get("id") is not None and int(h["id"]) in excl:
                 continue
             h_subject = h.get("subject") or contract.SUBJECT_AGENT
             if subject and h_subject != subject:

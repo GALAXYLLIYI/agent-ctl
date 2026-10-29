@@ -114,8 +114,13 @@ class Retriever:
         scored.sort(key=lambda h: (-float(h["score"]), int(h.get("id") or 0)))
         return scored[:k]
 
-    def _segment_hits(self, qvec: list[float]) -> list[dict]:
+    def _segment_hits(self, qvec: list[float], subject: str | None = None,
+                      floor: float = 0.10) -> list[dict]:
+        """段摘要命中。v4（DSH 验收 P0-1/P2-3）：过 subject 闸（只出同主体段，
+        mixed 不进任何单仓）+ 分数地板（滤零分噪声段）。"""
         live = [dict(s) for s in self.store.iter_segments(live_only=True)]
+        if subject:
+            live = [s for s in live if s.get("subject") == subject]
         scored: list[tuple[float, dict]] = []
         for seg in live:
             sim = cosine_l2(qvec, self._seg_vec(seg))
@@ -123,6 +128,8 @@ class Retriever:
         scored.sort(key=lambda p: (-p[0], int(p[1].get("id") or 0)))
         out: list[dict] = []
         for sim, seg in scored[:3]:
+            if sim <= floor:
+                continue
             item = _normalize_row(seg)
             item["source"] = "segment-summary"
             item["score"] = sim
@@ -181,7 +188,7 @@ class Retriever:
                     candidate_ids = [i for i in candidate_ids if i in sids]
 
         fine = self._fine_hits(qtext, qvec, k, candidate_ids) if qvec else []
-        segs = self._segment_hits(qvec) if qvec else []
+        segs = self._segment_hits(qvec, subject=subject) if qvec else []
         wfs = self._workflow_hits(qtext)
 
         # segment-summary 置前（粗粒度出处），再接细粒度 episode

@@ -423,6 +423,23 @@ def t_tool_wiring(tmp: str) -> None:
         r7 = core_mod.dispatch("ctl_memory", {"action": "recall", "text": "回测 突破",
                                               "subject": "robot"}, actor="判据")
         assert r7.get("ok") is not True, "非法 subject 必须拒"
+
+        # v4（DSH 验收 P0-1/P2-1 回归）：段层 scope + 空串拒绝，走 dispatch 真路径
+        from agentctl.memory.compact import Compactor as _Cp
+        _st2 = _MS(os.path.join(tmp, "p5_tool.db"))
+        try:
+            _Cp(_st2).compact()      # 造出带 subject 的段
+        finally:
+            _st2.close()
+        r8 = core_mod.dispatch("ctl_memory", {"action": "query", "text": "回测 突破",
+                                              "subject": "human"}, actor="判据")
+        assert r8.get("ok") is True, r8
+        bad8 = [h for h in r8["data"]["结果"]["hits"]
+                if (h.get("subject") or "mixed") != "human"]
+        assert not bad8, f"段层泄漏: {[(h.get('source'), h.get('subject')) for h in bad8]}"
+        r9 = core_mod.dispatch("ctl_memory", {"action": "query", "text": "回测",
+                                              "subject": ""}, actor="判据")
+        assert r9.get("ok") is not True, "subject 空串必须拒（P2-1）"
     finally:
         os.environ.pop("AGENTCTL_MEMORY_DB", None)
 
@@ -495,9 +512,15 @@ def t_inject_self() -> None:
         C.verdict_from_code = saved
 
 
-# ── ⑭ v3 主体分仓（2026-10-29：subject 列 + scope 检索 + 新近回退）───────────
+# ── ⑭ v3/v4 主体分仓（2026-10-29：subject 列 + scope 检索 + 新近回退）───────────
+# DSH 验收 P0-1/P1-3 修复后的重构版：
+#   · 互斥断言覆盖**全部 hit 类型**（不得用 source=='episode' 过滤——过滤器与 bug 位置
+#     重合正是上次漏掉段泄漏的原因）
+#   · 新近回退用例先造出段（候选集非空）再写新条目——回退链路必须真的在链路上
+#   · 注入自检：RECENT_FALLBACK_N=0 时该用例必须变红（判据活性的固定自证）
 
 def t_subject_v3(tmp: str) -> None:
+    import agentctl.memory.retrieve as _ret_mod
     from agentctl.memory.compact import Compactor
     from agentctl.memory.retrieve import Retriever
 
@@ -512,7 +535,7 @@ def t_subject_v3(tmp: str) -> None:
     except ValueError:
         pass
 
-    # 2) 双主体写入 + scope 检索互斥
+    # 2) 双主体写入 + 先 compact 造出段（v4：段带 subject）
     def put(seq, obs, subject):
         st.add_episode(Episode(
             t=f"2026-10-29T10:{seq:02d}:00+08:00", kind="type", outcome="success",
@@ -523,21 +546,46 @@ def t_subject_v3(tmp: str) -> None:
     put(1, "回测 突破 策略 IS OOS 双正", C.SUBJECT_AGENT)
     put(2, "回测 突破 策略 人工复盘 笔记", C.SUBJECT_HUMAN)
     put(3, "突破 参数 稳健带 扫描 结论", C.SUBJECT_AGENT)
+    Compactor(st).compact()
+    seg_subjects = {s.get("subject") for s in st.iter_segments(live_only=True)}
+    assert seg_subjects <= {"agent", "human", "mixed"} and seg_subjects, \
+        f"段缺 subject 标注: {seg_subjects}"
 
-    ra = Retriever(st).query("回测 突破 策略", k=5, subject=C.SUBJECT_AGENT)
-    rh = Retriever(st).query("回测 突破 策略", k=5, subject=C.SUBJECT_HUMAN)
-    got_a = {h.get("subject") for h in ra["hits"] if h.get("source") == "episode"}
-    got_h = {h.get("subject") for h in rh["hits"] if h.get("source") == "episode"}
-    assert got_a <= {C.SUBJECT_AGENT}, f"agent 范围混入 {got_a}"
-    assert got_h <= {C.SUBJECT_HUMAN}, f"human 范围混入 {got_h}"
-    assert ra["hits"] and rh["hits"], "scope 检索两边都应为空不可、也都不该空"
+    def assert_scope(res, subj):
+        bad = [h for h in res["hits"]
+               if (h.get("subject") or "mixed") != subj]
+        assert not bad, f"{subj} 范围混入: {[(h.get('source'), h.get('subject')) for h in bad]}"
 
-    # 3) 新近回退：新写入不 compact 立即可检索（写读耦合治标）
+    ra = Retriever(st).query("回测 突破 策略", k=6, subject=C.SUBJECT_AGENT)
+    rh = Retriever(st).query("回测 突破 策略", k=6, subject=C.SUBJECT_HUMAN)
+    assert ra["hits"] and rh["hits"], "scope 检索两边都不该为空"
+    assert_scope(ra, C.SUBJECT_AGENT)
+    assert_scope(rh, C.SUBJECT_HUMAN)
+    # 段命中必须真实存在且同主体（否则互斥断言可能在空集上 vacuous）
+    assert any(h.get("source") == "segment-summary" for h in ra["hits"]), \
+        "agent 范围应能命中同主体段摘要"
+    assert any(h.get("source") == "segment-summary" for h in rh["hits"]), \
+        "human 范围应能命中同主体段摘要"
+
+    # 3) 新近回退：先有段（候选集非空），再写新条目，不 promote 查询必须命中 id=4
+    #    k=2 刻意小于候选数（3）：粗筛不会放开全库，回退是唯一能带到 id=4 的路径
     put(4, "跨品种 期货 趋势 栖息地 结论", C.SUBJECT_AGENT)
-    rr = Retriever(st).query("期货 趋势 栖息地", k=5, subject=C.SUBJECT_AGENT)
-    hit_new = [h for h in rr["hits"] if h.get("source") == "episode"
-               and "栖息地" in str(h.get("obs"))]
-    assert hit_new, "新近回退失效：未 promote 的新写入检索不到"
+    found_with_fb = False
+    for _ in range(4):
+        rr = Retriever(st).query("期货 趋势 栖息地", k=2, subject=C.SUBJECT_AGENT)
+        if any(h.get("source") == "episode" and h.get("id") == 4 for h in rr["hits"]):
+            found_with_fb = True
+            break
+    assert found_with_fb, "新近回退失效：候选集非空时未 promote 的新写入检索不到"
+    # 注入自检：关掉回退必须变红（判据活性）
+    saved_n = _ret_mod.RECENT_FALLBACK_N
+    try:
+        _ret_mod.RECENT_FALLBACK_N = 0
+        rr0 = Retriever(st).query("期货 趋势 栖息地", k=2, subject=C.SUBJECT_AGENT)
+        assert not any(h.get("source") == "episode" and h.get("id") == 4
+                       for h in rr0["hits"]), "注入自检失败：关掉回退仍命中（判据没咬合）"
+    finally:
+        _ret_mod.RECENT_FALLBACK_N = saved_n
 
     # 4) compact 后幂等仍在
     Compactor(st).promote()
@@ -576,6 +624,15 @@ def t_subject_v3(tmp: str) -> None:
         "('2026-10-01T09:10:00+08:00', 9, 'click', 's-old3', '旧代码直插', 'success')")
     st2.conn.commit()
     st2.close()
+    # 口径自愈（DSH P1-2）：旧式直插的 src_seq 行重开库后必须被纠正为 human
+    st3 = MemoryStore(legacy)
+    try:
+        drift = st3.conn.execute(
+            "SELECT COUNT(*) FROM episodes WHERE src_seq IS NOT NULL AND subject<>'human'"
+        ).fetchone()[0]
+        assert drift == 0, f"口径自愈失效：{drift} 行带 src_seq 却不是 human"
+    finally:
+        st3.close()
 
 
 # ── 入口 ────────────────────────────────────────────────────────────────────

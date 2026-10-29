@@ -61,6 +61,7 @@ class MemoryStore:
         self.conn.executescript(contract.SQL_SCHEMA)
         self._migrate_segments()
         self._migrate_subject()
+        self._migrate_segments_subject()
 
         self.use_sqlite_vec = self._setup_vec(use_sqlite_vec)
         self._ensure_meta()
@@ -81,33 +82,91 @@ class MemoryStore:
             self.conn.execute("UPDATE meta SET v='0' WHERE k='promoted_until'")
 
     def _migrate_subject(self) -> None:
-        """v2→v3 迁移：episodes 补 subject 列 + 存量分仓回填。
-
-        存量回填口径（E4 实验）：桌面时间线 harvest 的 episode 必带 src_seq=人的动作
-        ⇒ 'human'；代理经验批（feed/loop/写回）src_seq IS NULL ⇒ 保持 DEFAULT 'agent'。
-        旧库无该列时执行一次；已迁移的库幂等跳过。对运行中的旧代码安全：
-        旧 INSERT 是显式列清单，新列由 DEFAULT 兜底。
-        """
+        """v2→v3：episodes 补 subject 列（ALTER 只做一次）；
+        口径自愈（DSH 验收 P1-2）：`subject='human' ⇔ src_seq 非空` 这条核心账
+        **每次开库都幂等校正一遍**——旧码直插（显式列 INSERT 不带 subject）会落
+        DEFAULT 'agent'，把人的时间线记成代理经验；一条 UPDATE 代价可忽略，
+        比只在首迁算一次可靠。"""
         cols = [r[1] for r in self.conn.execute("PRAGMA table_info(episodes)").fetchall()]
+        if "subject" not in cols:
+            self.conn.execute(
+                "ALTER TABLE episodes ADD COLUMN subject TEXT NOT NULL DEFAULT 'agent'"
+            )
+            cur = self.conn.execute(
+                "UPDATE episodes SET subject = 'human' WHERE src_seq IS NOT NULL"
+            )
+            self.conn.execute(
+                "INSERT INTO meta(k, v) VALUES('schema_version', ?) "
+                "ON CONFLICT(k) DO UPDATE SET v = excluded.v",
+                (str(contract.SCHEMA_VERSION),),
+            )
+            self.conn.commit()
+            if self.get_meta("v3_subject_backfill") is None:
+                self.set_meta(
+                    "v3_subject_backfill",
+                    f"human={int(cur.rowcount)} at {_now_iso()}",
+                )
+            return
+        # 列已存在：口径自愈（幂等，DSH P1-2 修复）
+        cur = self.conn.execute(
+            "UPDATE episodes SET subject = 'human' "
+            "WHERE src_seq IS NOT NULL AND subject <> 'human'"
+        )
+        if cur.rowcount:
+            self.conn.commit()
+
+    def _migrate_segments_subject(self) -> None:
+        """v3→v4（DSH 验收 P0-1）：segments 补 subject 列并按成员 ep_ids 回填。
+        口径：成员全 human ⇒ human；全 agent ⇒ agent；混合/空 ⇒ mixed。
+        范围查询只出同主体段，mixed 不进任何单仓。幂等：列在即跳过。"""
+        cols = [r[1] for r in self.conn.execute("PRAGMA table_info(segments)").fetchall()]
         if "subject" in cols:
             return
         self.conn.execute(
-            "ALTER TABLE episodes ADD COLUMN subject TEXT NOT NULL DEFAULT 'agent'"
+            "ALTER TABLE segments ADD COLUMN subject TEXT NOT NULL DEFAULT 'mixed'"
         )
-        cur = self.conn.execute(
-            "UPDATE episodes SET subject = 'human' WHERE src_seq IS NOT NULL"
-        )
+        rows = self.conn.execute(
+            "SELECT id, ep_ids FROM segments WHERE merged_into IS NULL"
+        ).fetchall()
+        import json as _json
+        n_human = n_agent = n_mixed = 0
+        for r in rows:
+            try:
+                ids = [int(x) for x in _json.loads(r["ep_ids"] or "[]")]
+            except (TypeError, ValueError):
+                ids = []
+            subj = "mixed"
+            if ids:
+                marks = ",".join("?" for _ in ids)
+                got = {
+                    row[0] for row in self.conn.execute(
+                        f"SELECT DISTINCT subject FROM episodes WHERE id IN ({marks})",
+                        ids,
+                    ).fetchall()
+                }
+                if got == {"human"}:
+                    subj = "human"
+                elif got == {"agent"}:
+                    subj = "agent"
+            if subj == "human":
+                n_human += 1
+            elif subj == "agent":
+                n_agent += 1
+            else:
+                n_mixed += 1
+            self.conn.execute(
+                "UPDATE segments SET subject = ? WHERE id = ?", (subj, int(r["id"]))
+            )
         self.conn.execute(
             "INSERT INTO meta(k, v) VALUES('schema_version', ?) "
             "ON CONFLICT(k) DO UPDATE SET v = excluded.v",
             (str(contract.SCHEMA_VERSION),),
         )
         self.conn.commit()
-        # 迁移摘要留 meta，方便验收对账（不覆盖、只首迁写）
-        if self.get_meta("v3_subject_backfill") is None:
+        if self.get_meta("v4_segments_backfill") is None:
             self.set_meta(
-                "v3_subject_backfill",
-                f"human={int(cur.rowcount)} at {_now_iso()}",
+                "v4_segments_backfill",
+                f"human={n_human} agent={n_agent} mixed={n_mixed} at {_now_iso()}",
             )
 
     # ── 初始化 ──────────────────────────────────────────────────────────────
@@ -349,6 +408,24 @@ class MemoryStore:
         row = self.conn.execute("SELECT COUNT(*) AS n FROM episodes").fetchone()
         return int(row["n"])
 
+    def delete_episode(self, ep_id: int) -> bool:
+        """硬删一条 episode（含 vec 影子表行）。只用于清误入数据（DSH 验收 P1-1：
+        迁移演示条目写进了生产库）——正常历史不删。返回是否删了。"""
+        row = self.conn.execute(
+            "SELECT id FROM episodes WHERE id = ?", (int(ep_id),)
+        ).fetchone()
+        if row is None:
+            return False
+        self.conn.execute("DELETE FROM episodes WHERE id = ?", (int(ep_id),))
+        if self.use_sqlite_vec:
+            try:
+                self.conn.execute("DELETE FROM vec_episodes WHERE rowid = ?", (int(ep_id),))
+            except Exception:  # pragma: no cover - 影子表缺行
+                pass
+        self.conn.commit()
+        self._invalidate_matrix()
+        return True
+
     # ── meta ────────────────────────────────────────────────────────────────
 
     def set_meta(self, k: str, v: str) -> None:
@@ -503,15 +580,30 @@ class MemoryStore:
         ep_ids: list[int] | None = None,
     ) -> int:
         """ep_ids：段的**实际成员**（按时间序）——检索候选集只认它，不再读区间
-        （区间字段保留仅作展示；不传时退化为空表，等价「无候选」，宁可漏不猜）。"""
+        （区间字段保留仅作展示；不传时退化为空表，等价「无候选」，宁可漏不猜）。
+        subject（v4，DSH P0-1）：按成员 ep_ids 的主体一致性落库——全 human/全 agent/
+        mixed；范围检索只出同主体段，mixed 不进任何单仓。"""
         blob = contract.pack_vec(
             self._embedder.embed(contract.normalize_text(summary or ""))
         )
         ids_json = json.dumps([int(x) for x in (ep_ids or [])], ensure_ascii=False)
+        subj = "mixed"
+        if ep_ids:
+            marks = ",".join("?" for _ in ep_ids)
+            got = {
+                row[0] for row in self.conn.execute(
+                    f"SELECT DISTINCT subject FROM episodes WHERE id IN ({marks})",
+                    [int(x) for x in ep_ids],
+                ).fetchall()
+            }
+            if got == {"human"}:
+                subj = "human"
+            elif got == {"agent"}:
+                subj = "agent"
         cur = self.conn.execute(
             "INSERT INTO segments("
-            "level, t_start, t_end, first_ep, last_ep, ep_ids, summary, embed, n_ep, created_at"
-            ") VALUES(?,?,?,?,?,?,?,?,?,?)",
+            "level, t_start, t_end, first_ep, last_ep, ep_ids, summary, embed, n_ep, subject, created_at"
+            ") VALUES(?,?,?,?,?,?,?,?,?,?,?)",
             (
                 int(level),
                 str(t_start),
@@ -522,6 +614,7 @@ class MemoryStore:
                 str(summary or ""),
                 blob,
                 int(n_ep),
+                subj,
                 _now_iso(),
             ),
         )

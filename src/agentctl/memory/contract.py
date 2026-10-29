@@ -30,8 +30,13 @@ from typing import Any, Optional
 #   旧段用 first_ep..last_ep 区间当候选集，但 episode 按时间排序成段后 ID 会倒挂
 #   （多写者下「新 id 旧时间」），区间覆盖错 episode ⇒ 检索漏检。
 #   真实库实锤：46 段 n_ep≠区间长、2 段反向。ep_ids 存实际成员，区间字段保留仅作展示。
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 MEMORY_VERSION = "0.1.0"
+
+# v4（2026-10-29 下午）：segments 加 subject 列。起因（DSH 独立验收 P0-1）：v3 只在
+#   episode 检索层过滤了主体，段摘要一路完全没过闸——agent 范围查询照样端上人的记忆摘要
+#   （真库 85% 存活段是纯 human）。修法：段在落库时按成员 ep_ids 的主体一致性定 subject
+#   （全 agent / 全 human / mixed），范围查询只出同主体段，mixed 段不进任何单仓。
 
 # v3（2026-10-29）：episodes 增加 subject 主体分仓列。起因（ZCode 本体实验 E4 + 用户拍板
 #   「宪法条款要么进结构要么不存在」）：桌面时间线 harvest 是**人的**情景记忆，代理经验批
@@ -126,6 +131,7 @@ CREATE TABLE IF NOT EXISTS segments(
   summary TEXT NOT NULL DEFAULT '',
   embed BLOB,
   n_ep INTEGER NOT NULL DEFAULT 0,
+  subject TEXT NOT NULL DEFAULT 'mixed',
   merged_into INTEGER,
   created_at TEXT NOT NULL DEFAULT '');
 

@@ -7552,7 +7552,8 @@ def _t_memory(a):
         except (TypeError, ValueError):
             return env(code=gate.CODE_NO_CTRL, warning="k 必须是整数（1-20）")
         subject = _subject_or_none(a.get("subject"))
-        if a.get("subject") and subject is None:
+        if "subject" in a and subject is None:
+            # DSH 验收 P2-1：显式传入即校验——空串不再落「没传=全库」那一支
             return env(code=gate.CODE_NO_CTRL,
                        warning="subject 非法（合法：agent / human）")
         store = mem.open_store()
@@ -7569,10 +7570,11 @@ def _t_memory(a):
             k = max(1, min(20, int(a.get("k") or 3)))
         except (TypeError, ValueError):
             return env(code=gate.CODE_NO_CTRL, warning="k 必须是整数（1-20）")
-        subject = _subject_or_none(a.get("subject")) or mem.contract.SUBJECT_AGENT
-        if a.get("subject") and _subject_or_none(a.get("subject")) is None:
+        subject = _subject_or_none(a.get("subject"))
+        if "subject" in a and subject is None:
             return env(code=gate.CODE_NO_CTRL,
                        warning="subject 非法（合法：agent / human）")
+        subject = subject or mem.contract.SUBJECT_AGENT
         from agentctl.memory.recall import recall as _recall
         store = mem.open_store()
         try:
