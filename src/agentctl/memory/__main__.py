@@ -48,6 +48,13 @@ def main(argv: list[str] | None = None) -> int:
     p_q.add_argument("text")
     p_q.add_argument("--k", type=int, default=5)
 
+    p_rl = sub.add_parser(
+        "record-lessons", help="教训 JSONL → episodes（去重合并 + 断点续收 + promote 收尾）"
+    )
+    p_rl.add_argument("file", help="教训 JSONL 路径（格式见 docs/lessons_jsonl_v1.md）")
+    p_rl.add_argument("--no-promote", action="store_true", help="跳过 promote 收尾（调试用）")
+    p_rl.add_argument("--cursor", default=None, help="游标文件路径（默认 <file>.cursor）")
+
     sub.add_parser("stats", help="库内计数与游标")
 
     args = ap.parse_args(argv)
@@ -78,6 +85,14 @@ def main(argv: list[str] | None = None) -> int:
             from agentctl.memory.retrieve import Retriever
 
             _emit(Retriever(store).query(args.text, k=args.k))
+        elif args.cmd == "record-lessons":
+            from agentctl.memory.intake import ingest_lessons
+
+            _emit(ingest_lessons(
+                store, args.file,
+                promote=not getattr(args, "no_promote", False),
+                cursor_path=args.cursor,
+            ))
         elif args.cmd == "stats":
             rows = list(store.iter_episode_rows())
             by_outcome: dict[str, int] = {}

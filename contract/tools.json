@@ -1,5 +1,5 @@
 {
-  "schema_version": 6,
+  "schema_version": 7,
   "_关于": "AgentCtl 的机器可读接口契约（草案 v1）。给 agent 直接读取用的——不是给人看的清单。人看的那份是 agent-manual 里的 agent_tools.json（老清单，保持不动）。",
   "_来源": "docs/详细设计_v1.md 第 6 章（接口契约），本仓库内相对路径",
   "_状态": "设计稿：字段名可能微调；实现前以本文件为冻结基线，改动必须升 schema_version",
@@ -1480,9 +1480,10 @@
         ],
         "additionalProperties": false
       },
-      "returns": "统一信封。query→data.结果={hits:[{source,score,t,kind,obs,subject,outcome,verify,…}],workflows}；recall→data.结果={recalled,n,hits:[…],block}；stats→data={episodes,segments_live,harvest_cursor_seq,…}"
+      "returns": "统一信封。query→data.结果={hits:[{source,score,t,kind,obs,subject,outcome,recurrences,actor,verify,…}],workflows}；recall→data.结果={recalled,n,hits:[{…,recurrences,actor}],block}；stats→data={episodes,segments_live,harvest_cursor_seq,…}。★ v5 起每条命中带 `recurrences`（这条经验被写回/验证过多少次）与 `actor`（谁写的）；recall 的 block 逐行显示 `×N` 与 `[actor]`。"
     }
   ],
+  "_2026-10-29_记忆层v5": "episodes 加 recurrences / source / dedup_key / actor 四列（schema v5，幂等迁移 + 开库口径自愈）；写入侧新增 src/agentctl/memory/intake.py：record_experience（按 (subject,kind,obs,target,outcome) 去重合并，命中即 recurrences+1 并刷新结论）、ingest_lessons（教训 JSONL 适配器，带出处强制 + 游标断点续收 + promote 收尾）、CLI `python -m agentctl.memory record-lessons <file>`。★ 工具面**故意不加 actor 入参**：actor 是写入侧归因，检索侧不按 actor 过滤——机器仓内跨宿主互相可见（ZCode 踩的坑 DSH 干活前该看到），加了过滤参数反而诱导调用方按宿主切视野，把「扩展归因」变成「拆仓」。★ 契约 v6→v7 的原因：returns 多了两个出参（recurrences/actor），不改入参。",
   "_本版未列入（v1.1 补，列在这里是为了不和设计文档的完整清单打架）": {
     "ctl_drag": "拖拽（D 级）——D 级要连续 20 次干净成功才解锁（铁律 11⑥），v1 不向 agent 暴露",
     "_ctl_focus": "（2026-10-06 修正）ctl_focus **已实现并列入 tools**，所以从这里移出。留着会让 check_consistency.py 报『同时在 tools 和 _本版未列入 里』，而且会误导读者以为它还没做。",

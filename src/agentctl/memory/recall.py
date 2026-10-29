@@ -73,14 +73,18 @@ def recall(
                 "session_id": h.get("session_id", ""),
                 "t": h.get("t", ""),
                 "id": h.get("id"),
+                # v5：被验证过多少次 + 谁写的（机器仓内跨宿主可见，这正是扩展的目的）
+                "recurrences": int(h.get("recurrences") or 1),
+                "actor": h.get("actor") or contract.ACTOR_UNKNOWN,
             })
             if len(hits) >= int(k):
                 break
         lines = [f"[记忆召回 {len(hits)} 条｜subject={subject}｜地板={floor}]"]
         for x in hits:
+            times = f" ×{x['recurrences']}" if x["recurrences"] > 1 else ""
             lines.append(
-                f"  ({x['score']:.3f}/{x['outcome']}) {x['obs']} ⇒ {x['result']} "
-                f"[{x['session_id']}]"
+                f"  ({x['score']:.3f}/{x['outcome']}{times}) [{x['actor']}] {x['obs']} "
+                f"⇒ {x['result']} [{x['session_id']}]"
             )
         return {
             "recalled": bool(hits),

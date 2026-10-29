@@ -19,6 +19,7 @@ r"""agentctl.memory.contract —— 记忆层 v0 的**唯一契约真源**（记
 """
 from __future__ import annotations
 
+import hashlib
 import re
 import struct
 import unicodedata
@@ -30,8 +31,15 @@ from typing import Any, Optional
 #   旧段用 first_ep..last_ep 区间当候选集，但 episode 按时间排序成段后 ID 会倒挂
 #   （多写者下「新 id 旧时间」），区间覆盖错 episode ⇒ 检索漏检。
 #   真实库实锤：46 段 n_ep≠区间长、2 段反向。ep_ids 存实际成员，区间字段保留仅作展示。
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 MEMORY_VERSION = "0.1.0"
+
+# v5（2026-10-29 晚，DSH 执行 / ZCode 派单「记忆层 v5 扩展」Phase 1）：
+#   episodes 增加 recurrences / source / dedup_key 三列，治「同一观测的循环写回堆行」——
+#   真库 10k+ 条里 95% 是同一观测重复（一条「30×15 复核」重复 1459 次），展示端去重治不了
+#   存储与召回多样性。写入侧由 intake.record_experience 统一去重：同 (subject, kind, obs,
+#   action.target, outcome) 重复命中 ⇒ 不新增行，原行 recurrences+1 并更新结论。
+#   硬约束：这三列**都不进** episode_text（改口径=全库 10k 向量作废）。
 
 # v4（2026-10-29 下午）：segments 加 subject 列。起因（DSH 独立验收 P0-1）：v3 只在
 #   episode 检索层过滤了主体，段摘要一路完全没过闸——agent 范围查询照样端上人的记忆摘要
@@ -45,6 +53,64 @@ MEMORY_VERSION = "0.1.0"
 SUBJECT_AGENT = "agent"
 SUBJECT_HUMAN = "human"
 VALID_SUBJECTS = frozenset({SUBJECT_AGENT, SUBJECT_HUMAN})
+
+# ── v5 来源流（source）与主体归因（actor）────────────────────────────────────
+# source = 这条 episode 从哪条流进来（timeline 桌面动作 / manual 手工经验批 /
+#          session 会话教训摄入）；subject = 谁的记忆（分仓）。两个字段语义分开。
+SOURCE_TIMELINE = "timeline"
+SOURCE_MANUAL = "manual"
+SOURCE_SESSION = "session"
+VALID_SOURCES = frozenset({SOURCE_TIMELINE, SOURCE_MANUAL, SOURCE_SESSION})
+
+# actor = 精确到宿主/循环的归因（分仓仍是二元，human 仓的语义不因归因而放宽）。
+ACTOR_HUMAN = "human"
+ACTOR_ZCODE = "zcode"
+ACTOR_CODEX = "codex"
+ACTOR_DSH = "dsh"
+ACTOR_DAYLOOP = "dayloop"
+ACTOR_NIGHTLOOP = "nightloop"
+ACTOR_UNKNOWN = "unknown"
+VALID_ACTORS = frozenset(
+    {ACTOR_HUMAN, ACTOR_ZCODE, ACTOR_CODEX, ACTOR_DSH, ACTOR_DAYLOOP,
+     ACTOR_NIGHTLOOP, ACTOR_UNKNOWN}
+)
+
+# actor → subject 映射：只有 human 进 human 仓，其余（含 unknown）一律 agent 仓。
+# 「人的记忆不可被代理改写」这条不因归因而松动：映射是单向的。
+ACTOR_SUBJECT = {
+    ACTOR_HUMAN: SUBJECT_HUMAN,
+    ACTOR_ZCODE: SUBJECT_AGENT,
+    ACTOR_CODEX: SUBJECT_AGENT,
+    ACTOR_DSH: SUBJECT_AGENT,
+    ACTOR_DAYLOOP: SUBJECT_AGENT,
+    ACTOR_NIGHTLOOP: SUBJECT_AGENT,
+    ACTOR_UNKNOWN: SUBJECT_AGENT,
+}
+
+
+def subject_for_actor(actor: str) -> str:
+    """actor → subject（唯一口径，intake/harvest 共用；单独成函数是为了可注入自检）。"""
+    return ACTOR_SUBJECT.get(str(actor or ACTOR_UNKNOWN), SUBJECT_AGENT)
+
+
+# 存量回填口径（宁可 unknown 不许猜）：session_id 里出现以下子串才认归因。
+# 只认**明确写过宿主名**的会话；其余一律 unknown。
+ACTOR_SESSION_HINTS = (
+    (ACTOR_DAYLOOP, "dayloop"),
+    (ACTOR_NIGHTLOOP, "nightloop"),
+    (ACTOR_ZCODE, "zcode"),
+    (ACTOR_CODEX, "codex"),
+    (ACTOR_DSH, "dsh"),
+)
+
+
+def actor_from_session(session_id: str) -> str:
+    """按 session_id 推断 actor（保守：认不出就 unknown）。"""
+    s = str(session_id or "").lower()
+    for actor, hint in ACTOR_SESSION_HINTS:
+        if hint in s:
+            return actor
+    return ACTOR_UNKNOWN
 
 # ── 结局三态+一（§2.2 / §6.6 第 2 步）───────────────────────────────────────
 OUTCOME_SUCCESS = "success"            # 效果已发生且被证实（ok=1, code=0）
@@ -118,6 +184,10 @@ CREATE TABLE IF NOT EXISTS episodes(
   verify TEXT NOT NULL DEFAULT '{}',
   text TEXT NOT NULL DEFAULT '',
   embed BLOB,
+  recurrences INTEGER NOT NULL DEFAULT 1,
+  source TEXT NOT NULL DEFAULT 'manual',
+  dedup_key TEXT NOT NULL DEFAULT '',
+  actor TEXT NOT NULL DEFAULT 'unknown',
   UNIQUE(src_seq, t));
 
 CREATE TABLE IF NOT EXISTS segments(
@@ -196,6 +266,30 @@ def episode_text(kind: str, obs: str, action: dict, result: str) -> str:
     joined = normalize_text(joined)
     return joined[:_EMBED_PARTS_CAP]
 
+
+# ── v5 去重键（intake 与迁移回填共用同一份口径，不许各自复刻）──────────────
+
+def dedup_key(subject: str, kind: str, obs: str, action: Any, outcome: str) -> str:
+    """循环写回的去重键：sha1(主体 ␟ kind ␟ 归一 obs ␟ 归一 target ␟ outcome)[:32]。
+
+    口径（为什么这样切）：
+      · subject 进键 —— 分仓之间永不合并（人的记忆不许被代理那条副本吃掉）；
+      · outcome 进键 —— 同一事件先 failed 后 success 是**新信息**（两行各自成立）；
+      · obs / target 都走 normalize_text —— 空白、全半角、大小写差异不算新观测；
+      · 键不进 episode_text（见上方硬约束），只是写入侧的账。
+    """
+    target = ""
+    if isinstance(action, dict):
+        target = str(action.get("target", "") or "")
+    raw = "\x1f".join([
+        str(subject or ""),
+        str(kind or ""),
+        normalize_text(obs or ""),
+        normalize_text(target),
+        str(outcome or ""),
+    ])
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:32]
+
 # ── Episode 数据契约 ────────────────────────────────────────────────────────
 
 @dataclass
@@ -216,6 +310,10 @@ class Episode:
     subject: str = SUBJECT_AGENT
     src_seq: Optional[int] = None
     screen_version: Optional[int] = None
+    recurrences: int = 1
+    source: str = SOURCE_MANUAL
+    dedup_key: str = ""
+    actor: str = ACTOR_UNKNOWN
     id: Optional[int] = None
 
     def validate(self) -> None:
@@ -231,6 +329,16 @@ class Episode:
             raise ValueError(
                 f"episode.subject 非法: {self.subject!r}，合法值 {sorted(VALID_SUBJECTS)}"
             )
+        if self.source not in VALID_SOURCES:
+            raise ValueError(
+                f"episode.source 非法: {self.source!r}，合法值 {sorted(VALID_SOURCES)}"
+            )
+        if self.actor not in VALID_ACTORS:
+            raise ValueError(
+                f"episode.actor 非法: {self.actor!r}，合法值 {sorted(VALID_ACTORS)}"
+            )
+        if not isinstance(self.recurrences, int) or self.recurrences < 1:
+            raise ValueError(f"episode.recurrences 必须是 >=1 的整数，得到 {self.recurrences!r}")
         if not isinstance(self.action, dict):
             raise ValueError("episode.action 必须是 dict")
         v = self.verify or {}
@@ -255,6 +363,10 @@ class Episode:
             "outcome": self.outcome,
             "verify": _json.dumps(self.verify, ensure_ascii=False),
             "text": self.text_for_embedding(),
+            "recurrences": int(self.recurrences),
+            "source": self.source,
+            "dedup_key": self.dedup_key,
+            "actor": self.actor,
         }
 
     @classmethod
@@ -273,4 +385,8 @@ class Episode:
             result=row.get("result") or "",
             outcome=row["outcome"],
             verify=_json.loads(row.get("verify") or "{}"),
+            recurrences=int(row.get("recurrences") or 1),
+            source=row.get("source") or SOURCE_MANUAL,
+            dedup_key=row.get("dedup_key") or "",
+            actor=row.get("actor") or ACTOR_UNKNOWN,
         )

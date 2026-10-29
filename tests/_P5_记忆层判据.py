@@ -635,7 +635,306 @@ def t_subject_v3(tmp: str) -> None:
         st3.close()
 
 
+# ── ⑮ v5 intake 去重合并（2026-10-29 晚 · 派单 Phase 1）─────────────────────
+# 治的病：真库 95% 是同一条观测的循环写回（一条「30×15 复核」重复 1459 次）。
+# 验收口径（派单）：同 obs 写两次 ⇒ 一行 recurrences=2；obs 变 ⇒ 新行；outcome 变 ⇒ 新行；
+# 另加：归一化去重、subject 不许跨仓合并、结论演进 + first_t 留档、source 口径自愈。
+
+def t_intake_dedup(tmp: str) -> None:
+    import agentctl.memory.intake as I
+    from agentctl.memory.recall import recall as _recall
+
+    db = os.path.join(tmp, "v5_intake.db")
+    st = MemoryStore(db)
+    cred = {"file": "docs/lessons_jsonl_v1.md", "anchor": "§3"}
+    kw = dict(kind="click", obs="回测 突破 策略 结论甲", outcome=C.OUTCOME_SUCCESS,
+              session_id="s-20261029-dayloop", actor=C.ACTOR_DAYLOOP,
+              verify={"cred": dict(cred)})
+
+    r1 = I.record_experience(st, result="首轮：通过", **kw)
+    assert r1["created"] is True and r1["recurrences"] == 1, r1
+    r2 = I.record_experience(st, result="二轮：复核通过", **kw)
+    assert r2["created"] is False and r2["recurrences"] == 2, r2
+    assert st.count_episodes() == 1, f"同 obs 写两次应只 1 行，实 {st.count_episodes()}"
+    row = st.conn.execute("SELECT * FROM episodes").fetchone()
+    assert row["result"] == "二轮：复核通过", f"结论必须演进到最新，实 {row['result']!r}"
+    assert row["recurrences"] == 2 and row["dedup_key"], dict(row)
+    v = json.loads(row["verify"])
+    assert v["cred"]["first_t"] == row["t"], "首次时间必须留在 verify.cred.first_t"
+    assert v["cred"]["file"] == cred["file"], "最新出处必须留在 cred.file"
+
+    # 归一化：全角空格 / 大小写 / 多余空白都不算新观测
+    r3 = I.record_experience(st, result="三轮", **{**kw, "obs": "回测　突破  策略 结论甲"})
+    assert r3["created"] is False and r3["recurrences"] == 3, r3
+    assert st.count_episodes() == 1, "归一化去重失效（全角空格被当成新观测）"
+
+    # obs 变 ⇒ 新行
+    r4 = I.record_experience(st, result="乙", **{**kw, "obs": "回测 突破 策略 结论乙"})
+    assert r4["created"] is True and st.count_episodes() == 2
+    # outcome 变 ⇒ 新行（先 failed 后 success 是新信息）
+    r5 = I.record_experience(st, result="先失败", **{**kw, "outcome": C.OUTCOME_FAILED})
+    assert r5["created"] is True and st.count_episodes() == 3
+    # 分仓不许合并：同一 obs，human 主体另起一行
+    r6 = I.record_experience(st, result="人工复盘",
+                             **{**kw, "session_id": "s-human-1",
+                                "actor": C.ACTOR_HUMAN})
+    assert r6["created"] is True and st.count_episodes() == 4, "跨主体被合并了"
+
+    # 注入自检（组内）：关掉去重 ⇒ 同 obs 必须真的多一行（开关 load-bearing）
+    saved = I.DEDUP_ENABLED
+    try:
+        I.DEDUP_ENABLED = False
+        r7 = I.record_experience(st, result="去重关了", **kw)
+        assert r7["created"] is True and st.count_episodes() == 5, \
+            "关掉去重后仍被合并 —— DEDUP_ENABLED 没接线"
+    finally:
+        I.DEDUP_ENABLED = saved
+    # 再开：命中 id 最小那条继续累加
+    r8 = I.record_experience(st, result="重开去重", **kw)
+    assert r8["created"] is False and r8["id"] == r1["id"], (r8["id"], r1["id"])
+
+    # recurrences 在召回里可读（×N）——用一个没有同前缀兄弟行的观测，
+    # 否则 recall 的 obs 去重会把展示吃掉（同 obs 的 failed/success 两行只出一行）
+    for _i in range(5):
+        I.record_experience(st, kind="lesson", obs="累计 五轮 复核 结论丙",
+                            outcome=C.OUTCOME_SUCCESS, result="复核通过",
+                            actor=C.ACTOR_DSH, verify={"cred": dict(cred)})
+    row = st.conn.execute(
+        "SELECT recurrences FROM episodes WHERE obs LIKE '累计 五轮%'").fetchone()
+    assert int(row["recurrences"]) == 5, f"五次写回必须合并成 recurrences=5，实 {dict(row)}"
+    rc = _recall(st, "累计 五轮 复核 结论丙", k=3)
+    assert rc["hits"] and rc["hits"][0]["recurrences"] == 5, rc["hits"]
+    assert "×5" in rc["block"], rc["block"]
+
+    # source / actor 口径自愈：旧码直插（带 src_seq、不带 source/actor）重开库必须纠正
+    st.conn.execute(
+        "INSERT INTO episodes(t, src_seq, kind, session_id, obs, outcome, subject) VALUES"
+        "('2026-10-29T15:00:00+08:00', 9001, 'click', 's-old', '旧码直插 带序号',"
+        " 'success', 'agent')")
+    st.conn.commit()
+    n_before = st.count_episodes()
+    st.close()
+    st2 = MemoryStore(db)
+    try:
+        row = st2.conn.execute(
+            "SELECT source, actor, recurrences, dedup_key FROM episodes WHERE src_seq = 9001"
+        ).fetchone()
+        assert row["source"] == C.SOURCE_TIMELINE, f"source 自愈失效: {row['source']}"
+        assert row["actor"] == C.ACTOR_HUMAN, f"actor 自愈失效: {row['actor']}"
+        assert row["recurrences"] == 1, "旧式直插应落 DEFAULT 1"
+        assert row["dedup_key"], "缺键行必须被补上 dedup_key"
+        assert st2.count_episodes() == n_before
+    finally:
+        st2.close()
+
+
+# ── ⑯ 教训 JSONL 适配器（Phase 2）──────────────────────────────────────────
+# 治的病：三宿主的交付结论/翻车教训全在会话与报告里，没有摄入通路。
+# 验收口径：断点续收（同文件重跑零新增）、出处缺失+success 必须拒、actor 映射正确。
+
+def t_lessons_ingest(tmp: str) -> None:
+    import agentctl.memory.intake as I
+
+    db = os.path.join(tmp, "v5_lessons.db")
+    st = MemoryStore(db)
+    path = os.path.join(tmp, "lessons_demo.jsonl")
+    good_success = {
+        "t": "2026-10-29T19:00:00+08:00", "actor": "dsh", "kind": "lesson",
+        "obs": "验收发现段层分仓失效：段摘要没过主体闸", "outcome": "success",
+        "result": "修复：段按成员一致性落 subject + mixed 不进单仓",
+        "verify": {"cred": {"file": "验收报告_v3_20261029.md", "anchor": "P0-1"}},
+    }
+    good_unobs = {
+        "t": "2026-10-29T19:01:00+08:00", "actor": "zcode", "kind": "pitfall",
+        "obs": "疑似写读耦合：不 promote 就查不到新写入", "outcome": "unobservable",
+        "result": "未定论：样本不足，先记下", "verify": {},
+    }
+    good_failed = {
+        "t": "2026-10-29T19:02:00+08:00", "actor": "codex", "kind": "delivery",
+        "obs": "7B SFT 评测 100% 但 gold 取自 failed 动作", "outcome": "failed",
+        "result": "结论不可用：判据与目标不一致",
+        "verify": {"cred": {"file": "验收报告_20261028.md", "anchor": "P0-1"}},
+    }
+    bad_no_cred = {
+        "t": "2026-10-29T19:03:00+08:00", "actor": "dsh", "kind": "lesson",
+        "obs": "没有出处也敢标成功", "outcome": "success", "result": "应当被拒",
+        "verify": {},
+    }
+    bad_actor = {
+        "t": "2026-10-29T19:04:00+08:00", "actor": "robot", "kind": "lesson",
+        "obs": "非法宿主", "outcome": "failed", "result": "应当被拒",
+        "verify": {"cred": {"file": "x.md"}},
+    }
+    with open(path, "w", encoding="utf-8") as f:
+        for d in (good_success, good_unobs, good_failed, bad_no_cred, bad_actor):
+            f.write(json.dumps(d, ensure_ascii=False) + "\n")
+
+    out = I.ingest_lessons(st, path)
+    assert out["added"] == 3, f"应入 3 条，实 {out}"
+    assert out["rejected"] == 2, f"应拒 2 条（无出处 success / 非法 actor），实 {out}"
+    assert {e["line"] for e in out["errors"]} == {4, 5}, out["errors"]
+    assert any("出处" in e["error"] for e in out["errors"]), "无出处必须明确拒收理由"
+    assert out["promoted"], "摄入必须以 promote 收尾（写读耦合）"
+    assert st.count_episodes() == 3
+    # actor → subject 映射
+    got = {r["actor"]: r["subject"] for r in st.conn.execute(
+        "SELECT actor, subject FROM episodes")}
+    assert got.get(C.ACTOR_DSH) == C.SUBJECT_AGENT, got
+    assert got.get(C.ACTOR_CODEX) == C.SUBJECT_AGENT, got
+    assert got.get(C.ACTOR_ZCODE) == C.SUBJECT_AGENT, got
+    # source 必须是 session（与 timeline/manual 区分开）
+    srcs = {r["source"] for r in st.conn.execute("SELECT source FROM episodes")}
+    assert srcs == {C.SOURCE_SESSION}, srcs
+    # 可检索 + 段已落（promote 生效）
+    from agentctl.memory.retrieve import Retriever
+    rq = Retriever(st).query("段层 分仓 失效 主体 闸", k=5, subject=C.SUBJECT_AGENT)
+    assert any(h.get("source") == "episode" for h in rq["hits"]), "教训应可检索"
+    assert list(st.iter_segments(live_only=True)), "promote 应产出段"
+
+    # 断点续收：同文件重跑零新增零拒绝
+    out2 = I.ingest_lessons(st, path)
+    assert (out2["added"], out2["merged"], out2["rejected"]) == (0, 0, 0), out2
+    assert st.count_episodes() == 3
+    # 追加一行再跑 ⇒ 只吃新增那一行
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps({**good_success, "obs": "新增教训：段层分仓修复后复测"},
+                           ensure_ascii=False) + "\n")
+    out3 = I.ingest_lessons(st, path)
+    assert out3["added"] == 1, out3
+    assert st.count_episodes() == 4
+    st.close()
+
+
+# ── ⑰ 主体归因 actor（Phase 3）─────────────────────────────────────────────
+# 治的病：「谁写的」没有归因字段；分仓保持二元（人的不可被代理改写）。
+# 验收口径：actor 校验拒非法值、映射表正确、存量回填口径抽查、机器仓内跨宿主可见。
+
+def t_actor_attribution(tmp: str) -> None:
+    import agentctl.memory.intake as I
+
+    # 1) 词表校验 + 映射表
+    try:
+        Episode(t="2026-10-29T20:00:00+08:00", kind="click", outcome="success",
+                actor="robot").validate()
+        raise AssertionError("非法 actor 未被拒收")
+    except ValueError:
+        pass
+    for actor in C.VALID_ACTORS:
+        expect = C.SUBJECT_HUMAN if actor == C.ACTOR_HUMAN else C.SUBJECT_AGENT
+        assert C.subject_for_actor(actor) == expect, (actor, C.subject_for_actor(actor))
+    # 一致性双向：agent 绑 human 仓、human 绑 agent 仓都必须拒
+    st = MemoryStore(os.path.join(tmp, "v5_actor.db"))
+    for bad in ((C.ACTOR_ZCODE, C.SUBJECT_HUMAN), (C.ACTOR_HUMAN, C.SUBJECT_AGENT)):
+        try:
+            I.record_experience(st, kind="lesson", obs="映射不一致", outcome="failed",
+                                result="x", actor=bad[0], subject=bad[1])
+            raise AssertionError(f"subject/actor 不一致未被拒: {bad}")
+        except ValueError:
+            pass
+
+    # 2) 机器仓内跨宿主互相可见（这正是扩展的目的：ZCode 踩的坑 DSH 该看到）
+    cred = {"file": "docs/lessons_jsonl_v1.md"}
+    I.record_experience(st, kind="lesson", obs="跨宿主 归因 可见性 甲",
+                        outcome="success", result="ZCode 的结论", actor=C.ACTOR_ZCODE,
+                        verify={"cred": dict(cred)})
+    I.record_experience(st, kind="lesson", obs="跨宿主 归因 可见性 乙",
+                        outcome="success", result="Codex 的结论", actor=C.ACTOR_CODEX,
+                        verify={"cred": dict(cred)})
+    from agentctl.memory.recall import recall as _recall
+    rc = _recall(st, "跨宿主 归因 可见性", k=5)
+    actors = {h["actor"] for h in rc["hits"]}
+    assert actors >= {C.ACTOR_ZCODE, C.ACTOR_CODEX}, actors
+    assert "[" + C.ACTOR_ZCODE + "]" in rc["block"], rc["block"]
+    st.close()
+
+    # 3) 存量回填口径（宁可 unknown 不许猜）
+    legacy = os.path.join(tmp, "v5_actor_legacy.db")
+    con = sqlite3.connect(legacy)
+    con.executescript(
+        "CREATE TABLE meta(k TEXT PRIMARY KEY, v TEXT NOT NULL);"
+        "CREATE TABLE episodes("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, t TEXT NOT NULL, src_seq INTEGER,"
+        "kind TEXT NOT NULL, session_id TEXT NOT NULL DEFAULT '',"
+        "subject TEXT NOT NULL DEFAULT 'agent', screen_version INTEGER,"
+        "obs TEXT NOT NULL DEFAULT '', action TEXT NOT NULL DEFAULT '{}',"
+        "result TEXT NOT NULL DEFAULT '', outcome TEXT NOT NULL,"
+        "verify TEXT NOT NULL DEFAULT '{}', text TEXT NOT NULL DEFAULT '', embed BLOB,"
+        "recurrences INTEGER NOT NULL DEFAULT 1, source TEXT NOT NULL DEFAULT 'manual',"
+        "dedup_key TEXT NOT NULL DEFAULT '', UNIQUE(src_seq, t));"
+        "INSERT INTO episodes(t, src_seq, kind, session_id, obs, outcome, subject) VALUES"
+        "('2026-10-29T09:00:00+08:00', 11, 'click', 's-20261029-dayloop', '桌面 点击', 'success', 'human'),"
+        "('2026-10-29T09:01:00+08:00', NULL, 'click', 's-20261028-nightloop', '夜间 经验', 'success', 'agent'),"
+        "('2026-10-29T09:02:00+08:00', NULL, 'click', 's-zcode-recall-1', 'ZCode 经验', 'success', 'agent'),"
+        "('2026-10-29T09:03:00+08:00', NULL, 'click', 's-agent-forecast-verify', '无宿主名 会话', 'success', 'agent'),"
+        "('2026-10-29T09:04:00+08:00', NULL, 'click', 's-20261012-084533', '别的 会话', 'success', 'agent');"
+    )
+    con.commit()
+    con.close()
+    st2 = MemoryStore(legacy)
+    try:
+        # src_seq 优先于 session 提示：人的时间线不许被归因成 loop
+        assert st2.conn.execute(
+            "SELECT actor FROM episodes WHERE id=1").fetchone()[0] == C.ACTOR_HUMAN
+        assert st2.conn.execute(
+            "SELECT actor FROM episodes WHERE id=2").fetchone()[0] == C.ACTOR_NIGHTLOOP
+        assert st2.conn.execute(
+            "SELECT actor FROM episodes WHERE id=3").fetchone()[0] == C.ACTOR_ZCODE
+        # 认不出的必须 unknown（宁可不猜）
+        for i in (4, 5):
+            got = st2.conn.execute(
+                f"SELECT actor FROM episodes WHERE id={i}").fetchone()[0]
+            assert got == C.ACTOR_UNKNOWN, f"id{i} 猜错了: {got}"
+        assert str(st2.get_meta("v5_actor_backfill") or "").strip(), "迁移摘要缺失"
+        assert st2.get_meta("schema_version") == str(C.SCHEMA_VERSION)
+    finally:
+        st2.close()
+
+
 # ── 入口 ────────────────────────────────────────────────────────────────────
+
+def t_inject_v5() -> list[str]:
+    """v5 三组的注入自证：**把功能关掉，对应判据必须变红**（派单硬约束 4）。
+
+    ⑮ 关 DEDUP_ENABLED     → 同 obs 写两次断言必红
+    ⑯ 关 REQUIRE_PROVENANCE → 无出处 success 的拒收断言必红
+    ⑰ 破坏 actor→subject 映射 → 归因断言必红
+    返回被抓红的组名列表；任何一组没红就抛 AssertionError（判据是死的）。
+    """
+    import agentctl.memory.intake as I
+
+    base = tempfile.mkdtemp(prefix="p5_inject_v5_")
+    caught: list[str] = []
+
+    def expect_red(tag: str, fn) -> None:
+        try:
+            fn()
+        except AssertionError:
+            caught.append(tag)
+            return
+        raise AssertionError(f"注入后 {tag} 仍全绿 —— 该组判据没咬合")
+
+    saved_dedup = I.DEDUP_ENABLED
+    I.DEDUP_ENABLED = False
+    try:
+        expect_red("⑮", lambda: t_intake_dedup(os.path.join(base, "a")))
+    finally:
+        I.DEDUP_ENABLED = saved_dedup
+
+    saved_prov = I.REQUIRE_PROVENANCE
+    I.REQUIRE_PROVENANCE = False
+    try:
+        expect_red("⑯", lambda: t_lessons_ingest(os.path.join(base, "b")))
+    finally:
+        I.REQUIRE_PROVENANCE = saved_prov
+
+    saved_map = C.subject_for_actor
+    C.subject_for_actor = lambda actor: C.SUBJECT_HUMAN  # noqa: ARG005
+    try:
+        expect_red("⑰", lambda: t_actor_attribution(os.path.join(base, "c")))
+    finally:
+        C.subject_for_actor = saved_map
+    return caught
+
 
 def main() -> int:
     ap = argparse.ArgumentParser()
@@ -643,7 +942,9 @@ def main() -> int:
     args = ap.parse_args()
     if args.inject:
         t_inject_self()
-        print("inject 自证：谎言被抓住（判据活着）")
+        print("inject 自证：① 谎言被抓住（判据活着）")
+        caught = t_inject_v5()
+        print(f"inject 自证：v5 三组注入全部抓红 {caught}")
         return 0
 
     tmp = tempfile.mkdtemp(prefix="p5_mem_")
@@ -663,6 +964,9 @@ def main() -> int:
     check("⑫ 混合时区 promote 不崩", lambda: t_mixed_timezone(tmp))
     check("⑬ 时间倒序入库检索命中", lambda: t_time_inversion(tmp))
     check("⑭ v3 主体分仓（迁移/范围/新近回退）", lambda: t_subject_v3(tmp))
+    check("⑮ v5 intake 去重合并（recurrences/source）", lambda: t_intake_dedup(tmp))
+    check("⑯ v5 教训 JSONL（断点续收/出处强制/映射）", lambda: t_lessons_ingest(tmp))
+    check("⑰ v5 主体归因 actor（词表/映射/回填）", lambda: t_actor_attribution(tmp))
     if FAILS:
         print(f"RED x{len(FAILS)}")
         for f in FAILS:

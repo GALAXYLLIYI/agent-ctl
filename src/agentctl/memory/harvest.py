@@ -235,6 +235,9 @@ class TimelineHarvester:
                 session_id=session_id,
                 # v3 主体分仓：timeline 是**人的**桌面动作 ⇒ 人的情景记忆仓
                 subject=contract.SUBJECT_HUMAN,
+                # v5 来源流与归因（分仓语义不因归因放宽：human ⇒ human 仓）
+                source=contract.SOURCE_TIMELINE,
+                actor=contract.ACTOR_HUMAN,
                 src_seq=int(seq),
             )
             self.store.add_episode(ep)

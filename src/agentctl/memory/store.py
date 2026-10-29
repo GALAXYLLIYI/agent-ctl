@@ -62,6 +62,7 @@ class MemoryStore:
         self._migrate_segments()
         self._migrate_subject()
         self._migrate_segments_subject()
+        self._migrate_v5_intake()
 
         self.use_sqlite_vec = self._setup_vec(use_sqlite_vec)
         self._ensure_meta()
@@ -170,6 +171,133 @@ class MemoryStore:
             )
 
     # ── 初始化 ──────────────────────────────────────────────────────────────
+
+    def _migrate_v5_intake(self) -> None:
+        """v4→v5（2026-10-29 晚 · v5 扩展 Phase 1）：episodes 补
+        recurrences / source / dedup_key 三列，治「同一观测的循环写回堆行」
+        （真库 10k+ 里 95% 是同一观测重复，见派单背景①）。
+
+        幂等：列在即跳过 ALTER。
+        口径自愈（每次开库都跑，教训见 DSH 验收 P1-2）：
+          · `source='timeline' ⇔ src_seq 非空`——旧码直插落 DEFAULT 'manual'，必须纠正；
+          · `dedup_key` 空窗按批（≤500/次）补齐——旧码写入不填键，下次开库补上。
+        迁移摘要留 meta `v5_intake_backfill`（timeline/manual 计数），只首迁写。
+        """
+        cols = [r[1] for r in self.conn.execute("PRAGMA table_info(episodes)").fetchall()]
+        added = False
+        if "recurrences" not in cols:
+            self.conn.execute(
+                "ALTER TABLE episodes ADD COLUMN recurrences INTEGER NOT NULL DEFAULT 1"
+            )
+            added = True
+        if "source" not in cols:
+            self.conn.execute(
+                "ALTER TABLE episodes ADD COLUMN source TEXT NOT NULL DEFAULT 'manual'"
+            )
+            added = True
+        if "dedup_key" not in cols:
+            self.conn.execute(
+                "ALTER TABLE episodes ADD COLUMN dedup_key TEXT NOT NULL DEFAULT ''"
+            )
+            added = True
+        if "actor" not in cols:
+            # Phase 3 的 actor 并入同一次 v5 迁移：一小时里连着两次 ALTER 没意义，
+            # 而且 backfill 口径（session_id 前缀 / src_seq⇒human）要跟 source 一起算。
+            self.conn.execute(
+                "ALTER TABLE episodes ADD COLUMN actor TEXT NOT NULL DEFAULT 'unknown'"
+            )
+            added = True
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS ix_ep_dedup ON episodes(dedup_key)"
+        )
+        if added:
+            self.conn.execute(
+                "UPDATE episodes SET source='timeline' WHERE src_seq IS NOT NULL"
+            )
+            # actor 回填（宁可 unknown 不许猜）：src_seq ⇒ human；其余只认 session_id 里
+            # 明确写过的宿主名（ACTOR_SESSION_HINTS），认不出就保持 unknown。
+            self.conn.execute(
+                "UPDATE episodes SET actor='human' WHERE src_seq IS NOT NULL"
+            )
+            for _actor, _hint in contract.ACTOR_SESSION_HINTS:
+                if _actor == contract.ACTOR_HUMAN:
+                    continue
+                self.conn.execute(
+                    "UPDATE episodes SET actor=? "
+                    "WHERE actor='unknown' AND lower(session_id) LIKE ?",
+                    (_actor, f"%{_hint}%"),
+                )
+            self.conn.execute(
+                "INSERT INTO meta(k, v) VALUES('schema_version', ?) "
+                "ON CONFLICT(k) DO UPDATE SET v = excluded.v",
+                (str(contract.SCHEMA_VERSION),),
+            )
+            self.conn.commit()
+            if self.get_meta("v5_intake_backfill") is None:
+                n_tl = self.conn.execute(
+                    "SELECT COUNT(*) FROM episodes WHERE source='timeline'"
+                ).fetchone()[0]
+                n_mn = self.conn.execute(
+                    "SELECT COUNT(*) FROM episodes WHERE source='manual'"
+                ).fetchone()[0]
+                self.set_meta(
+                    "v5_intake_backfill",
+                    f"timeline={int(n_tl)} manual={int(n_mn)} at {_now_iso()}",
+                )
+            if self.get_meta("v5_actor_backfill") is None:
+                dist = dict(
+                    self.conn.execute(
+                        "SELECT actor, COUNT(*) FROM episodes GROUP BY actor"
+                    ).fetchall()
+                )
+                self.set_meta(
+                    "v5_actor_backfill",
+                    " ".join(f"{k}={int(v)}" for k, v in sorted(dist.items()))
+                    + f" at {_now_iso()}",
+                )
+        sv = self.get_meta("schema_version")
+        if sv != str(contract.SCHEMA_VERSION):
+            self.set_meta("schema_version", str(contract.SCHEMA_VERSION))
+        # 口径自愈（每次开库）
+        cur = self.conn.execute(
+            "UPDATE episodes SET source='timeline' "
+            "WHERE src_seq IS NOT NULL AND source <> 'timeline'"
+        )
+        if cur.rowcount:
+            self.conn.commit()
+        cur = self.conn.execute(
+            "UPDATE episodes SET actor='human' "
+            "WHERE src_seq IS NOT NULL AND actor <> 'human'"
+        )
+        if cur.rowcount:
+            self.conn.commit()
+        # 首迁一次全量补键（10k 行量级，一次过）；之后只按批补旧码写入的残行
+        self._backfill_dedup_keys(10 ** 9 if added else 500)
+
+    def _backfill_dedup_keys(self, limit: int = 500) -> int:
+        """给缺键的行补 dedup_key（按批，不阻塞开库）。旧码写入与历史行都走这条。"""
+        rows = self.conn.execute(
+            "SELECT id, subject, kind, obs, action, outcome FROM episodes "
+            "WHERE dedup_key = '' LIMIT ?",
+            (int(limit),),
+        ).fetchall()
+        if not rows:
+            return 0
+        n = 0
+        for r in rows:
+            try:
+                act = json.loads(r["action"] or "{}")
+            except ValueError:
+                act = {}
+            key = contract.dedup_key(
+                r["subject"] or contract.SUBJECT_AGENT, r["kind"], r["obs"], act, r["outcome"]
+            )
+            self.conn.execute(
+                "UPDATE episodes SET dedup_key = ? WHERE id = ?", (key, int(r["id"]))
+            )
+            n += 1
+        self.conn.commit()
+        return n
 
     def _setup_vec(self, mode: bool | None) -> bool:
         """按需加载 sqlite_vec 并建 vec0 影子表；返回最终是否启用。"""
@@ -336,8 +464,8 @@ class MemoryStore:
         cur = self.conn.execute(
             "INSERT OR IGNORE INTO episodes("
             "t, src_seq, kind, session_id, subject, screen_version, obs, action, "
-            "result, outcome, verify, text, embed"
-            ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "result, outcome, verify, text, embed, recurrences, source, dedup_key, actor"
+            ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 row["t"],
                 row["src_seq"],
@@ -352,6 +480,10 @@ class MemoryStore:
                 row["verify"],
                 row["text"],
                 blob,
+                row["recurrences"],
+                row["source"],
+                row["dedup_key"],
+                row["actor"],
             ),
         )
         if cur.rowcount == 0:
