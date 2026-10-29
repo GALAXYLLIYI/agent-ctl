@@ -192,9 +192,23 @@ def evaluate(cur, base):
         ok("A4 必留句：%d 条关键操作规则一条没丢" % len(MUST_KEEP))
 
     # ── A5 码表与 conventions ──────────────────────────────────────────────
+    # 2026-10-30 语义修正（仓主拍板）：原版把「schema_version 与基线不同」整体报红——
+    # 与契约自身规矩（tools.json _状态: "改动必须升 schema_version"）自相矛盾：
+    # 合法升版也红，等于惩罚守规矩的人。新语义：版本号必须**单调递增**（不许回退/不变时
+    # 码表也不许变），每次升版必须在 tools.json 里留 _2026-* 变更说明（可追溯）。
+    # error_codes / event_codes / conventions 键集仍冻结——码表变更走加码不减码。
     c5 = []
-    if cur.get("schema_version") != base.get("schema_version"):
-        c5.append("schema_version %r → %r" % (base.get("schema_version"), cur.get("schema_version")))
+    bv, cv = base.get("schema_version"), cur.get("schema_version")
+    try:
+        monotonic = (int(cv) >= int(bv))
+    except (TypeError, ValueError):
+        monotonic = False
+    if not monotonic:
+        c5.append("schema_version 必须单调不减（基线 %r → 现役 %r，回退或非数字）" % (bv, cv))
+    elif int(cv) > int(bv):
+        marks = [k for k in cur.keys() if str(k).startswith("_2026-")]
+        if not marks:
+            c5.append("schema_version %r → %r 升版但缺 _2026-* 变更说明（可追溯性）" % (bv, cv))
     for k in ("error_codes", "event_codes"):
         bk = sorted(x for x in (base.get(k) or {}) if not str(x).startswith("_"))
         ck = sorted(x for x in (cur.get(k) or {}) if not str(x).startswith("_"))
@@ -208,7 +222,11 @@ def evaluate(cur, base):
         for m in c5:
             red("A5 码表/口径：%s" % m)
     else:
-        ok("A5 码表与 conventions 与基线一致（schema_version / error_codes / event_codes 一个码没动）")
+        if int(cv) > int(bv):
+            ok("A5 码表与 conventions：schema_version %r → %r 单调升版且留痕；码表/键集零变更"
+               % (bv, cv))
+        else:
+            ok("A5 码表与 conventions 与基线一致（schema_version / error_codes / event_codes 一个码没动）")
 
     # ── A6 落点 ────────────────────────────────────────────────────────────
     try:
