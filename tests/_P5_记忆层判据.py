@@ -389,6 +389,40 @@ def t_tool_wiring(tmp: str) -> None:
         assert r3.get("ok") is not True, "未知 action 必须拒"
         r4 = core_mod.dispatch("ctl_memory", {"action": "query"}, actor="判据")
         assert r4.get("ok") is not True, "query 缺 text 必须拒"
+
+        # v3（2026-10-29）：recall action + subject 参数
+        from agentctl.memory.contract import Episode as _Ep, SUBJECT_AGENT as _SA, \
+            SUBJECT_HUMAN as _SH
+        from agentctl.memory.store import MemoryStore as _MS
+        _st = _MS(os.path.join(tmp, "p5_tool.db"))
+        try:
+            _st.add_episode(_Ep(t="2026-10-29T11:00:00+08:00", kind="type",
+                                outcome="success", obs="回测 突破 代理基线 结论",
+                                action={"type": "type", "target": "t1"},
+                                result="r", verify={"verdict": "success"},
+                                session_id="s-agent-t1", subject=_SA, src_seq=None))
+            _st.add_episode(_Ep(t="2026-10-29T11:01:00+08:00", kind="click",
+                                outcome="success", obs="回测 突破 人工复盘 笔记",
+                                action={"type": "click", "target": "t2"},
+                                result="r", verify={"verdict": "success"},
+                                session_id="s-human-t2", subject=_SH, src_seq=None))
+        finally:
+            _st.close()
+        r5 = core_mod.dispatch("ctl_memory", {"action": "recall", "text": "回测 突破 代理基线"},
+                               actor="判据")
+        assert r5.get("ok") is True, r5
+        rec = r5["data"]["结果"]
+        assert rec["recalled"] and rec["hits"], f"recall 应命中: {rec}"
+        assert all(h.get("subject") == _SA for h in rec["hits"]), "recall 默认只出 agent 仓"
+        assert rec.get("block"), "recall 必须带可出示 block"
+        r6 = core_mod.dispatch("ctl_memory", {"action": "recall", "text": "回测 突破",
+                                              "subject": "human"}, actor="判据")
+        assert r6.get("ok") is True
+        rec6 = r6["data"]["结果"]
+        assert all(h.get("subject") == _SH for h in rec6["hits"]), "human 范围混入 agent"
+        r7 = core_mod.dispatch("ctl_memory", {"action": "recall", "text": "回测 突破",
+                                              "subject": "robot"}, actor="判据")
+        assert r7.get("ok") is not True, "非法 subject 必须拒"
     finally:
         os.environ.pop("AGENTCTL_MEMORY_DB", None)
 

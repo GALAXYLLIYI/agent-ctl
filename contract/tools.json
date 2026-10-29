@@ -1,5 +1,5 @@
 {
-  "schema_version": 5,
+  "schema_version": 6,
   "_关于": "AgentCtl 的机器可读接口契约（草案 v1）。给 agent 直接读取用的——不是给人看的清单。人看的那份是 agent-manual 里的 agent_tools.json（老清单，保持不动）。",
   "_来源": "docs/详细设计_v1.md 第 6 章（接口契约），本仓库内相对路径",
   "_状态": "设计稿：字段名可能微调；实现前以本文件为冻结基线，改动必须升 schema_version",
@@ -1445,7 +1445,7 @@
     {
       "name": "ctl_memory",
       "title": "记忆库",
-      "description": "episode 记忆库只读口：query=语义检索（带出处与三值结局）；stats=计数。写入走 CLI agentctl.memory（拉取式）。",
+      "description": "episode 记忆库只读口：query=语义检索（带出处与三值结局，subject 可选分仓）；recall=结构化召回（分仓+地板+去重+出处，默认 agent 仓，供宿主干活前结构化取记忆）；stats=计数。写入走 CLI agentctl.memory（拉取式）。",
       "annotations": {
         "readOnlyHint": true,
         "destructiveHint": false,
@@ -1458,8 +1458,8 @@
         "properties": {
           "action": {
             "type": "string",
-            "enum": ["query", "stats"],
-            "description": "query=检索；stats=计数"
+            "enum": ["query", "recall", "stats"],
+            "description": "query=检索；recall=结构化召回；stats=计数"
           },
           "text": {
             "type": "string",
@@ -1468,6 +1468,11 @@
           "k": {
             "type": "integer",
             "description": "返回条数上限（1-20，默认 5）"
+          },
+          "subject": {
+            "type": "string",
+            "enum": ["agent", "human"],
+            "description": "v3 主体分仓：query 不传=全库；recall 不传=默认 agent。人的桌面情景记忆（human）不进代理决策上下文"
           }
         },
         "required": [
@@ -1475,7 +1480,7 @@
         ],
         "additionalProperties": false
       },
-      "returns": "统一信封。query→data.结果={hits:[{source,score,t,kind,obs,outcome,verify,…}],workflows}；stats→data={episodes,segments_live,harvest_cursor_seq,…}"
+      "returns": "统一信封。query→data.结果={hits:[{source,score,t,kind,obs,subject,outcome,verify,…}],workflows}；recall→data.结果={recalled,n,hits:[…],block}；stats→data={episodes,segments_live,harvest_cursor_seq,…}"
     }
   ],
   "_本版未列入（v1.1 补，列在这里是为了不和设计文档的完整清单打架）": {

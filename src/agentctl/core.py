@@ -7520,10 +7520,13 @@ def _t_quiz(a):
 
 
 def _t_memory(a):
-    """episode 记忆库**只读口**（记忆层刀 · 2026-10-26）。
+    """episode 记忆库**只读口**（记忆层刀 · 2026-10-26；v3 主体分仓 · 2026-10-29）。
 
     ★ query = 语义检索（episode 命中 + 段摘要 + workflow，带出处与三值结局）；
-      stats = 计数与游标。
+      subject=agent|human 可选（v3 主体分仓：不传=全库）。
+    ★ recall = 结构化召回（harness 义务版）：分仓+地板+去重+出处一次调用，
+      默认只出 agent 仓——供宿主在干活前结构化取记忆（recall_hook 的引擎级口径）。
+    ★ stats = 计数与游标。
     ★ 写入侧（harvest / compact / distill）**不进工具面** —— 「信息拉取式」铁律，
       走 CLI：python -m agentctl.memory {harvest|compact|distill}。
     ★ 惰性导入（_t_quiz 同款）：memory 子包不拖累 core 顶层。
@@ -7532,6 +7535,13 @@ def _t_memory(a):
     """
     import agentctl.memory as mem
     from agentctl.memory.retrieve import Retriever
+
+    def _subject_or_none(raw):
+        s = (str(raw or "").strip().lower()) or None
+        if s is not None and s not in mem.contract.VALID_SUBJECTS:
+            return None
+        return s
+
     action = (a.get("action") or "").strip().lower()
     if action == "query":
         text = str(a.get("text") or "")
@@ -7541,9 +7551,32 @@ def _t_memory(a):
             k = max(1, min(20, int(a.get("k") or 5)))
         except (TypeError, ValueError):
             return env(code=gate.CODE_NO_CTRL, warning="k 必须是整数（1-20）")
+        subject = _subject_or_none(a.get("subject"))
+        if a.get("subject") and subject is None:
+            return env(code=gate.CODE_NO_CTRL,
+                       warning="subject 非法（合法：agent / human）")
         store = mem.open_store()
         try:
-            out = Retriever(store).query(text, k=k)
+            out = Retriever(store).query(text, k=k, subject=subject)
+        finally:
+            store.close()
+        return env(ok=True, code=0, data={"结果": out})
+    if action == "recall":
+        text = str(a.get("text") or "")
+        if not text:
+            return env(code=gate.CODE_NO_CTRL, warning="recall 需要非空 text")
+        try:
+            k = max(1, min(20, int(a.get("k") or 3)))
+        except (TypeError, ValueError):
+            return env(code=gate.CODE_NO_CTRL, warning="k 必须是整数（1-20）")
+        subject = _subject_or_none(a.get("subject")) or mem.contract.SUBJECT_AGENT
+        if a.get("subject") and _subject_or_none(a.get("subject")) is None:
+            return env(code=gate.CODE_NO_CTRL,
+                       warning="subject 非法（合法：agent / human）")
+        from agentctl.memory.recall import recall as _recall
+        store = mem.open_store()
+        try:
+            out = _recall(store, text, k=k, subject=subject)
         finally:
             store.close()
         return env(ok=True, code=0, data={"结果": out})
@@ -7563,7 +7596,7 @@ def _t_memory(a):
         finally:
             store.close()
         return env(ok=True, code=0, data=data)
-    return env(code=gate.CODE_NO_CTRL, warning="未知 action（合法：query / stats）")
+    return env(code=gate.CODE_NO_CTRL, warning="未知 action（合法：query / recall / stats）")
 
 
 TOOLS = {
