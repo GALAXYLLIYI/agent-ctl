@@ -138,6 +138,14 @@ class Retriever:
         return out
 
     def _workflow_hits(self, qtext: str) -> list[dict]:
+        # v6.4（workflows 质检 2026-10-30）：meta 置 workflows_suspended=1 时不出示——
+        # 现存 25 条全部是动作类型序列（click browser browser），22/25 含 browser:eval
+        # 危险链且停留在已废弃时代；distill v2 重造前先隔离（数据不删）。
+        try:
+            if str(self.store.get_meta("workflows_suspended", "") or "") == "1":
+                return []
+        except Exception:  # noqa: BLE001 —— meta 不可读时按不暂停处理
+            pass
         q_tokens = set(contract.normalize_text(qtext).split())
         if not q_tokens:
             return []
